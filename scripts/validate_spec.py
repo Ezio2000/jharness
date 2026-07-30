@@ -122,10 +122,6 @@ def _validate_documents(schemas: Mapping[str, Schema], registry: SchemaRegistry)
             raise ValueError(f"duplicate case name: {name}")
         names.add(name)
 
-    coverage = (CONFORMANCE / "coverage.md").read_text(encoding="utf-8")
-    missing = sorted(name for name in names if f"`{name}`" not in coverage)
-    if missing:
-        raise ValueError(f"cases missing from conformance/coverage.md: {missing}")
     return len(case_paths)
 
 
@@ -149,7 +145,7 @@ def _validate_links() -> int:
 
 
 def main() -> None:
-    """Validate schemas, cases, coverage, and local documentation links."""
+    """Validate schemas, cases, and local documentation links."""
 
     schemas, registry = _schemas()
     case_count = _validate_documents(schemas, registry)

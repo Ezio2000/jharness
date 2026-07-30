@@ -100,6 +100,8 @@ def test_kernel_root_contains_the_documented_protocol_families() -> None:
 
 
 def test_only_documented_model_namespaces_are_public() -> None:
+    decorators = importlib.import_module("jharness.models.decorators")
+    assert set(decorators.__all__) == {"FallbackModel", "RetryingModel"}
     for namespace in (
         "jharness.models.openai",
         "jharness.models.anthropic",

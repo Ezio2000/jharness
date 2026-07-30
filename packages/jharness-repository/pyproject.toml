@@ -1,6 +1,6 @@
 [project]
 name = "jharness-repository"
-version = "0.3.1"
+version = "0.3.2"
 description = "Memory, SQLite, MySQL, and Redis checkpoint repositories for JHarness"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,7 +19,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "jharness-kernel==0.3.1",
+  "jharness-kernel==0.3.2",
 ]
 
 [project.optional-dependencies]
@@ -27,7 +27,7 @@ mysql = ["pymysql[rsa]>=1.2.0"]
 redis = ["redis>=8.0.1"]
 
 [project.urls]
-Documentation = "https://github.com/Ezio2000/jharness/tree/main/docs"
+Documentation = "https://github.com/Ezio2000/jharness/blob/main/docs/repositories.md"
 Repository = "https://github.com/Ezio2000/jharness.git"
 
 [build-system]

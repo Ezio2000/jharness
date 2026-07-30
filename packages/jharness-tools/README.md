@@ -1,38 +1,28 @@
 # jharness-tools
 
 Ready-to-use filesystem, shell, interaction, and child-agent tools implementing the
-public JHarness kernel tool contracts.
+JHarness kernel tool contracts.
 
 ```bash
-pip install jharness-tools
+uv add jharness-tools
 ```
 
 ```python
 from jharness.tools import GlobTool, GrepTool, ReadTool
 ```
 
-Installing this distribution installs the matching `jharness-kernel` version.
+Filesystem tools are rooted in one workspace and reject path escapes. `BashTool` uses
+a bounded non-interactive Bash process and a minimal environment by default, but it is
+not an operating-system sandbox: commands retain the filesystem and network access
+granted by the host. `inherit_environment=True` explicitly exposes the full host
+environment.
 
-## Security and Lifecycle Defaults
+Workspace path checks are not a mount namespace; mutually untrusted writers need
+dedicated filesystem isolation and hard-link controls. Process-tree cleanup is best
+effort, so containers—especially PID 1—must forward signals and reap child processes.
 
-`BashTool` starts Bash with `--noprofile --norc`, a bounded command, bounded output,
-and a minimal environment. The default environment copies only available platform
-keys needed for executable lookup, locale, home, and temporary directories. The
-explicit `environment` mapping overlays those values. Set `inherit_environment=True`
-only when exposing all host variables—including credentials and shell startup
-controls—is intended. Bash commands remain capable of every filesystem and network
-operation allowed by the operating system; the workspace working directory is not a
-sandbox.
-
-Process cleanup and workspace containment use the strongest supported platform
-primitives but do not create an operating-system sandbox. Deployment limitations for
-process trees, hard links, containers, and mutually untrusted writers are documented in
-the project [security policy](https://github.com/Ezio2000/jharness/blob/main/SECURITY.md).
-
-Filesystem tools reject path escapes and hide their private atomic-write temporary
-names. Search tools skip those names.
-
-`GrepTool` bounds files, bytes read, matches, per-match text, and total serialized
-output. `Agent` requires approval because it delegates a child run with host-selected
-capabilities. The host-owned `AgentBackend` owns authorization, idempotency, depth,
+Interaction tools suspend for a host response. Child-agent tools require a host-owned
+`AgentBackend`; the host remains responsible for authorization, idempotency,
 supervision, and telemetry.
+
+Installing this distribution installs the exact matching `jharness-kernel` version.

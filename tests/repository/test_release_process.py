@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import zipfile
 from email.message import Message
 from pathlib import Path
 from typing import cast
@@ -143,6 +144,52 @@ def test_distribution_verifier_rejects_inexact_repository_extras(
         )
 
 
+def _write_models_wheel(path: Path, *, include_decorators: bool) -> None:
+    info = "jharness_models-0.3.1.dist-info"
+    entries: dict[str, str | bytes] = {
+        "jharness/models/__init__.py": "",
+        "jharness/models/py.typed": "",
+        f"{info}/METADATA": (
+            "Metadata-Version: 2.4\n"
+            "Name: jharness-models\n"
+            "Version: 0.3.1\n"
+            "Requires-Dist: jharness-kernel==0.3.1\n"
+            "Requires-Dist: httpx>=0.27.0\n"
+        ),
+        f"{info}/RECORD": "",
+        f"{info}/WHEEL": "Wheel-Version: 1.0\nTag: py3-none-any\n",
+        f"{info}/licenses/LICENSE": (ROOT / "LICENSE").read_bytes(),
+    }
+    if include_decorators:
+        entries["jharness/models/decorators.py"] = ""
+    path.parent.mkdir()
+    with zipfile.ZipFile(path, mode="w") as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+
+
+def test_distribution_verifier_rejects_models_wheel_without_composition_module(
+    tmp_path: Path,
+) -> None:
+    filename = "jharness_models-0.3.1-py3-none-any.whl"
+    complete = tmp_path / "complete" / filename
+    missing = tmp_path / "missing" / filename
+    _write_models_wheel(complete, include_decorators=True)
+    _write_models_wheel(missing, include_decorators=False)
+
+    wheel = verify_distribution._verify_wheel(  # pyright: ignore[reportPrivateUsage]
+        complete
+    )
+    assert wheel.distribution == "jharness-models"
+    with pytest.raises(
+        ValueError,
+        match=r"jharness-models wheel is missing files: .*decorators\.py",
+    ):
+        verify_distribution._verify_wheel(  # pyright: ignore[reportPrivateUsage]
+            missing
+        )
+
+
 def test_release_workflow_builds_and_publishes_five_distributions() -> None:
     jobs = _jobs(_workflow("release.yml"))
     assert set(jobs) == {
@@ -177,8 +224,7 @@ def test_release_workflow_builds_and_publishes_five_distributions() -> None:
     assert _run(build, "Build immutable artifact set") == ("uv build --all-packages --out-dir dist")
     artifact_checks = _run(build, "Verify artifacts, imports, and checksums")
     assert "scripts/verify_distribution.py dist" in artifact_checks
-    assert "find_spec('pymysql') is None" in artifact_checks
-    assert "find_spec('redis') is None" in artifact_checks
+    assert '"${RUNNER_TEMP}/smoke/bin/python" -I scripts/verify_installed_api.py' in artifact_checks
     assert '"${repository_wheels[0]}[mysql,redis]"' in artifact_checks
     assert "sha256sum --check dist/SHA256SUMS" in artifact_checks
     assert "-name '*.whl' -o -name '*.tar.gz'" in artifact_checks
@@ -190,6 +236,11 @@ def test_release_workflow_builds_and_publishes_five_distributions() -> None:
     assert "-name '*.whl' -o -name '*.tar.gz'" in recovery_checks
     assert '| wc -l)" -eq 10' in recovery_checks
     assert "test -f dist/SHA256SUMS" in recovery_checks
+    pypi_imports = _run(jobs["verify-pypi"], "Install and import from PyPI")
+    assert "python -I scripts/verify_installed_api.py" in pypi_imports
+    pypi_checkout = _step(jobs["verify-pypi"], "Check out installed API smoke")
+    pypi_checkout_options = _mapping(pypi_checkout.get("with"), "PyPI smoke checkout")
+    assert pypi_checkout_options["ref"] == "${{ env.RELEASE_TAG }}"
 
     test_publish = _step(jobs["publish-testpypi"], "Publish with trusted publishing")
     pypi_publish = _step(jobs["publish-pypi"], "Publish with trusted publishing")
@@ -308,11 +359,14 @@ def test_readme_documents_distributions_and_public_modules() -> None:
 
 def test_testpypi_smoke_project_pins_all_distributions() -> None:
     script = (ROOT / "scripts" / "verify_testpypi.py").read_text()
+    installed_api = (ROOT / "scripts" / "verify_installed_api.py").read_text()
     for distribution in DISTRIBUTIONS:
         assert f'"{distribution}=={{version}}"' in script
         assert f'{distribution} = {{{{ index = "testpypi" }}}}' in script
     for module in MODULES:
-        assert module in script
+        assert module in installed_api
+    assert "verify_installed_api.py" in script
+    assert "from jharness.models.decorators import FallbackModel, RetryingModel" in installed_api
     assert script.count('{{ index = "testpypi" }}') == 5
 
 

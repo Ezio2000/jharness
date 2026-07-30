@@ -45,5 +45,5 @@ and per event before accumulation. Provider `Retry-After` values remain availabl
 error metadata, and semantic stream errors preserve their payload status and code
 even when delivered under HTTP 2xx.
 
-Kernel does not retry a partially observed stream. Retry decorators must not
-expose deltas from a failed attempt before retrying it.
+Kernel does not retry a partially observed stream. Retry and fallback decorators must
+not expose deltas from a failed attempt before switching attempts or models.

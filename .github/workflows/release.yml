@@ -119,7 +119,7 @@ jobs:
           uv run python scripts/verify_distribution.py dist
           uv venv "${RUNNER_TEMP}/smoke"
           uv pip install --python "${RUNNER_TEMP}/smoke/bin/python" dist/*.whl
-          "${RUNNER_TEMP}/smoke/bin/python" -I -c "import importlib.util; assert importlib.util.find_spec('pymysql') is None; assert importlib.util.find_spec('redis') is None; from jharness.kernel import Runtime; from jharness.models.openai import OpenAIChatCompletionsModel; from jharness.repository import MemoryRunRepository, MySQLRunRepository, RedisRunRepository, SQLiteRunRepository; from jharness.toolkit import ToolRegistry; from jharness.tools import ReadTool"
+          "${RUNNER_TEMP}/smoke/bin/python" -I scripts/verify_installed_api.py
           repository_wheels=(dist/jharness_repository-*.whl)
           test "${#repository_wheels[@]}" -eq 1
           uv pip install --python "${RUNNER_TEMP}/smoke/bin/python" "${repository_wheels[0]}[mysql,redis]"
@@ -308,6 +308,11 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - name: Check out installed API smoke
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
@@ -327,8 +332,7 @@ jobs:
               --with "jharness-models==$version" \
               --with "jharness-repository==$version" \
               --with "jharness-tools==$version" \
-              python -I -c \
-              "from jharness.kernel import Runtime; from jharness.models.openai import OpenAIChatCompletionsModel; from jharness.repository import MemoryRunRepository, MySQLRunRepository, RedisRunRepository, SQLiteRunRepository; from jharness.toolkit import ToolRegistry; from jharness.tools import ReadTool"; then
+              python -I scripts/verify_installed_api.py; then
               exit 0
             fi
             if [[ "$attempt" == 12 ]]; then exit 1; fi
