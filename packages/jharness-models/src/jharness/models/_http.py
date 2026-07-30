@@ -25,6 +25,7 @@ _CLIENT_OPTION_NAMES = frozenset(
     {
         "client",
         "headers",
+        "max_response_body_bytes",
         "max_sse_event_bytes",
         "max_sse_line_bytes",
         "profile",
@@ -33,6 +34,7 @@ _CLIENT_OPTION_NAMES = frozenset(
 )
 _DEFAULT_HTTP_TIMEOUT_SECONDS = 60.0
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
+_DEFAULT_MAX_RESPONSE_BODY_BYTES = 8 * 1024 * 1024
 _DEFAULT_MAX_SSE_LINE_BYTES = 256 * 1024
 _DEFAULT_MAX_SSE_EVENT_BYTES = 1024 * 1024
 
@@ -53,6 +55,7 @@ class ModelClientConfig(Generic[ProfileT]):
     model: str
     profile: ProfileT
     timeout: float | httpx.Timeout | None
+    max_response_body_bytes: int
     max_sse_line_bytes: int
     max_sse_event_bytes: int
     headers: Mapping[str, str]
@@ -92,6 +95,10 @@ def model_client_config(
             )
         ),
     )
+    max_response_body_bytes = _positive_int_option(
+        options.get("max_response_body_bytes", _DEFAULT_MAX_RESPONSE_BODY_BYTES),
+        "max_response_body_bytes",
+    )
     max_sse_line_bytes = _positive_int_option(
         options.get("max_sse_line_bytes", _DEFAULT_MAX_SSE_LINE_BYTES),
         "max_sse_line_bytes",
@@ -108,6 +115,7 @@ def model_client_config(
         model,
         profile,
         timeout,
+        max_response_body_bytes,
         max_sse_line_bytes,
         max_sse_event_bytes,
         dict(cast(Mapping[str, str] | None, options.get("headers")) or {}),
@@ -142,6 +150,13 @@ class ServerSentEvent:
     data: str
 
 
+class _ResponseBodyTooLarge(ValueError):
+    """A provider response exceeded the configured accumulation boundary."""
+
+    def __init__(self, maximum: int) -> None:
+        super().__init__(f"HTTP response exceeds the configured {maximum}-byte limit")
+
+
 async def invoke_json_model(
     *,
     client: httpx.AsyncClient | None,
@@ -153,21 +168,30 @@ async def invoke_json_model(
     decode: ResponseDecoder,
     errors: ModelErrorPolicy,
     response_shape_error: str,
+    max_response_body_bytes: int = _DEFAULT_MAX_RESPONSE_BODY_BYTES,
 ) -> ModelResponse:
     """Execute one JSON model request through the shared provider error boundary."""
 
     response: httpx.Response | None = None
     try:
         body = payload()
-        async with managed_async_client(client, timeout) as http:
-            response = await http.post(
+        async with (
+            managed_async_client(client, timeout) as http,
+            http.stream(
+                "POST",
                 url,
                 headers=headers(body),
                 json=body,
                 timeout=_effective_timeout(timeout, context),
+            ) as response,
+        ):
+            await ensure_success_response(
+                response,
+                errors,
+                max_response_body_bytes=max_response_body_bytes,
             )
-            await ensure_success_response(response, errors)
-            value: object = response.json()
+            response_body = await _read_response_body(response, max_response_body_bytes)
+            value: object = json.loads(response_body)
             if not isinstance(value, Mapping):
                 raise errors.codec_error(response_shape_error)
             decoded = cast(Mapping[str, object], value)
@@ -200,6 +224,7 @@ async def invoke_sse_model(
     emit_delta: DeltaSink | None,
     errors: ModelErrorPolicy,
     incomplete_error: str,
+    max_response_body_bytes: int = _DEFAULT_MAX_RESPONSE_BODY_BYTES,
     max_sse_line_bytes: int = _DEFAULT_MAX_SSE_LINE_BYTES,
     max_sse_event_bytes: int = _DEFAULT_MAX_SSE_EVENT_BYTES,
 ) -> ModelResponse:
@@ -216,6 +241,7 @@ async def invoke_sse_model(
         completed_response=completed_response,
         errors=errors,
         incomplete_error=incomplete_error,
+        max_response_body_bytes=max_response_body_bytes,
         max_sse_line_bytes=max_sse_line_bytes,
         max_sse_event_bytes=max_sse_event_bytes,
     )
@@ -241,6 +267,7 @@ async def _decoded_sse_steps(
     completed_response: Callable[[], ModelResponse],
     errors: ModelErrorPolicy,
     incomplete_error: str,
+    max_response_body_bytes: int,
     max_sse_line_bytes: int,
     max_sse_event_bytes: int,
 ) -> AsyncGenerator[tuple[Sequence[ModelDelta], ModelResponse | None]]:
@@ -259,7 +286,11 @@ async def _decoded_sse_steps(
                 timeout=_effective_timeout(timeout, context),
             ) as response,
         ):
-            await ensure_success_response(response, errors)
+            await ensure_success_response(
+                response,
+                errors,
+                max_response_body_bytes=max_response_body_bytes,
+            )
             async for frame in iter_server_sent_events(
                 response,
                 max_line_bytes=max_sse_line_bytes,
@@ -319,17 +350,16 @@ def _clamp_timeout_phase(value: float | None, remaining: float) -> float:
 async def ensure_success_response(
     response: httpx.Response,
     policy: ModelErrorPolicy,
+    *,
+    max_response_body_bytes: int = _DEFAULT_MAX_RESPONSE_BODY_BYTES,
 ) -> None:
-    """Accept only 2xx responses and preserve the complete HTTP error envelope."""
+    """Accept only 2xx responses and preserve one bounded HTTP error envelope."""
 
     if 200 <= response.status_code < 300:
         return
+    response_body = await _read_response_body(response, max_response_body_bytes)
     try:
-        _ = response.text
-    except httpx.ResponseNotRead:
-        await response.aread()
-    try:
-        body = response.json()
+        body: object = json.loads(response_body)
     except ValueError:
         body = None
     raise ModelError(
@@ -337,11 +367,33 @@ async def ensure_success_response(
             body,
             policy,
             status_code=response.status_code,
-            response_text=response.text or response.reason_phrase or "provider error",
+            response_text=(
+                response_body.decode("utf-8", errors="replace")
+                or response.reason_phrase
+                or "provider error"
+            ),
             request_id=response_request_id(response, policy.request_id_headers),
             metadata=response_error_metadata(response),
         )
     )
+
+
+async def _read_response_body(response: httpx.Response, maximum: int) -> bytes:
+    declared = response.headers.get("content-length")
+    if declared is not None:
+        try:
+            declared_bytes = int(declared)
+        except ValueError:
+            declared_bytes = 0
+        if declared_bytes > maximum:
+            raise _ResponseBodyTooLarge(maximum)
+
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(chunk) > maximum - len(body):
+            raise _ResponseBodyTooLarge(maximum)
+        body.extend(chunk)
+    return bytes(body)
 
 
 async def iter_server_sent_events(
@@ -491,6 +543,12 @@ def _model_error(
             code, retryable = exc.__class__.__name__, True
         elif isinstance(exc, httpx.HTTPError):
             code, retryable = exc.__class__.__name__, False
+        elif isinstance(exc, _ResponseBodyTooLarge):
+            code = "response_too_large"
+            retryable = _is_retryable_status(
+                None if response is None else response.status_code,
+                policy,
+            )
         elif isinstance(exc, policy.codec_error):
             code, retryable = "codec_error", False
         elif isinstance(exc, json.JSONDecodeError):
@@ -561,10 +619,18 @@ def _body_error_info(
         code=code or "provider_error",
         status_code=status_code,
         retryable=(
-            status_code in _RETRYABLE_STATUS_CODES
-            or status_code in policy.additional_retryable_status_codes
-            or code in policy.retryable_error_codes
+            _is_retryable_status(status_code, policy) or code in policy.retryable_error_codes
         ),
         request_id=request_id or body_request_id,
         metadata={} if metadata is None else metadata,
+    )
+
+
+def _is_retryable_status(
+    status_code: int | None,
+    policy: ModelErrorPolicy,
+) -> bool:
+    return (
+        status_code in _RETRYABLE_STATUS_CODES
+        or status_code in policy.additional_retryable_status_codes
     )

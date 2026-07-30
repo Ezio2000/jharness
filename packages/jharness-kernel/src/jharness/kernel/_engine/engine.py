@@ -151,7 +151,11 @@ class Engine:
     async def _initialize(self) -> Checkpoint:
         request = self._request
         starting = None if isinstance(request, StartRequest) else request.checkpoint
-        repository = self._config.repository or EphemeralRepository(starting)
+        repository = (
+            self._config.repository
+            if self._config.repository is not None
+            else EphemeralRepository(starting)
+        )
         self._committer = Committer(repository, timeout_seconds=self._config.repository_timeout)
         context = (
             expect_instance(request.context, RunContext, "start context")

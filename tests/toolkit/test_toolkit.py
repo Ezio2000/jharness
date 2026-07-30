@@ -147,6 +147,51 @@ async def test_binding_preserves_waiting_result_and_validates_its_output() -> No
     assert result.suspension.wait_id == "ticket-1"
 
 
+async def test_binding_preserves_framework_failures_outside_the_success_schema() -> None:
+    spec = ToolSpec(
+        "guarded",
+        "guarded",
+        {"type": "object"},
+        {
+            "type": "object",
+            "required": ["value"],
+            "properties": {"value": {"type": "integer"}},
+            "additionalProperties": False,
+        },
+        execution=ToolExecution(read_only=True, idempotent=True),
+    )
+
+    @dataclass(slots=True)
+    class FailingTool:
+        spec: ToolSpec
+        calls: int = 0
+
+        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+            del call, context
+            self.calls += 1
+            raise RuntimeError("open")
+
+    failing = FailingTool(spec)
+    breaker = CircuitBreakingTool(failing, failure_threshold=1)
+    call = ToolCall("call", "guarded")
+    with pytest.raises(RuntimeError, match="open"):
+        await breaker.invoke(call, context())
+
+    catalog = await ToolRegistry((breaker,)).open_catalog()
+    circuit_result = await catalog.bind(call).invoke(context())
+    assert isinstance(circuit_result, SettledResult)
+    assert isinstance(circuit_result.outcome, ToolFailure)
+    assert circuit_result.outcome.error.code == "circuit_open"
+
+    retry = RetryingTool(ValueTool(spec, {"value": 1}))
+    cancelled_context = ToolContext(RunContext("run-1", 1.0), no_progress, lambda: True)
+    retry_catalog = await ToolRegistry((retry,)).open_catalog()
+    cancelled_result = await retry_catalog.bind(call).invoke(cancelled_context)
+    assert isinstance(cancelled_result, SettledResult)
+    assert isinstance(cancelled_result.outcome, ToolFailure)
+    assert cancelled_result.outcome.error.code == "cancelled"
+
+
 async def test_binding_rejects_an_unwrapped_outcome() -> None:
     @dataclass(frozen=True, slots=True)
     class InvalidTool:

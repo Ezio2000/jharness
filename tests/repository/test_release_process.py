@@ -34,6 +34,12 @@ _MYSQL_IMAGE = (
     "mysql:8.4.10@sha256:c592c15aaf4a1961e15d82eb31ea5987dda862d1c4b1e93424438c0e91dc1f8d"
 )
 _REDIS_IMAGE = "redis:8.4.4@sha256:c44528447fa07ed62bdb0c1944cba54f8cad6a4e4a49ada9d4843b5b07d03227"
+_REQUIRED_MODEL_FILES = {
+    "anthropic/__init__.py",
+    "decorators.py",
+    "deepseek/__init__.py",
+    "openai/__init__.py",
+}
 
 
 def _mapping(value: object, label: str) -> dict[str, object]:
@@ -144,7 +150,7 @@ def test_distribution_verifier_rejects_inexact_repository_extras(
         )
 
 
-def _write_models_wheel(path: Path, *, include_decorators: bool) -> None:
+def _write_models_wheel(path: Path, *, missing_file: str | None = None) -> None:
     info = "jharness_models-0.3.1.dist-info"
     entries: dict[str, str | bytes] = {
         "jharness/models/__init__.py": "",
@@ -160,22 +166,25 @@ def _write_models_wheel(path: Path, *, include_decorators: bool) -> None:
         f"{info}/WHEEL": "Wheel-Version: 1.0\nTag: py3-none-any\n",
         f"{info}/licenses/LICENSE": (ROOT / "LICENSE").read_bytes(),
     }
-    if include_decorators:
-        entries["jharness/models/decorators.py"] = ""
+    for required_file in _REQUIRED_MODEL_FILES:
+        if required_file != missing_file:
+            entries[f"jharness/models/{required_file}"] = ""
     path.parent.mkdir()
     with zipfile.ZipFile(path, mode="w") as archive:
         for name, content in entries.items():
             archive.writestr(name, content)
 
 
-def test_distribution_verifier_rejects_models_wheel_without_composition_module(
+@pytest.mark.parametrize("missing_file", sorted(_REQUIRED_MODEL_FILES))
+def test_distribution_verifier_requires_every_public_models_namespace(
     tmp_path: Path,
+    missing_file: str,
 ) -> None:
     filename = "jharness_models-0.3.1-py3-none-any.whl"
     complete = tmp_path / "complete" / filename
     missing = tmp_path / "missing" / filename
-    _write_models_wheel(complete, include_decorators=True)
-    _write_models_wheel(missing, include_decorators=False)
+    _write_models_wheel(complete)
+    _write_models_wheel(missing, missing_file=missing_file)
 
     wheel = verify_distribution._verify_wheel(  # pyright: ignore[reportPrivateUsage]
         complete
@@ -183,7 +192,7 @@ def test_distribution_verifier_rejects_models_wheel_without_composition_module(
     assert wheel.distribution == "jharness-models"
     with pytest.raises(
         ValueError,
-        match=r"jharness-models wheel is missing files: .*decorators\.py",
+        match=rf"jharness-models wheel is missing files: .*{re.escape(missing_file)}",
     ):
         verify_distribution._verify_wheel(  # pyright: ignore[reportPrivateUsage]
             missing
@@ -236,11 +245,22 @@ def test_release_workflow_builds_and_publishes_five_distributions() -> None:
     assert "-name '*.whl' -o -name '*.tar.gz'" in recovery_checks
     assert '| wc -l)" -eq 10' in recovery_checks
     assert "test -f dist/SHA256SUMS" in recovery_checks
+    assert (
+        'uv run --locked python scripts/verify_release.py --tag "$RELEASE_TAG"' in recovery_checks
+    )
+    assert "uv run --locked python scripts/verify_distribution.py dist" in recovery_checks
     pypi_imports = _run(jobs["verify-pypi"], "Install and import from PyPI")
     assert "python -I scripts/verify_installed_api.py" in pypi_imports
     pypi_checkout = _step(jobs["verify-pypi"], "Check out installed API smoke")
     pypi_checkout_options = _mapping(pypi_checkout.get("with"), "PyPI smoke checkout")
     assert pypi_checkout_options["ref"] == "${{ env.RELEASE_TAG }}"
+    assert (
+        _run(
+            jobs["verify-testpypi"],
+            "Install from TestPyPI and run smoke examples",
+        )
+        == 'uv run --locked python scripts/verify_testpypi.py "${RELEASE_TAG#v}"'
+    )
 
     test_publish = _step(jobs["publish-testpypi"], "Publish with trusted publishing")
     pypi_publish = _step(jobs["publish-pypi"], "Publish with trusted publishing")
@@ -367,6 +387,8 @@ def test_testpypi_smoke_project_pins_all_distributions() -> None:
         assert module in installed_api
     assert "verify_installed_api.py" in script
     assert "from jharness.models.decorators import FallbackModel, RetryingModel" in installed_api
+    for namespace in ("jharness.models.anthropic", "jharness.models.deepseek"):
+        assert namespace in installed_api
     assert script.count('{{ index = "testpypi" }}') == 5
 
 

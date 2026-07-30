@@ -24,6 +24,7 @@ from jharness.kernel import (
     ToolCatalog,
     ToolContext,
     ToolError,
+    ToolFailure,
     ToolResult,
     ToolSpec,
     WaitingResult,
@@ -135,7 +136,7 @@ class _Binding:
     async def invoke(self, context: ToolContext) -> ToolResult:
         result = _ensure_result(await self._entry.tool.invoke(self.call, context))
         validator = self._entry.output_validator
-        if validator is not None:
+        if validator is not None and not isinstance(result.outcome, ToolFailure):
             try:
                 validator.validate(thaw_json_value(result.outcome.structured_content))
             except ValidationError as exc:

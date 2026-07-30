@@ -7,7 +7,6 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from fractions import Fraction
 from math import isfinite
 from typing import Any, Literal, cast
 
@@ -26,67 +25,29 @@ from jharness.kernel import (
     freeze_json_value,
     thaw_json_value,
 )
-from jharness.tools.interaction._schema import (
+from jharness.tools.interaction._contract import (
+    CANONICAL_REQUIRED_QUESTION_FIELDS,
+    COMMON_QUESTION_FIELDS,
     DEFAULT_MAX_OPTIONS,
     DEFAULT_MAX_PROMPT_CHARS,
     DEFAULT_MAX_QUESTIONS,
     OPTION_VALUE_CHARS,
+    QUESTION_KIND_FIELDS,
     SCHEMA_VERSION,
     SUPPORTED_QUESTION_KINDS,
+    integer_answer_exists,
+    is_step_aligned,
+)
+from jharness.tools.interaction._schema import (
     QuestionValidationError,
     build_contract_id,
     build_request_id,
-    integer_answer_exists,
     normalize_questions,
     validate_enabled_kinds,
 )
 
 QuestionStatus = Literal["answered", "cancelled"]
 
-_QUESTION_KINDS = frozenset(
-    {
-        "confirm",
-        "single_choice",
-        "multiple_choice",
-        "text",
-        "number",
-        "date",
-        "scale",
-        "ranking",
-    }
-)
-_COMMON_FIELDS = frozenset({"id", "kind", "prompt", "description", "required"})
-_KIND_FIELDS: Mapping[str, frozenset[str]] = {
-    "confirm": frozenset({"default"}),
-    "single_choice": frozenset({"options", "allow_custom", "default"}),
-    "multiple_choice": frozenset(
-        {"options", "allow_custom", "min_selections", "max_selections", "default"}
-    ),
-    "text": frozenset({"multiline", "placeholder", "min_length", "max_length", "default"}),
-    "number": frozenset({"minimum", "maximum", "step", "integer_only", "default"}),
-    "date": frozenset({"minimum", "maximum", "default"}),
-    "scale": frozenset(
-        {
-            "minimum",
-            "maximum",
-            "step",
-            "minimum_label",
-            "maximum_label",
-            "default",
-        }
-    ),
-    "ranking": frozenset({"options", "min_ranked", "max_ranked", "default"}),
-}
-_KIND_REQUIRED_FIELDS: Mapping[str, frozenset[str]] = {
-    "confirm": frozenset(),
-    "single_choice": frozenset({"options", "allow_custom"}),
-    "multiple_choice": frozenset({"options", "allow_custom", "min_selections", "max_selections"}),
-    "text": frozenset({"multiline", "min_length", "max_length"}),
-    "number": frozenset({"integer_only"}),
-    "date": frozenset(),
-    "scale": frozenset({"minimum", "maximum", "step"}),
-    "ranking": frozenset({"options", "min_ranked", "max_ranked"}),
-}
 _DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 _QUESTION_ID_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 
@@ -402,7 +363,7 @@ def _validate_question(
     if _QUESTION_ID_PATTERN.fullmatch(question_id) is None:
         raise ValueError(f"{label}.id has an invalid format")
     kind = _non_empty_string(question["kind"], f"{label}.kind")
-    if kind not in _QUESTION_KINDS:
+    if kind not in SUPPORTED_QUESTION_KINDS:
         raise ValueError(f"{label}.kind is unsupported: {kind}")
     if kind not in enabled_kinds:
         raise ValueError(f"{label}.kind is not enabled: {kind}")
@@ -420,8 +381,10 @@ def _validate_question(
             minimum=0,
             maximum=max_prompt_chars,
         )
-    allowed = _COMMON_FIELDS | _KIND_FIELDS[kind]
-    required = frozenset({"id", "kind", "prompt", "required"}) | _KIND_REQUIRED_FIELDS[kind]
+    allowed = COMMON_QUESTION_FIELDS | QUESTION_KIND_FIELDS[kind]
+    required = (
+        frozenset({"id", "kind", "prompt", "required"}) | CANONICAL_REQUIRED_QUESTION_FIELDS[kind]
+    )
     _require_exact_keys(question, label, required=required, allowed=allowed)
     _validate_display_limits(
         question,
@@ -748,20 +711,8 @@ def _validate_numeric_value(
         return
     step = cast(int | float, question["step"])
     base = minimum if minimum is not None else default_base
-    if not _is_step_aligned(value, step, base):
+    if not is_step_aligned(value, step, base):
         raise ValueError(f"{label} must align to step {step} from base {base}")
-
-
-def _is_step_aligned(value: int | float, step: int | float, base: int | float) -> bool:
-    try:
-        exact_distance = (_number_fraction(value) - _number_fraction(base)) / _number_fraction(step)
-    except (OverflowError, ValueError, ZeroDivisionError):
-        return False
-    return exact_distance.denominator == 1
-
-
-def _number_fraction(value: int | float) -> Fraction:
-    return Fraction(value) if isinstance(value, int) else Fraction(str(value))
 
 
 def _current_waiting_outcome(

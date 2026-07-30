@@ -103,8 +103,10 @@ phases. Passing `timeout=None` disables the HTTP phase timeout, not the run dead
 Complete responses and SSE streams produce the same `ModelResponse` type. Streaming
 deltas are ordered and backpressured through the host sink. Provider transport,
 payload, and stream failures become structured `ModelError` values; exceptions raised
-by the host sink remain unchanged. SSE line and event sizes are bounded and can be
-configured downward or upward with positive limits.
+by the host sink remain unchanged. Complete JSON response bodies and HTTP error bodies
+share an 8 MiB default bound, configurable with a positive
+`max_response_body_bytes`. SSE line and event sizes have additional positive,
+configurable bounds.
 
 Provider payloads and codecs stay in `jharness.models`; they never become durable
 kernel wire data. The package implements OpenAI Chat Completions and Anthropic

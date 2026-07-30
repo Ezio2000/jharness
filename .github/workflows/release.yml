@@ -159,8 +159,8 @@ jobs:
           test "$(find dist -maxdepth 1 -type f \( -name '*.whl' -o -name '*.tar.gz' \) | wc -l)" -eq 10
           test -f dist/SHA256SUMS
           sha256sum --check dist/SHA256SUMS
-          python scripts/verify_release.py --tag "$RELEASE_TAG"
-          python scripts/verify_distribution.py dist
+          uv run --locked python scripts/verify_release.py --tag "$RELEASE_TAG"
+          uv run --locked python scripts/verify_distribution.py dist
 
       - name: Store verified coordinated artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -245,7 +245,7 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
 
       - name: Install from TestPyPI and run smoke examples
-        run: python scripts/verify_testpypi.py "${RELEASE_TAG#v}"
+        run: uv run --locked python scripts/verify_testpypi.py "${RELEASE_TAG#v}"
 
   publish-pypi:
     name: Publish ${{ matrix.project }} to PyPI

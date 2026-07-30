@@ -6,6 +6,22 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-30
+
+### Changed
+
+- Consolidated AskQuestion metadata and exact numeric rules into one private contract
+  owner, and consolidated SQLite/MySQL history-manifest policy into one pure shared
+  implementation.
+- Expanded release artifact checks to cover every public model namespace and made all
+  release scripts use the locked uv environment.
+
+### Fixed
+
+- Preserved explicitly supplied falsey repositories and framework tool failures through
+  runtime execution.
+- Bounded complete JSON and HTTP error response accumulation with a configurable limit.
+
 ## [0.3.2] - 2026-07-30
 
 ### Added
@@ -113,7 +129,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Sixty-six deterministic conformance cases and a standard tool catalog.
 - Provider-neutral lifecycle, model, tool, event, wire, and trace contracts.
 
-[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/Ezio2000/jharness/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Ezio2000/jharness/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Ezio2000/jharness/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Ezio2000/jharness/compare/v0.2.2...v0.3.0
