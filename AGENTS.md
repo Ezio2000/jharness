@@ -54,7 +54,7 @@ Every distribution owns only its `jharness.<component>` namespace portion and ne
 - External model HTTP/SSE shapes stay in `jharness.models`; tool argument and
   structured-result validation stay in `jharness.toolkit`.
 - Any observable durable behavior change updates code, schemas, normative Markdown,
-  conformance cases, `conformance/coverage.md`, and focused tests together.
+  conformance cases, and focused tests together.
 - Replace obsolete shapes and package names directly; do not preserve old paths.
 
 ## Development

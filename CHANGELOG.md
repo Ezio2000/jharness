@@ -6,6 +6,23 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-30
+
+### Added
+
+- Added provider-neutral `RetryingModel` and `FallbackModel` composition with
+  bounded server-aware jitter, monotonic deadline accounting, safe capability
+  intersection, and no retry or fallback after a delta reaches the host.
+- Added reusable installed-artifact API verification to coordinated TestPyPI and PyPI
+  release checks.
+
+### Changed
+
+- Consolidated user, architecture, contract, and repository documentation around
+  authoritative sources while removing duplicate guides and case-name inventories.
+- Clarified portable JSON depth, lexical integer, safe number conversion, opaque-data,
+  and trace-verification boundaries.
+
 ## [0.3.1] - 2026-07-23
 
 ### Added
@@ -96,7 +113,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Sixty-six deterministic conformance cases and a standard tool catalog.
 - Provider-neutral lifecycle, model, tool, event, wire, and trace contracts.
 
-[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/Ezio2000/jharness/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Ezio2000/jharness/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Ezio2000/jharness/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/Ezio2000/jharness/compare/v0.2.1...v0.2.2

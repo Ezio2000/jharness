@@ -1,7 +1,7 @@
-"""Concrete model provider adapters.
+"""Provider adapters and model composition for JHarness.
 
-Import provider-specific adapters from their provider namespace, for example
-`jharness.models.openai`.
+Import concrete APIs from their provider namespace or from
+`jharness.models.decorators`.
 """
 
 __all__: list[str] = []

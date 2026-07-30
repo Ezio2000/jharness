@@ -1,25 +1,19 @@
 # jharness-toolkit
 
-JHarness tool registration, JSON Schema validation, Python function adaptation,
-retry, and circuit-breaking utilities.
+Tool registration, Python function adaptation, JSON Schema validation, retry, and
+circuit breaking for JHarness.
 
 ```bash
-pip install jharness-toolkit
+uv add jharness-toolkit
 ```
 
 ```python
-from jharness.toolkit import ToolRegistry
+from jharness.toolkit import ToolRegistry, function_tool
 ```
 
-Installing this distribution installs the matching `jharness-kernel` version.
+`ToolRegistry` validates tool arguments and, when a tool declares an output schema,
+its result's `structured_content`. `RetryingTool` retries only selected implementation
+exceptions and requires an idempotent tool when more than one attempt is configured.
+`CircuitBreakingTool` is an in-process policy, not a distributed rate limiter.
 
-`RetryingTool` accepts an explicit tuple of retryable exception classes. Retries are
-available only for tools whose execution facts declare `idempotent=True`; settled
-tool failures are returned immediately. Exhaustion raises `RetryExhaustedError` with
-the ordered attempt errors, and retry delays use bounded exponential backoff with
-jitter while observing cooperative cancellation.
-
-`CircuitBreakingTool` is a closed/open/half-open circuit. An open circuit rejects
-calls until `recovery_timeout_seconds` elapses, then permits one probe. Success resets
-the circuit and failure reopens it. These decorators are in-memory policies for one
-process and are not a substitute for a distributed rate limiter or durable breaker.
+Installing this distribution installs the exact matching `jharness-kernel` version.

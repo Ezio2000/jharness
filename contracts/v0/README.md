@@ -1,127 +1,73 @@
-# JHarness v0 Contract Map
+# JHarness v0 Contracts
 
-`contracts/v0` is the project source of truth for portable persistence and transport
-shapes. Each portable value has one authoritative representation independent of
-provider payloads and Python object layout.
+This directory is the source of truth for provider-neutral behavior and portable JSON
+shapes. Provider payloads, Python object layout, and repository storage formats are not
+part of this contract.
 
-Schema identifiers use the non-resolving publication namespace:
+## Behavior
 
-```text
-https://jharness.invalid/spec/v0/<file>.schema.json
-```
-
-Project validators and conformance code resolve every id from this directory. They
-must not fetch schemas over the network.
-
-## Normative Documents
-
-- `state-machine.md`: flat lifecycle, transitions, metrics, and checkpoint
-  boundaries;
-- `run-control.md`: Runtime/Invocation start, continue, resume, control,
-  deadline, and precedence;
-- `repository.md`: atomic checkpoint persistence and cancellation safety;
-- `tool-scheduling.md`: binding, approval, prefix batching, execution, and
-  atomic tool commit;
-- `model-stream.md`: one model operation and four live delta variants;
-- `run-trace.md`: compact trace construction and deterministic verification.
-
-## Schema Index
-
-| File | Owns |
+| Concern | Contract |
 | --- | --- |
-| `messages.schema.json` | Content parts, one canonical artifact payload, tool calls, one model-visible tool outcome, and messages. |
-| `model-request.schema.json` | Provider-neutral request, model options, tool choice, and response format. |
-| `model-response.schema.json` | Complete provider-neutral response and usage. |
-| `model-error.schema.json` | Structured provider-neutral model failure. |
-| `tools.schema.json` | Tool specs, execution facts, and approval risk. |
-| `tool-result.schema.json` | Tool outcome plus host-only waiting suspension. |
-| `approval.schema.json` | Ordered approval requests and decisions. |
-| `limits.schema.json` | Portable run budgets and bounded concurrency. |
-| `state.schema.json` | Flat lifecycle, active resume targets, suspension, and metrics. |
-| `run-context.schema.json` | Stable run context and host correlation. |
-| `run-snapshot.schema.json` | Revisioned durable run aggregate nested in a checkpoint. |
-| `checkpoint.schema.json` | Atomic checkpoint, semantic fact, and compact RunView. |
-| `run-request.schema.json` | Start request and checkpoint-based continue/resume requests. |
-| `events.schema.json` | Invocation-local observation and checkpoint commit events. |
-| `run-trace.schema.json` | One header plus compact event entries for verification. |
+| Lifecycle, metrics, and checkpoints | [State machine](state-machine.md) |
+| Start, continue, resume, controls, and deadlines | [Run control](run-control.md) |
+| Atomic persistence and cancellation safety | [Repository](repository.md) |
+| Tool binding, approval, batching, and execution | [Tool scheduling](tool-scheduling.md) |
+| Complete and streaming model responses | [Model stream](model-stream.md) |
+| Trace construction and deterministic verification | [Run trace](run-trace.md) |
 
-Versioned aggregate wires (`Checkpoint`, invocation event, and trace) carry
-`schema_version` only on their top-level envelope. Nested domain values do not
-repeat it. Snapshot has no version field because it is recovered only as part
-of a versioned checkpoint.
+## Portable Schemas
 
-## Offline Reference Graph
+| Schema | Owns |
+| --- | --- |
+| `messages.schema.json` | Content, artifacts, tool calls, outcomes, and messages |
+| `model-request.schema.json` | Model options, tool choice, response format, and request |
+| `model-response.schema.json` | Complete response and usage |
+| `model-error.schema.json` | Provider-neutral model failure |
+| `tools.schema.json` | Tool specifications, execution facts, and risk |
+| `tool-result.schema.json` | Tool outcomes and waiting suspension |
+| `approval.schema.json` | Approval requests and decisions |
+| `limits.schema.json` | Run budgets and concurrency |
+| `state.schema.json` | Lifecycle, suspension, and metrics |
+| `run-context.schema.json` | Run identity, deadline, and host correlation |
+| `run-snapshot.schema.json` | Revisioned durable aggregate |
+| `checkpoint.schema.json` | Checkpoint, fact, and compact run view |
+| `run-request.schema.json` | Start, continue, and resume requests |
+| `events.schema.json` | Invocation observation and checkpoint events |
+| `run-trace.schema.json` | Trace header and entries |
 
-```text
-messages
-├── model-request ──> tools
-├── model-response
-└── tool-result ──> state
+Schema IDs use `https://jharness.invalid/spec/v0/<file>.schema.json` and resolve
+offline within this directory. Only versioned top-level envelopes carry
+`schema_version`.
 
-state ──> messages, model-response
-run-snapshot ──> run-context, messages, state
-checkpoint ──> run-snapshot, state, model-response
-run-request ──> checkpoint, messages, run-context, state
-approval ──> messages, tools, state
-events ──> approval, checkpoint, messages, model-response
-run-trace ──> events, checkpoint
-```
+## Portable JSON Boundary
 
-Every relative `$ref` resolves within this directory. The root `$id` of each
-schema is unique and matches its file name.
+- A portable value may contain at most 128 object or array containers on any path,
+  counting the top-level container. Object keys must be strings; cycles, non-JSON
+  values, and non-finite floating-point numbers are rejected.
+- An `integer` field requires lexical integer form without a fraction or exponent;
+  booleans are not integers. Integer fields have no additional IEEE-754 range limit.
+- A `number` field accepts integer or floating-point form. Integer form must be within
+  `[-9007199254740991, 9007199254740991]` before finite floating-point conversion.
+- Unconstrained opaque JSON preserves scalar types and follows the same JSON and depth
+  rules. Opaque content either omits `data` or carries a non-empty object.
 
-## Boundary Rules
+## Core Invariants
 
-- `Checkpoint` is the complete portable recovery value; a detached snapshot is
-  not accepted by continue or resume.
-- `Invocation.result()` returns the last authoritative `Checkpoint`.
-- Lifecycle is exactly `Planning`, `ToolsPending`, `Suspended`, `Completed`,
-  `Failed`, or `Limited`.
-- `Suspended.resume_to` is exactly `Planning` or `ToolsPending`.
-- One durable boundary increments snapshot revision once and writes one fact in
-  the same checkpoint.
-- `Repository.commit(durable_commit)` returns no receipt; the commit proof carries one
-  validated history change and success means its complete checkpoint is authoritative.
-- Repository idempotency is scoped by `(run_id, checkpoint_id)`.
-- Every model request contains the complete current durable history; kernel does not
-  truncate model-visible conversation state.
-- Materializing one complete model request is `O(H)` and cumulative LLM input may be
-  `O(N^2)`; those costs are outside the linear state-evolution and repository bounds.
-- Only `checkpoint_committed` advances durable trace state. Other events are
-  live observation.
-- A parallel tool batch commits all ordered outcomes or none.
-- Resume restores the active state saved in `Suspended.resume_to`.
-- Terminal checkpoints cannot continue or resume.
-- Tool failure is model-visible; model/protocol/infrastructure failure is a
-  terminal run state when it can be committed.
-- Portable tools expose one invoke operation. Portable models expose one invoke
-  operation and optionally emit four delta variants.
-- Artifact data and tool outcomes each have one authoritative representation.
-- Portable JSON has a maximum container nesting depth of 128. Integer schema fields
-  require integer tokens; a floating representation such as `1.0` is rejected.
-- An omitted opaque-part `data` member is canonical empty data. A present `data`
-  object is non-empty.
-- Trace decoding is structural. Consumers that rely on trace evidence decode and then
-  run deterministic trace verification.
-
-## Schema and Semantic Validation
-
-JSON Schema owns structural validity. Kernel boundary codecs and the conformance runner
-additionally enforce semantic rules such as:
-
-- unique tool-call ids in one assistant message;
-- tool messages linked to the immediately preceding unresolved calls;
-- start history being non-empty and valid in `Planning` before invocation
-  creation;
-- `parallel` execution requiring read-only and idempotent facts;
-- non-empty, uniquely identified calls in `ToolsPending`;
-- checkpoint revision `0` for start and consecutive later revisions;
-- equal ordered `call_ids` and `outcome_kinds` lengths in tool-batch facts;
-- model-turn result, part count, calls, usage, and limit reason determining its
-  complete after view;
-- a tool-batch fact carrying a compact suspension exactly when its after state
-  is `Suspended`;
-- continue/resume checkpoint state compatibility;
-- appended resume messages only for `resume_to=Planning`;
-- monotonic metrics and revisions;
-- trace entry sequence, fact transition, and final checkpoint-id consistency.
+- `Checkpoint` is the complete portable recovery value, and `Invocation.result()`
+  returns the last authoritative checkpoint.
+- Lifecycle is exactly `Planning`, `ToolsPending`, `Suspended`, `Completed`, `Failed`,
+  or `Limited`.
+- `Suspended.resume_to` is exactly `Planning` or `ToolsPending`; terminal checkpoints
+  cannot continue or resume.
+- One durable boundary increments the revision once and records one semantic fact.
+- Repository commits atomically check revision, parent, history base, and run-scoped
+  checkpoint idempotency.
+- Every model request receives the complete current durable history.
+- Parallel tool execution requires parallel, read-only, and idempotent execution
+  facts; durable results remain in model order.
+- Only `checkpoint_committed` advances durable trace state. Other events are live
+  observation.
+- Portable tools and models each expose one invocation operation.
+- Decoders reject unknown shapes, invalid discriminators, non-finite numbers, invalid
+  integer representations, excessive nesting, and local cross-field invariants. Trace
+  transition semantics require [`verify_trace()` after decoding](run-trace.md#verification).

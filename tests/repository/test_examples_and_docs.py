@@ -62,8 +62,6 @@ def test_every_local_markdown_link_resolves() -> None:
             "README.md",
             "AGENTS.md",
             "CHANGELOG.md",
-            "CONTRIBUTING.md",
-            "SECURITY.md",
         )
     ]
     for directory in ("contracts", "conformance", "docs", "tests"):
@@ -120,8 +118,10 @@ def test_ci_references_existing_sources_and_required_commands() -> None:
     )
     distribution_checks = quality_runs["Verify distribution set and isolated imports"]
     assert "uv run python scripts/verify_distribution.py" in distribution_checks
-    assert "find_spec('pymysql') is None" in distribution_checks
-    assert "find_spec('redis') is None" in distribution_checks
+    assert (
+        '"${RUNNER_TEMP}/smoke/bin/python" -I scripts/verify_installed_api.py'
+        in distribution_checks
+    )
     assert '"${repository_wheels[0]}[mysql,redis]"' in distribution_checks
     assert all("packages/" not in run for run in quality_runs.values())
 

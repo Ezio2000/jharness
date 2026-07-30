@@ -24,6 +24,9 @@ COMPONENTS = {
     "jharness-repository": "repository",
     "jharness-tools": "tools",
 }
+REQUIRED_COMPONENT_FILES: dict[str, set[str]] = {
+    "jharness-models": {"decorators.py"},
+}
 DEPENDENCIES: dict[str, set[str]] = {
     "jharness-kernel": set(),
     "jharness-toolkit": {"jharness-kernel", "jsonschema", "referencing"},
@@ -162,6 +165,10 @@ def _verify_wheel(path: Path) -> Wheel:
             f"{info}/WHEEL",
             f"{info}/licenses/LICENSE",
         }
+        required.update(
+            f"jharness/{component}/{name}"
+            for name in REQUIRED_COMPONENT_FILES.get(distribution, set())
+        )
         if missing := sorted(required - names):
             raise ValueError(f"{distribution} wheel is missing files: {missing}")
         if "jharness/__init__.py" in names:
@@ -199,6 +206,10 @@ def _verify_sdist(path: Path, *, distribution: str, version: str) -> None:
             PurePosixPath(expected_root, "src", "jharness", component, "__init__.py"),
             PurePosixPath(expected_root, "src", "jharness", component, "py.typed"),
         }
+        required.update(
+            PurePosixPath(expected_root, "src", "jharness", component, name)
+            for name in REQUIRED_COMPONENT_FILES.get(distribution, set())
+        )
         if missing := sorted(str(name) for name in required - names):
             raise ValueError(f"{distribution} sdist is missing files: {missing}")
         license_file = archive.extractfile(f"{expected_root}/LICENSE")
