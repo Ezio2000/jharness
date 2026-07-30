@@ -51,6 +51,7 @@ from jharness.tools.interaction import (
     question_response_message,
     validate_question_response,
 )
+from jharness.tools.interaction import _contract as question_contract
 from jharness.tools.interaction import _schema as question_schema
 from jharness.tools.interaction import response as question_response_module
 
@@ -424,7 +425,7 @@ def test_all_eight_question_types_normalize_and_wait_without_mutating_input() ->
     assert result.suspension.wait_id == "ask-question:12:question-run:13:question-call"
     assert result.suspension.metadata == {
         "contract_id": question_schema.build_contract_id(
-            question_schema.SUPPORTED_QUESTION_KINDS,
+            question_contract.SUPPORTED_QUESTION_KINDS,
             max_questions=8,
             max_options=12,
             max_prompt_chars=2_000,
@@ -1929,7 +1930,7 @@ def _ask_suspension(*, schema_version: int = 1) -> Suspension:
         "request",
         {
             "contract_id": question_schema.build_contract_id(
-                question_schema.SUPPORTED_QUESTION_KINDS,
+                question_contract.SUPPORTED_QUESTION_KINDS,
                 max_questions=8,
                 max_options=12,
                 max_prompt_chars=2_000,
@@ -1983,7 +1984,7 @@ def test_extract_question_request_rejects_missing_result_and_corrupt_payload() -
         "status": "waiting",
         "schema_version": 1,
         "request_id": "request",
-        "enabled_kinds": list(question_schema.SUPPORTED_QUESTION_KINDS),
+        "enabled_kinds": list(question_contract.SUPPORTED_QUESTION_KINDS),
         "max_questions": 8,
         "max_options": 12,
         "max_prompt_chars": 2_000,
@@ -2349,14 +2350,39 @@ def test_integral_float_integer_default_is_normalized_to_an_integer() -> None:
 
 
 def test_integer_domain_math_and_integral_schema_counts_cover_fractional_edges() -> None:
-    assert question_schema.integer_answer_exists(0.5, None, 0.5) is True
-    assert question_schema.integer_answer_exists(2, 1, 1) is False
-    assert question_schema.integer_answer_exists(0.5, 0.75, 0.5) is False
+    assert question_contract.integer_answer_exists(0.5, None, 0.5) is True
+    assert question_contract.integer_answer_exists(2, 1, 1) is False
+    assert question_contract.integer_answer_exists(0.5, 0.75, 0.5) is False
     assert question_schema._optional_int({"count": 1.0}, "count", 0, "value") == 1
     with pytest.raises(question_schema.QuestionValidationError, match="integer"):
         question_schema._optional_int({"count": 1.5}, "count", 0, "value")
     with pytest.raises(question_schema.QuestionValidationError, match="integer"):
         question_schema._optional_int({"count": float("inf")}, "count", 0, "value")
+
+
+def test_question_contract_metadata_covers_schema_and_host_validators() -> None:
+    expected_kinds = set(question_contract.SUPPORTED_QUESTION_KINDS)
+    assert set(question_contract.QUESTION_KIND_FIELDS) == expected_kinds
+    assert set(question_contract.CANONICAL_REQUIRED_QUESTION_FIELDS) == expected_kinds
+    assert all(
+        question_contract.CANONICAL_REQUIRED_QUESTION_FIELDS[kind]
+        <= question_contract.QUESTION_KIND_FIELDS[kind]
+        for kind in question_contract.SUPPORTED_QUESTION_KINDS
+    )
+
+    variants = question_schema._question_variants(
+        max_options=question_contract.DEFAULT_MAX_OPTIONS,
+        max_prompt_chars=question_contract.DEFAULT_MAX_PROMPT_CHARS,
+        max_answer_chars=question_contract.DEFAULT_MAX_ANSWER_CHARS,
+    )
+    assert set(variants) == expected_kinds
+    for kind, variant in variants.items():
+        properties = cast(dict[str, Any], variant["properties"])
+        assert set(properties) == (
+            question_contract.COMMON_QUESTION_FIELDS | question_contract.QUESTION_KIND_FIELDS[kind]
+        )
+    assert set(question_response_module._QUESTION_VALIDATORS) == expected_kinds
+    assert set(question_response_module._ANSWER_VALIDATORS) == expected_kinds
 
 
 def test_unbounded_huge_integer_default_and_answer_do_not_overflow() -> None:
@@ -2485,11 +2511,9 @@ def test_numeric_fallback_failures_are_controlled(
         def __init__(self, _value: object) -> None:
             raise ValueError("forced fallback failure")
 
-    monkeypatch.setattr(question_schema, "Fraction", _BrokenFraction)
-    monkeypatch.setattr(question_response_module, "Fraction", _BrokenFraction)
+    monkeypatch.setattr(question_contract, "Fraction", _BrokenFraction)
 
-    assert question_schema._is_step_aligned(1e308, 1.0, -1e308) is False
-    assert question_response_module._is_step_aligned(1e308, 1.0, -1e308) is False
+    assert question_contract.is_step_aligned(1e308, 1.0, -1e308) is False
     with pytest.raises(question_schema.QuestionValidationError, match="finite"):
         question_schema._number(float("inf"), "number")
 

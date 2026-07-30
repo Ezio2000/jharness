@@ -25,7 +25,12 @@ COMPONENTS = {
     "jharness-tools": "tools",
 }
 REQUIRED_COMPONENT_FILES: dict[str, set[str]] = {
-    "jharness-models": {"decorators.py"},
+    "jharness-models": {
+        "anthropic/__init__.py",
+        "decorators.py",
+        "deepseek/__init__.py",
+        "openai/__init__.py",
+    },
 }
 DEPENDENCIES: dict[str, set[str]] = {
     "jharness-kernel": set(),

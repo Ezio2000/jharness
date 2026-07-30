@@ -21,7 +21,7 @@ from jharness.kernel import (
     WaitingResult,
     thaw_json_value,
 )
-from jharness.tools.interaction._schema import (
+from jharness.tools.interaction._contract import (
     DEFAULT_MAX_ANSWER_CHARS,
     DEFAULT_MAX_OPTIONS,
     DEFAULT_MAX_PROMPT_CHARS,
@@ -29,6 +29,8 @@ from jharness.tools.interaction._schema import (
     SCHEMA_VERSION,
     SUPPORTED_QUESTION_KINDS,
     QuestionKind,
+)
+from jharness.tools.interaction._schema import (
     QuestionValidationError,
     build_contract_id,
     build_request_id,

@@ -382,6 +382,17 @@ class RejectSecondCommit(RunRepository):
         self.commits.append(commit)
 
 
+class FalseyRepository(RunRepository):
+    def __init__(self) -> None:
+        self.commits: list[DurableCommit] = []
+
+    def __bool__(self) -> bool:
+        return False
+
+    async def commit(self, commit: DurableCommit) -> None:
+        self.commits.append(commit)
+
+
 class BlockingStartCommit(RunRepository):
     def __init__(self) -> None:
         self.attempts = 0
@@ -447,6 +458,19 @@ async def test_start_commit_is_bounded_by_the_invocation_work_deadline() -> None
     assert repository.attempts == 1
     assert repository.cancelled
     assert model.requests == []
+
+
+async def test_runtime_preserves_an_explicit_falsey_repository() -> None:
+    repository = FalseyRepository()
+
+    checkpoint = (
+        await Runtime(model=ScriptModel([final()]), repository=repository)
+        .start((Message.user("go"),))
+        .result()
+    )
+
+    assert checkpoint.snapshot.status == "completed"
+    assert [commit.checkpoint.snapshot.revision for commit in repository.commits] == [0, 1]
 
 
 async def test_noncompliant_port_is_reported_after_bounded_cleanup() -> None:

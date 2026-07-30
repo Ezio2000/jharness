@@ -215,9 +215,11 @@ class ChunkedStream(httpx.AsyncByteStream):
     def __init__(self, chunks: Sequence[bytes]) -> None:
         self.chunks = tuple(chunks)
         self.closed = False
+        self.yielded = 0
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         for chunk in self.chunks:
+            self.yielded += 1
             yield chunk
 
     async def aclose(self) -> None:
@@ -309,6 +311,61 @@ async def test_sse_limit_failure_is_a_structured_model_error() -> None:
 
     assert caught.value.info.code == "codec_error"
     assert caught.value.info.status_code == 200
+
+
+async def test_response_body_limit_stops_json_and_sse_error_accumulation() -> None:
+    json_stream = ChunkedStream((b'{"parts":', *(b'"too-long"' for _ in range(100))))
+
+    def json_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=json_stream, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(json_handler)) as client:
+        with pytest.raises(ModelError) as json_error:
+            await invoke_json_model(
+                client=client,
+                timeout=None,
+                context=RunContext("run-1", time()),
+                url="https://provider.test/model",
+                payload=dict,
+                headers=lambda _body: {},
+                decode=_decoded_response,
+                errors=_POLICY,
+                response_shape_error="response must be an object",
+                max_response_body_bytes=8,
+            )
+
+    assert json_error.value.info.code == "response_too_large"
+    assert json_error.value.info.status_code == 200
+    assert json_stream.yielded == 1
+    assert json_stream.closed
+
+    error_stream = ChunkedStream((b'{"error":', *(b'"too-long"' for _ in range(100))))
+
+    def error_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, stream=error_stream, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(error_handler)) as client:
+        with pytest.raises(ModelError) as stream_error:
+            await invoke_sse_model(
+                client=client,
+                timeout=None,
+                context=RunContext("run-1", time()),
+                url="https://provider.test/model",
+                payload=dict,
+                headers=lambda _body: {},
+                decode_frame=lambda _event, _data: (True, ()),
+                completed_response=lambda: _decoded_response({}),
+                emit_delta=None,
+                errors=_POLICY,
+                incomplete_error="stream incomplete",
+                max_response_body_bytes=8,
+            )
+
+    assert stream_error.value.info.code == "response_too_large"
+    assert stream_error.value.info.status_code == 503
+    assert stream_error.value.info.retryable is True
+    assert error_stream.yielded == 1
+    assert error_stream.closed
 
 
 class SinkFailure(ValueError):

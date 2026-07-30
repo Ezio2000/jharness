@@ -36,6 +36,7 @@ class _OpenAIModelOptions(TypedDict, total=False):
     timeout: float | httpx.Timeout | None
     headers: Mapping[str, str] | None
     client: httpx.AsyncClient | None
+    max_response_body_bytes: int
     max_sse_line_bytes: int
     max_sse_event_bytes: int
 
@@ -65,6 +66,7 @@ class OpenAIChatCompletionsModel:
         self.profile = config.profile
         self.codec = OpenAIChatCompletionsCodec(model=config.model, profile=config.profile)
         self._timeout = config.timeout
+        self._max_response_body_bytes = config.max_response_body_bytes
         self._max_sse_line_bytes = config.max_sse_line_bytes
         self._max_sse_event_bytes = config.max_sse_event_bytes
         self._headers = dict(config.headers)
@@ -118,6 +120,7 @@ class OpenAIChatCompletionsModel:
                 emit_delta=emit_delta,
                 errors=self._errors,
                 incomplete_error="chat completion stream ended before [DONE]",
+                max_response_body_bytes=self._max_response_body_bytes,
                 max_sse_line_bytes=self._max_sse_line_bytes,
                 max_sse_event_bytes=self._max_sse_event_bytes,
             )
@@ -131,6 +134,7 @@ class OpenAIChatCompletionsModel:
             decode=self.codec.decode_response,
             errors=self._errors,
             response_shape_error="chat completion response must be an object",
+            max_response_body_bytes=self._max_response_body_bytes,
         )
 
     def _decode_sse_data(

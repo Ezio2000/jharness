@@ -49,6 +49,7 @@ def test_model_clients_share_constructor_validation(model_type: type[object]) ->
     assert without_transport_timeout._timeout is None
 
     for keywords, pattern in (
+        ({"max_response_body_bytes": 0}, "max_response_body_bytes"),
         ({"max_sse_line_bytes": 0}, "max_sse_line_bytes"),
         (
             {"max_sse_line_bytes": 20, "max_sse_event_bytes": 10},

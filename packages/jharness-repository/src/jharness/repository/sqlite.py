@@ -6,7 +6,7 @@ import asyncio
 import math
 import os
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
@@ -16,9 +16,6 @@ from typing import TypeVar, cast
 from jharness.kernel import (
     Checkpoint,
     DurableCommit,
-    HistoryAppend,
-    HistoryReplace,
-    HistoryUnchanged,
     RepositoryError,
     RevisionConflict,
 )
@@ -26,12 +23,16 @@ from jharness.kernel import (
 from ._codec import (
     HISTORY_CHUNK_SIZE,
     CommitIdentity,
-    EncodedHistoryChunk,
     commit_identity,
     decode_core,
     encode_core,
     encode_history_change,
     reconstruct_checkpoint,
+)
+from ._history_manifest import (
+    next_history_manifest,
+    validate_encoded_history,
+    validate_new_base,
 )
 
 _T = TypeVar("_T")
@@ -240,16 +241,16 @@ class SQLiteRunRepository:
                     identity.expected_revision,
                     actual_revision,
                 )
-            _validate_new_base(head, identity)
+            validate_new_base(head, identity)
 
             core = encode_core(identity)
             chunks = encode_history_change(identity.commit)
-            generation, first_index, total_chunks = _next_history_manifest(
+            generation, first_index, total_chunks = next_history_manifest(
                 head,
                 identity,
                 len(chunks),
             )
-            _validate_encoded_history(head, identity, chunks)
+            validate_encoded_history(head, identity, chunks)
 
             connection.executemany(
                 """
@@ -520,60 +521,6 @@ def _accept_existing(
         head.checkpoint_id != identity.checkpoint_id or head.checkpoint_digest != digest
     ):
         raise RepositoryError("stored SQLite checkpoint ledger is orphaned")
-
-
-def _validate_new_base(head: _Head | None, identity: CommitIdentity) -> None:
-    if head is None:
-        if (
-            identity.parent_checkpoint_id is not None
-            or identity.base_history_count is not None
-            or identity.base_history_digest is not None
-        ):
-            raise RepositoryError("first durable commit has an invalid history base")
-        return
-    if identity.parent_checkpoint_id != head.checkpoint_id:
-        raise RepositoryError("parent checkpoint does not match the authoritative head")
-    if (
-        identity.base_history_count != head.history_message_count
-        or identity.base_history_digest != head.history_digest
-    ):
-        raise RepositoryError("history change base does not match the authoritative head")
-
-
-def _next_history_manifest(
-    head: _Head | None,
-    identity: CommitIdentity,
-    added_chunks: int,
-) -> tuple[int, int, int]:
-    change = identity.commit.history
-    if head is None or isinstance(change, HistoryReplace):
-        return identity.revision, 0, added_chunks
-    if isinstance(change, HistoryAppend):
-        return (
-            head.history_generation,
-            head.history_chunk_count,
-            head.history_chunk_count + added_chunks,
-        )
-    if not isinstance(change, HistoryUnchanged):
-        raise RepositoryError("advanced durable commit has an invalid history mutation")
-    return head.history_generation, head.history_chunk_count, head.history_chunk_count
-
-
-def _validate_encoded_history(
-    head: _Head | None,
-    identity: CommitIdentity,
-    chunks: Sequence[EncodedHistoryChunk],
-) -> None:
-    added_messages = sum(chunk.message_count for chunk in chunks)
-    change = identity.commit.history
-    if head is None or isinstance(change, HistoryReplace):
-        if not chunks or added_messages != identity.history_count:
-            raise RepositoryError("encoded replacement history is inconsistent")
-    elif isinstance(change, HistoryAppend):
-        if not chunks or head.history_message_count + added_messages != identity.history_count:
-            raise RepositoryError("encoded appended history is inconsistent")
-    elif chunks or head.history_message_count != identity.history_count:
-        raise RepositoryError("encoded unchanged history is inconsistent")
 
 
 def _write_head(

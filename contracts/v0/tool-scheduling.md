@@ -4,7 +4,10 @@
 
 One immutable tool catalog is opened per invocation. Each pending call is bound
 before approval. Binding validates catalog membership and input schema and
-captures the exact implementation and spec.
+captures the exact implementation and spec. When a spec declares an output
+schema, that schema validates the structured content of non-failure results.
+`ToolFailure` is the framework error envelope and is not interpreted as a
+successful business payload.
 
 Invalid calls become precomputed tool failures and do not reach approval.
 
