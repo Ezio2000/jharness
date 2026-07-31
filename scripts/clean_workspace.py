@@ -59,8 +59,6 @@ def _minimal_targets(paths: set[Path], root: Path) -> tuple[Path, ...]:
 def _prune_directory(candidate: Path, name: str, root: Path, targets: set[Path]) -> bool:
     if _is_protected(candidate, root):
         return True
-    if any(candidate == target or _is_within(candidate, target) for target in targets):
-        return True
     is_root_output = candidate.parent == root and name in _OUTPUT_DIRECTORY_NAMES
     if name in _CACHE_DIRECTORY_NAMES or is_root_output or name.endswith(".egg-info"):
         targets.add(candidate)

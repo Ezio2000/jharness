@@ -95,13 +95,6 @@ class SchemaSuite:
             raise KeyError(f"unknown contract schema: {schema_name}") from exc
         _validate(validator, value, schema_name)
 
-    def validate_ref(self, reference: str, value: object) -> None:
-        validator: Validator = StrictDraft202012Validator(
-            cast(Schema, {"$ref": reference}),
-            registry=self._registry,
-        )
-        _validate(validator, value, reference)
-
     def validate_document(self, schema_path: Path, value: object) -> None:
         validator: Validator = StrictDraft202012Validator(
             _schema(schema_path),

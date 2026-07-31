@@ -122,7 +122,7 @@ class AnthropicCodec:
     def _add_output_options(self, payload: JsonObject, request: ModelRequest) -> None:
         if request.response_format is not None:
             output_config = self._encode_response_format(request.response_format)
-            payload.update(self._merge_output_config(payload, output_config))
+            payload.update(self._merge_output_config(output_config))
         elif self.profile.extra_output_config:
             payload["output_config"] = dict(self.profile.extra_output_config)
 
@@ -208,7 +208,6 @@ class AnthropicCodec:
 
     def _merge_output_config(
         self,
-        payload: JsonObject,
         output_config: JsonObject,
     ) -> JsonObject:
         if not output_config and not self.profile.extra_output_config:
@@ -218,8 +217,6 @@ class AnthropicCodec:
             if key in merged:
                 raise AnthropicError(f"extra_output_config cannot set response format field: {key}")
             merged[key] = value
-        if "output_config" in payload:
-            raise AnthropicError("output_config is already set")
         return {"output_config": merged}
 
 
