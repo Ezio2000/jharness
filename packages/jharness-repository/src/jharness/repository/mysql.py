@@ -129,7 +129,6 @@ class MySQLTLS:
 
 @dataclass(frozen=True, slots=True)
 class _Head:
-    run_id: str
     revision: int
     checkpoint_id: str
     parent_checkpoint_id: str | None
@@ -705,7 +704,6 @@ def _decode_head_manifest(row: tuple[object, ...], requested_run_id: str) -> _He
     if run_id != requested_run_id:
         raise RepositoryError("stored MySQL run id hash collision")
     head = _Head(
-        run_id=run_id,
         revision=_row_revision(row, 1),
         checkpoint_id=_row_text(row, 2, "checkpoint id"),
         parent_checkpoint_id=_row_optional_text(row, 3, "parent checkpoint id"),
@@ -726,7 +724,6 @@ def _decode_complete_head(
 ) -> _CompleteHead:
     manifest = _decode_head_manifest(row[:10], requested_run_id)
     head = _CompleteHead(
-        run_id=manifest.run_id,
         revision=manifest.revision,
         checkpoint_id=manifest.checkpoint_id,
         parent_checkpoint_id=manifest.parent_checkpoint_id,

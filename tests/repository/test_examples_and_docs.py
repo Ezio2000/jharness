@@ -54,29 +54,6 @@ def test_offline_examples_execute_with_uv_selected_python() -> None:
     assert "resumed=completed" in resume.stdout
 
 
-def test_every_local_markdown_link_resolves() -> None:
-    broken: list[str] = []
-    markdown_files = [
-        ROOT / name
-        for name in (
-            "README.md",
-            "AGENTS.md",
-            "CHANGELOG.md",
-        )
-    ]
-    for directory in ("contracts", "conformance", "docs", "tests"):
-        markdown_files.extend((ROOT / directory).rglob("*.md"))
-    pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
-    for path in markdown_files:
-        for target in pattern.findall(path.read_text(encoding="utf-8")):
-            if target.startswith(("http://", "https://", "#")):
-                continue
-            relative = target.split("#", 1)[0]
-            if relative and not (path.parent / relative).resolve().exists():
-                broken.append(f"{path.relative_to(ROOT)} -> {target}")
-    assert broken == []
-
-
 def test_ci_references_existing_sources_and_required_commands() -> None:
     workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
     workflow = _mapping(

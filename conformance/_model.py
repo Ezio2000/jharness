@@ -36,7 +36,6 @@ class CaseModel:
         )
         self.capabilities = ModelCapabilities(streaming=self.streaming)
         self.requests: list[ModelRequest] = []
-        self.contexts: list[RunContext] = []
 
     async def invoke(
         self,
@@ -47,7 +46,6 @@ class CaseModel:
         emit_delta: DeltaSink | None,
     ) -> ModelResponse:
         self.requests.append(request)
-        self.contexts.append(context)
         step = self._next()
         deltas = sequence(step.get("deltas", ()), "model deltas")
         if deltas and (not stream or emit_delta is None):

@@ -6,6 +6,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-31
+
+### Changed
+
+- Removed unused conformance observation and schema-validation surfaces, unreachable
+  request and workspace-cleanup branches, and redundant repository lifecycle and
+  decoded-head state without changing public behavior or persisted formats.
+- Replaced callback-heavy invalid-response test setup with direct parametrized data
+  while preserving every boundary case and test identifier, and kept Markdown link
+  validation under the authoritative specification validator.
+
 ## [0.3.3] - 2026-07-30
 
 ### Changed
@@ -129,7 +140,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Sixty-six deterministic conformance cases and a standard tool catalog.
 - Provider-neutral lifecycle, model, tool, event, wire, and trace contracts.
 
-[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/Ezio2000/jharness/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/Ezio2000/jharness/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Ezio2000/jharness/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Ezio2000/jharness/compare/v0.3.0...v0.3.1

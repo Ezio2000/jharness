@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -1516,131 +1516,83 @@ def test_validate_question_response_accepts_every_kind_and_custom_choice() -> No
     )
 
 
-def _invalid_response_cases() -> list[tuple[str, Callable[[dict[str, Any]], None]]]:  # noqa: C901
-    def remove_required(answers: dict[str, Any]) -> None:
-        del answers["confirmed"]
-
-    def add_unknown(answers: dict[str, Any]) -> None:
-        answers["unknown"] = "value"
-
-    def confirm_string(answers: dict[str, Any]) -> None:
-        answers["confirmed"] = "yes"
-
-    def bad_choice(answers: dict[str, Any]) -> None:
-        answers["features"] = ["unknown"]
-
-    def multi_scalar(answers: dict[str, Any]) -> None:
-        answers["features"] = "cache"
-
-    def multi_duplicate(answers: dict[str, Any]) -> None:
-        answers["features"] = ["cache", "cache"]
-
-    def multi_too_few(answers: dict[str, Any]) -> None:
-        answers["features"] = []
-
-    def multi_too_many(answers: dict[str, Any]) -> None:
-        answers["features"] = ["cache", "audit", "search"]
-
-    def text_wrong_type(answers: dict[str, Any]) -> None:
-        answers["notes"] = 1
-
-    def text_too_short(answers: dict[str, Any]) -> None:
-        answers["notes"] = "x"
-
-    def text_too_long(answers: dict[str, Any]) -> None:
-        answers["notes"] = "x" * 81
-
-    def number_bool(answers: dict[str, Any]) -> None:
-        answers["retries"] = True
-
-    def number_fraction(answers: dict[str, Any]) -> None:
-        answers["retries"] = 2.5
-
-    def number_below(answers: dict[str, Any]) -> None:
-        answers["retries"] = -2
-
-    def number_above(answers: dict[str, Any]) -> None:
-        answers["retries"] = 12
-
-    def number_off_step(answers: dict[str, Any]) -> None:
-        answers["retries"] = 3
-
-    def date_format(answers: dict[str, Any]) -> None:
-        answers["deadline"] = "2026/08/15"
-
-    def date_impossible(answers: dict[str, Any]) -> None:
-        answers["deadline"] = "2026-02-30"
-
-    def date_below(answers: dict[str, Any]) -> None:
-        answers["deadline"] = "2026-06-30"
-
-    def date_above(answers: dict[str, Any]) -> None:
-        answers["deadline"] = "2027-01-01"
-
-    def scale_bool(answers: dict[str, Any]) -> None:
-        answers["confidence"] = False
-
-    def scale_below(answers: dict[str, Any]) -> None:
-        answers["confidence"] = 0.5
-
-    def scale_above(answers: dict[str, Any]) -> None:
-        answers["confidence"] = 5.5
-
-    def scale_off_step(answers: dict[str, Any]) -> None:
-        answers["confidence"] = 4.25
-
-    def ranking_scalar(answers: dict[str, Any]) -> None:
-        answers["priorities"] = "speed"
-
-    def ranking_unknown(answers: dict[str, Any]) -> None:
-        answers["priorities"] = ["correctness", "unknown"]
-
-    def ranking_duplicate(answers: dict[str, Any]) -> None:
-        answers["priorities"] = ["correctness", "correctness"]
-
-    def ranking_too_few(answers: dict[str, Any]) -> None:
-        answers["priorities"] = ["correctness"]
-
-    return [
-        ("required", remove_required),
-        ("unknown", add_unknown),
-        ("confirmed", confirm_string),
-        ("features", bad_choice),
-        ("features", multi_scalar),
-        ("features", multi_duplicate),
-        ("features", multi_too_few),
-        ("features", multi_too_many),
-        ("notes", text_wrong_type),
-        ("notes", text_too_short),
-        ("notes", text_too_long),
-        ("retries", number_bool),
-        ("retries", number_fraction),
-        ("retries", number_below),
-        ("retries", number_above),
-        ("retries", number_off_step),
-        ("deadline", date_format),
-        ("deadline", date_impossible),
-        ("deadline", date_below),
-        ("deadline", date_above),
-        ("confidence", scale_bool),
-        ("confidence", scale_below),
-        ("confidence", scale_above),
-        ("confidence", scale_off_step),
-        ("priorities", ranking_scalar),
-        ("priorities", ranking_unknown),
-        ("priorities", ranking_duplicate),
-        ("priorities", ranking_too_few),
-    ]
+_MISSING_ANSWER = object()
 
 
-@pytest.mark.parametrize(("message", "mutate"), _invalid_response_cases())
+@pytest.mark.parametrize(
+    ("message", "key", "value"),
+    [
+        pytest.param("required", "confirmed", _MISSING_ANSWER, id="required-remove_required"),
+        pytest.param("unknown", "unknown", "value", id="unknown-add_unknown"),
+        pytest.param("confirmed", "confirmed", "yes", id="confirmed-confirm_string"),
+        pytest.param("features", "features", ["unknown"], id="features-bad_choice"),
+        pytest.param("features", "features", "cache", id="features-multi_scalar"),
+        pytest.param(
+            "features",
+            "features",
+            ["cache", "cache"],
+            id="features-multi_duplicate",
+        ),
+        pytest.param("features", "features", [], id="features-multi_too_few"),
+        pytest.param(
+            "features",
+            "features",
+            ["cache", "audit", "search"],
+            id="features-multi_too_many",
+        ),
+        pytest.param("notes", "notes", 1, id="notes-text_wrong_type"),
+        pytest.param("notes", "notes", "x", id="notes-text_too_short"),
+        pytest.param("notes", "notes", "x" * 81, id="notes-text_too_long"),
+        pytest.param("retries", "retries", True, id="retries-number_bool"),
+        pytest.param("retries", "retries", 2.5, id="retries-number_fraction"),
+        pytest.param("retries", "retries", -2, id="retries-number_below"),
+        pytest.param("retries", "retries", 12, id="retries-number_above"),
+        pytest.param("retries", "retries", 3, id="retries-number_off_step"),
+        pytest.param("deadline", "deadline", "2026/08/15", id="deadline-date_format"),
+        pytest.param(
+            "deadline",
+            "deadline",
+            "2026-02-30",
+            id="deadline-date_impossible",
+        ),
+        pytest.param("deadline", "deadline", "2026-06-30", id="deadline-date_below"),
+        pytest.param("deadline", "deadline", "2027-01-01", id="deadline-date_above"),
+        pytest.param("confidence", "confidence", False, id="confidence-scale_bool"),
+        pytest.param("confidence", "confidence", 0.5, id="confidence-scale_below"),
+        pytest.param("confidence", "confidence", 5.5, id="confidence-scale_above"),
+        pytest.param("confidence", "confidence", 4.25, id="confidence-scale_off_step"),
+        pytest.param("priorities", "priorities", "speed", id="priorities-ranking_scalar"),
+        pytest.param(
+            "priorities",
+            "priorities",
+            ["correctness", "unknown"],
+            id="priorities-ranking_unknown",
+        ),
+        pytest.param(
+            "priorities",
+            "priorities",
+            ["correctness", "correctness"],
+            id="priorities-ranking_duplicate",
+        ),
+        pytest.param(
+            "priorities",
+            "priorities",
+            ["correctness"],
+            id="priorities-ranking_too_few",
+        ),
+    ],
+)
 def test_validate_question_response_rejects_every_answer_boundary(
     message: str,
-    mutate: Callable[[dict[str, Any]], None],
+    key: str,
+    value: object,
 ) -> None:
     request = _question_request()
     answers = _valid_answers()
-    mutate(answers)
+    if value is _MISSING_ANSWER:
+        del answers[key]
+    else:
+        answers[key] = value
     response = QuestionResponse.answered(request.request_id, "response-invalid", answers)
     with pytest.raises((TypeError, ValueError), match=message):
         validate_question_response(request, response)

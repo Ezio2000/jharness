@@ -483,7 +483,6 @@ class _RedisRuntime:
 
 @dataclass(frozen=True, slots=True)
 class _RedisHead:
-    run_id: str
     revision: int
     checkpoint_id: str
     parent_checkpoint_id: str | None
@@ -529,12 +528,11 @@ class RedisRunRepository:
         self._operations: set[asyncio.Task[object]] = set()
         self._close_task: asyncio.Task[None] | None = None
         self._closing = False
-        self._closed = False
 
     async def initialize(self) -> None:
         """Connect to Redis and verify that the selected database responds."""
 
-        if self._closing or self._closed:
+        if self._closing:
             raise RepositoryError("Redis repository is closed")
         try:
             await self._initialize_client()
@@ -588,7 +586,7 @@ class RedisRunRepository:
         await self.close()
 
     async def _run(self, operation: Coroutine[object, object, _T], label: str) -> _T:
-        if self._closing or self._closed:
+        if self._closing:
             operation.close()
             raise RepositoryError("Redis repository is closed")
         task = asyncio.create_task(operation)
@@ -777,11 +775,8 @@ class RedisRunRepository:
         async with self._initialize_lock:
             client = self._client
             self._client = None
-            try:
-                if client is not None:
-                    await client.aclose()
-            finally:
-                self._closed = True
+            if client is not None:
+                await client.aclose()
 
     def _run_keys(self, run_id: str) -> tuple[str, str, str]:
         run_hash = sha256(run_id.encode("utf-8")).hexdigest()
@@ -900,7 +895,6 @@ def _decode_redis_head(values: tuple[object, ...], requested_run_id: str) -> _Re
     if (revision == 0) != (parent is None):
         raise RepositoryError("stored Redis parent checkpoint id is invalid")
     return _RedisHead(
-        run_id,
         revision,
         checkpoint_id,
         parent,
