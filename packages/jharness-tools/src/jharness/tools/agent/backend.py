@@ -157,12 +157,12 @@ class InMemoryAgentBackend:
                 record.task = asyncio.create_task(self._run_child(record))
             else:
                 record = self._records[existing_id]
-                if record.request != request:
-                    raise AgentBackendError(
-                        "agent_conflict",
-                        "The parent tool call already owns a different Agent request.",
-                    )
 
+        if record.request != request:
+            raise AgentBackendError(
+                "agent_conflict",
+                "The parent tool call already owns a different Agent request.",
+            )
         await record.started.wait()
         return record.snapshot
 

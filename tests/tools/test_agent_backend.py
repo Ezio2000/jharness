@@ -184,8 +184,14 @@ async def test_in_memory_backend_concurrent_start_is_idempotent() -> None:
         backend.start_or_get(request, parent=parent, parent_tool_call_id="call"),
     )
 
+    third = await backend.start_or_get(
+        request,
+        parent=parent,
+        parent_tool_call_id="call",
+    )
+
     assert isinstance(backend, AgentBackend)
-    assert first == second
+    assert first == second == third
     await asyncio.wait_for(model.started.wait(), timeout=1)
     assert len(model.requests) == 1
 
