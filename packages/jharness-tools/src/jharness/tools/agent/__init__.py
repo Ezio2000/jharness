@@ -1,6 +1,6 @@
 """Host-mediated Child Agent tools and durable parent-resume helpers."""
 
-from jharness.tools.agent.backend import AgentBackend
+from jharness.tools.agent.backend import AgentBackend, InMemoryAgentBackend
 from jharness.tools.agent.models import (
     AgentBackendError,
     AgentRequest,
@@ -26,6 +26,7 @@ __all__ = [
     "AgentTool",
     "AgentWaitRequest",
     "AgentWaitTool",
+    "InMemoryAgentBackend",
     "agent_completion_message",
     "extract_agent_wait",
     "resume_agent",
