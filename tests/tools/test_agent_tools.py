@@ -335,6 +335,7 @@ def test_agent_public_api_backend_protocol_specs_and_schemas() -> None:
         "AgentTool",
         "AgentWaitRequest",
         "AgentWaitTool",
+        "InMemoryAgentBackend",
         "agent_completion_message",
         "extract_agent_wait",
         "resume_agent",

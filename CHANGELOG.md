@@ -6,6 +6,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Added `InMemoryAgentBackend`, an in-process default child-Agent supervisor with
+  concurrent idempotent creation, parent-run authorization, waiting, cancellation,
+  nested context propagation, and explicit terminal-state mapping.
+
 ## [0.3.4] - 2026-07-31
 
 ### Changed
