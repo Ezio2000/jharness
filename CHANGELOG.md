@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-10
+
 ### Added
 
 - Added the workspace-scoped `LsTool` filesystem preset for bounded, sorted,
@@ -153,7 +155,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Sixty-six deterministic conformance cases and a standard tool catalog.
 - Provider-neutral lifecycle, model, tool, event, wire, and trace contracts.
 
-[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Ezio2000/jharness/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Ezio2000/jharness/compare/v0.3.4...v0.4.0
 [0.3.4]: https://github.com/Ezio2000/jharness/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/Ezio2000/jharness/compare/v0.3.2...v0.3.3
