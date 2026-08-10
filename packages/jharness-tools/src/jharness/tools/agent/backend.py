@@ -180,10 +180,7 @@ class InMemoryAgentBackend:
     ) -> AgentSnapshot:
         """Register the parent waiter without racing terminal publication."""
 
-        requester_tool_call_id = _non_empty_string(
-            requester_tool_call_id,
-            "requester_tool_call_id",
-        )
+        _non_empty_string(requester_tool_call_id, "requester_tool_call_id")
         record = self._authorized_record(agent_id, requester)
         # Completion is retained by the per-Agent event and immutable terminal snapshot,
         # so this implementation needs no waiter-specific state.
@@ -210,15 +207,14 @@ class InMemoryAgentBackend:
 
         await record.started.wait()
         if signal_cancellation:
-            invocation = record.invocation
-            if invocation is not None:
-                invocation.pause(
-                    Suspension(
-                        reason="agent_cancelled",
-                        source="AgentCancel",
-                        wait_id=record.snapshot.agent_id,
-                    )
+            invocation = cast(Invocation, record.invocation)
+            invocation.pause(
+                Suspension(
+                    reason="agent_cancelled",
+                    source="AgentCancel",
+                    wait_id=record.snapshot.agent_id,
                 )
+            )
         await record.done.wait()
         return record.snapshot
 
@@ -282,15 +278,6 @@ class InMemoryAgentBackend:
             record.started.set()
             checkpoint = await invocation.result()
             record.snapshot = _terminal_snapshot(record, checkpoint.snapshot.state)
-        except asyncio.CancelledError:
-            record.snapshot = AgentSnapshot(
-                record.snapshot.agent_id,
-                record.request.description,
-                "failed",
-                record.request.background,
-                error=ErrorInfo("child_host_error", "Child Agent supervision was cancelled."),
-            )
-            raise
         except Exception:
             _LOGGER.exception("Child Agent supervision failed")
             record.snapshot = AgentSnapshot(
