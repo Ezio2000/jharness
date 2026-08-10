@@ -92,14 +92,27 @@ def test_public_api_and_contracts(tmp_path: Path) -> None:
         "EditTool",
         "GlobTool",
         "GrepTool",
+        "LsTool",
         "ReadTool",
         "WriteTool",
     ]
-    read_presets = (tools.ReadTool(tmp_path), tools.GlobTool(tmp_path), tools.GrepTool(tmp_path))
+    read_presets = (
+        tools.ReadTool(tmp_path),
+        tools.GlobTool(tmp_path),
+        tools.GrepTool(tmp_path),
+        tools.LsTool(tmp_path),
+    )
     write_presets = (tools.EditTool(tmp_path), tools.WriteTool(tmp_path))
     presets = (*read_presets, *write_presets)
     assert all(isinstance(tool, Tool) for tool in presets)
-    assert [tool.spec.name for tool in presets] == ["Read", "Glob", "Grep", "Edit", "Write"]
+    assert [tool.spec.name for tool in presets] == [
+        "Read",
+        "Glob",
+        "Grep",
+        "Ls",
+        "Edit",
+        "Write",
+    ]
     for tool in read_presets:
         assert tool.root == tmp_path.resolve()
         assert tool.spec.execution.concurrency == "parallel"
@@ -125,12 +138,17 @@ def test_public_api_and_contracts(tmp_path: Path) -> None:
         catalog = await ToolRegistry(presets).open_catalog()
         return tuple(spec.name for spec in catalog.specs())
 
-    assert asyncio.run(open_catalog()) == ("Read", "Glob", "Grep", "Edit", "Write")
+    assert asyncio.run(open_catalog()) == ("Read", "Glob", "Grep", "Ls", "Edit", "Write")
 
 
 def test_registry_validates_inputs_and_all_output_branches(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text("needle\n", encoding="utf-8")
-    presets = (tools.ReadTool(tmp_path), tools.GlobTool(tmp_path), tools.GrepTool(tmp_path))
+    presets = (
+        tools.ReadTool(tmp_path),
+        tools.GlobTool(tmp_path),
+        tools.GrepTool(tmp_path),
+        tools.LsTool(tmp_path),
+    )
 
     async def invoke_through_registry() -> list[str]:
         catalog = await ToolRegistry(presets).open_catalog()
@@ -142,6 +160,7 @@ def test_registry_validates_inputs_and_all_output_branches(tmp_path: Path) -> No
         calls = (
             ToolCall("read", "Read", {"file_path": "app.py"}),
             ToolCall("glob", "Glob", {"pattern": "*.py"}),
+            ToolCall("ls", "Ls", {}),
             ToolCall("grep", "Grep", {"pattern": "needle"}),
             ToolCall(
                 "grep-content",
@@ -161,9 +180,12 @@ def test_registry_validates_inputs_and_all_output_branches(tmp_path: Path) -> No
             outcomes.append(result.outcome.kind)
         with pytest.raises(ToolError, match="do not match input_schema"):
             catalog.bind(ToolCall("invalid", "Read", {"file_path": "app.py", "offset": 0}))
+        with pytest.raises(ToolError, match="do not match input_schema"):
+            catalog.bind(ToolCall("invalid-ls", "Ls", {"limit": 0}))
         return outcomes
 
     assert asyncio.run(invoke_through_registry()) == [
+        "success",
         "success",
         "success",
         "success",
@@ -220,6 +242,8 @@ def test_constructor_validation(tmp_path: Path) -> None:
         tools.GlobTool(tmp_path, default_limit=2, max_limit=1)
     with pytest.raises(ValueError, match="cannot exceed"):
         tools.GrepTool(tmp_path, default_limit=2, max_limit=1)
+    with pytest.raises(ValueError, match="cannot exceed"):
+        tools.LsTool(tmp_path, default_limit=2, max_limit=1)
     with pytest.raises(ValueError, match="max_file_bytes"):
         tools.ReadTool(tmp_path, max_file_bytes=0)
     with pytest.raises(ValueError, match="max_context"):
@@ -236,8 +260,12 @@ def test_constructor_validation(tmp_path: Path) -> None:
         tools.GrepTool(tmp_path, max_pattern_components=0)
     with pytest.raises(ValueError, match="max_search_seconds"):
         tools.GlobTool(tmp_path, max_search_seconds=0)
+    with pytest.raises(ValueError, match="max_search_seconds"):
+        tools.LsTool(tmp_path, max_search_seconds=0)
     with pytest.raises(ValueError, match="max_scanned_entries"):
         tools.GrepTool(tmp_path, max_scanned_entries=0)
+    with pytest.raises(ValueError, match="max_scanned_entries"):
+        tools.LsTool(tmp_path, max_scanned_entries=0)
     with pytest.raises(ValueError, match="max_total_bytes"):
         tools.GrepTool(tmp_path, max_total_bytes=0)
     with pytest.raises(ValueError, match="max_output_bytes"):
@@ -428,6 +456,60 @@ def _search_fixture(root: Path) -> None:
     (root / ".venv" / "hidden.py").write_text("alpha\n", encoding="utf-8")
 
 
+def test_ls_success_sorting_paths_and_limits(tmp_path: Path) -> None:
+    directory = tmp_path / "alpha"
+    directory.mkdir()
+    (directory / "inner.txt").write_text("inner", encoding="utf-8")
+    (tmp_path / "Beta.txt").write_text("beta", encoding="utf-8")
+    (tmp_path / "zeta.txt").write_text("zeta", encoding="utf-8")
+    (tmp_path / ".hidden").write_text("hidden", encoding="utf-8")
+    reserved = tmp_path / ".target.txt.jharness-0123456789abcdef.tmp"
+    reserved.write_text("private", encoding="utf-8")
+
+    tool = tools.LsTool(tmp_path, default_limit=3)
+    text, result = _success(_invoke(tool, {}))
+    assert text == ".hidden\nalpha/\nBeta.txt"
+    assert result == {
+        "path": ".",
+        "entries": [".hidden", "alpha/", "Beta.txt"],
+        "truncated": True,
+    }
+
+    nested_text, nested = _success(_invoke(tool, {"path": "alpha", "limit": 10}))
+    assert nested_text == "inner.txt"
+    assert nested == {"path": "alpha", "entries": ["inner.txt"], "truncated": False}
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    empty_text, empty_result = _success(_invoke(tool, {"path": "empty"}))
+    assert empty_text == "Directory is empty."
+    assert empty_result == {"path": "empty", "entries": [], "truncated": False}
+
+
+def test_ls_failures_budgets_and_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("x", encoding="utf-8")
+    tool = tools.LsTool(tmp_path)
+    _failure(_invoke(tool, {"path": "missing"}), "path_not_found")
+    _failure(_invoke(tool, {"path": "file.txt"}), "not_a_directory")
+    _failure(_invoke(tool, {"path": ".."}), "path_outside_workspace")
+    _failure(_invoke(tool, {}, is_cancelled=lambda: True), "cancelled")
+
+    (tmp_path / "second.txt").write_text("x", encoding="utf-8")
+    _failure(
+        _invoke(tools.LsTool(tmp_path, max_scanned_entries=1), {}),
+        "search_budget_exceeded",
+    )
+
+    def fail_scan(_workspace: Workspace, _directory: Path) -> None:
+        raise OSError("denied")
+
+    monkeypatch.setattr("jharness.tools.filesystem.ls.secure_scandir", fail_scan)
+    _failure(_invoke(tool, {}), "filesystem_error")
+
+
 def test_glob_success_sorting_exclusions_and_limits(tmp_path: Path) -> None:
     _search_fixture(tmp_path)
     tool = tools.GlobTool(tmp_path, default_limit=2)
@@ -482,6 +564,8 @@ def test_atomic_write_temporary_namespace_is_private_to_filesystem_tools(
 
     _, glob_result = _success(_invoke(tools.GlobTool(tmp_path), {"pattern": "*"}))
     assert cast(dict[str, object], glob_result)["matches"] == [visible_name]
+    _, ls_result = _success(_invoke(tools.LsTool(tmp_path), {}))
+    assert cast(dict[str, object], ls_result)["entries"] == [visible_name]
     _, grep_result = _success(_invoke(tools.GrepTool(tmp_path), {"pattern": "needle"}))
     assert cast(dict[str, object], grep_result)["files"] == [visible_name]
     assert reserved.read_text(encoding="utf-8") == "needle"

@@ -8,7 +8,7 @@ uv add jharness-tools
 ```
 
 ```python
-from jharness.tools import GlobTool, GrepTool, ReadTool
+from jharness.tools import GlobTool, GrepTool, LsTool, ReadTool
 ```
 
 Filesystem tools are rooted in one workspace and reject path escapes. `BashTool` uses

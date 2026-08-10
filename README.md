@@ -60,14 +60,14 @@ from pathlib import Path
 from jharness.kernel import Runtime
 from jharness.models.decorators import FallbackModel, RetryingModel
 from jharness.toolkit import ToolRegistry
-from jharness.tools import GlobTool, GrepTool, ReadTool
+from jharness.tools import GlobTool, GrepTool, LsTool, ReadTool
 
 model = FallbackModel(
     RetryingModel(primary_model, max_attempts=3),
     RetryingModel(backup_model, max_attempts=2),
 )
 root = Path.cwd()
-tools = ToolRegistry((ReadTool(root), GlobTool(root), GrepTool(root)))
+tools = ToolRegistry((ReadTool(root), LsTool(root), GlobTool(root), GrepTool(root)))
 runtime = Runtime(model=model, tools=tools)
 ```
 
