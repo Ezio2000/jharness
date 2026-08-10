@@ -6,6 +6,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Added the workspace-scoped `LsTool` filesystem preset for bounded, sorted,
+  non-recursive directory listings.
+
 ## [0.4.0] - 2026-08-10
 
 ### Added

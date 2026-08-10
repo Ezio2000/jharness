@@ -21,7 +21,7 @@ def _load_required_types() -> tuple[object, ...]:
         SQLiteRunRepository,
     )
     from jharness.toolkit import ToolRegistry
-    from jharness.tools import ReadTool
+    from jharness.tools import LsTool, ReadTool
 
     return (
         Runtime,
@@ -36,6 +36,7 @@ def _load_required_types() -> tuple[object, ...]:
         RedisRunRepository,
         SQLiteRunRepository,
         ToolRegistry,
+        LsTool,
         ReadTool,
     )
 
