@@ -27,7 +27,13 @@ from jharness.kernel.history import HistoryReducer, RunHistory
 from jharness.kernel.invocation import Invocation
 from jharness.kernel.limits import RunLimits
 from jharness.kernel.messages import Message
-from jharness.kernel.models import Model, ModelOptions, ResponseFormat, ToolChoice
+from jharness.kernel.models import (
+    Model,
+    ModelOptions,
+    ProviderToolSpec,
+    ResponseFormat,
+    ToolChoice,
+)
 from jharness.kernel.repository import RunRepository
 from jharness.kernel.tools import (
     BatchPolicy,
@@ -49,6 +55,7 @@ class Runtime:
         tools: ToolCatalogProvider | None = None,
         limits: RunLimits | None = None,
         model_options: ModelOptions | None = None,
+        provider_tools: Sequence[ProviderToolSpec] = (),
         tool_choice: ToolChoice | None = None,
         response_format: ResponseFormat | None = None,
         approval_policy: ApprovalPolicy | None = None,
@@ -69,11 +76,19 @@ class Runtime:
             if model_options is None
             else expect_instance(model_options, ModelOptions, "model_options")
         )
+        provider_tools = tuple(
+            expect_instance(item, ProviderToolSpec, "provider tool") for item in provider_tools
+        )
+        provider_tool_ids = tuple(spec.tool for spec in provider_tools)
+        if len(provider_tool_ids) != len(set(provider_tool_ids)):
+            raise ValueError("provider tools must be unique")
         choice = (
             ToolChoice()
             if tool_choice is None
             else expect_instance(tool_choice, ToolChoice, "tool_choice")
         )
+        if choice.type == "provider" and choice.provider_tool not in provider_tool_ids:
+            raise ValueError("tool choice names an unavailable provider tool")
         if response_format is not None:
             expect_instance(response_format, ResponseFormat, "response_format")
         if approval_policy is not None:
@@ -95,6 +110,7 @@ class Runtime:
             tools=tools,
             limits=limits,
             model_options=options,
+            provider_tools=provider_tools,
             tool_choice=choice,
             response_format=response_format,
             approval=approval_policy,

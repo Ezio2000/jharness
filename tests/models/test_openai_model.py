@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, cast
 
 import httpx
@@ -33,16 +34,23 @@ from jharness.models.openai.chat_completions.stream import OpenAIChatStreamDecod
 
 def request() -> ModelRequest:
     return ModelRequest(
-        (Message.system("policy"), Message.user("hello")),
-        (ToolSpec("search", "search", {"type": "object"}),),
-        ModelOptions(temperature=0.2, max_output_tokens=50),
-        ToolChoice("named", "search", False),
-        ResponseFormat("json_schema", {"type": "object"}, True),
+        messages=(Message.system("policy"), Message.user("hello")),
+        runtime_tools=(ToolSpec("search", "search", {"type": "object"}),),
+        options=ModelOptions(temperature=0.2, max_output_tokens=50),
+        tool_choice=ToolChoice(
+            type="runtime",
+            name="search",
+            allow_parallel_tool_calls=False,
+        ),
+        response_format=ResponseFormat("json_schema", {"type": "object"}, True),
     )
 
 
 def profile() -> OpenAIChatCompletionsProfile:
-    return OpenAIChatCompletionsProfile(supports_json_schema=True)
+    default = OpenAIChatCompletionsProfile()
+    return OpenAIChatCompletionsProfile(
+        capabilities=replace(default.capabilities, structured_output=True)
+    )
 
 
 def http_model(client: httpx.AsyncClient) -> OpenAIChatCompletionsModel:
@@ -101,8 +109,8 @@ def test_openai_codec_encodes_direct_tool_identity_and_decodes_response() -> Non
             "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
         }
     )
-    assert response.parts[0].text == "checking"
-    assert response.tool_calls == (ToolCall("call-1", "search", {"q": "x"}),)
+    assert response.visible_parts()[0].text == "checking"
+    assert response.runtime_tool_calls() == (ToolCall("call-1", "search", {"q": "x"}),)
     assert response.usage is not None and response.usage.total_tokens == 5
 
 
@@ -131,7 +139,7 @@ def test_openai_stream_decoder_builds_complete_response() -> None:
     completed = decoder.completed_response()
 
     assert len(first) == 1 and len(second) == 1
-    assert completed.parts[0].text == "hello"
+    assert completed.visible_parts()[0].text == "hello"
     assert completed.finish_reason == "stop"
     assert completed.response_id == "resp-1"
 
@@ -170,7 +178,9 @@ def test_openai_stream_decoder_accumulates_tool_call_arguments() -> None:
         }
     )
 
-    assert decoder.completed_response().tool_calls == (ToolCall("call-1", "search", {"q": "x"}),)
+    assert decoder.completed_response().runtime_tool_calls() == (
+        ToolCall("call-1", "search", {"q": "x"}),
+    )
 
 
 async def test_openai_client_uses_http_transport_and_maps_http_errors() -> None:
@@ -198,12 +208,12 @@ async def test_openai_client_uses_http_transport_and_maps_http_errors() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(success_handler)) as client:
         model = http_model(client)
         result = await model.invoke(
-            ModelRequest((Message.user("hello"),)),
+            ModelRequest(messages=(Message.user("hello"),)),
             RunContext("run-1", 1.0),
             stream=False,
             emit_delta=None,
         )
-    assert result.parts[0].text == "done"
+    assert result.visible_parts()[0].text == "done"
     assert captured["authorization"] == "Bearer secret"
     assert isinstance(model, Model)
     assert not hasattr(model, "complete")
@@ -221,7 +231,7 @@ async def test_openai_client_uses_http_transport_and_maps_http_errors() -> None:
         model = http_model(client)
         with pytest.raises(ModelError) as caught:
             await model.invoke(
-                ModelRequest((Message.user("hello"),)),
+                ModelRequest(messages=(Message.user("hello"),)),
                 RunContext("run-1", 1.0),
                 stream=False,
                 emit_delta=None,
@@ -256,13 +266,13 @@ def test_openai_reasoning_content_round_trips_through_history() -> None:
         }
     )
 
-    assert [(part.type, part.text) for part in response.parts] == [
+    assert [(part.type, part.text) for part in response.visible_parts()] == [
         ("reasoning", "think"),
         ("text", "answer"),
     ]
     encoded = codec.encode_request(
         ModelRequest(
-            (
+            messages=(
                 Message.user("question"),
                 Message.assistant(
                     (
@@ -315,20 +325,19 @@ def test_openai_reasoning_content_modes_enforce_tool_round_trip() -> None:
     with pytest.raises(OpenAIChatCompletionsError, match="requires non-empty reasoning"):
         required.encode_request(
             ModelRequest(
-                (
+                messages=(
                     Message.user("question"),
-                    Message.assistant(tool_calls=(call,)),
+                    Message.assistant((call,)),
                 )
             )
         )
 
     payload = required.encode_request(
         ModelRequest(
-            (
+            messages=(
                 Message.user("question"),
                 Message.assistant(
-                    (ContentPart(type="reasoning", text="why"),),
-                    tool_calls=(call,),
+                    (ContentPart(type="reasoning", text="why"), call),
                 ),
             )
         )
@@ -337,7 +346,7 @@ def test_openai_reasoning_content_modes_enforce_tool_round_trip() -> None:
     with pytest.raises(OpenAIChatCompletionsError, match="reasoning content"):
         OpenAIChatCompletionsCodec(model="gpt-test").encode_request(
             ModelRequest(
-                (
+                messages=(
                     Message.user("question"),
                     Message.assistant((ContentPart(type="reasoning", text="why"),)),
                 )
@@ -353,14 +362,13 @@ def test_deepseek_thinking_tool_replay_omits_tool_choice_and_keeps_content_non_n
     call = ToolCall("call-1", "search", {})
     payload = codec.encode_request(
         ModelRequest(
-            (
+            messages=(
                 Message.user("question"),
                 Message.assistant(
-                    (ContentPart(type="reasoning", text="why"),),
-                    tool_calls=(call,),
+                    (ContentPart(type="reasoning", text="why"), call),
                 ),
             ),
-            tools=(ToolSpec("search", "search", {"type": "object"}),),
+            runtime_tools=(ToolSpec("search", "search", {"type": "object"}),),
         )
     )
 
@@ -392,13 +400,18 @@ def test_openai_reasoning_content_and_seed_validate_wire_values() -> None:
         )
 
     seeded_request = ModelRequest(
-        (Message.user("question"),),
+        messages=(Message.user("question"),),
         options=ModelOptions(seed=7),
     )
     assert round_trip.encode_request(seeded_request)["seed"] == 7
     no_seed = OpenAIChatCompletionsCodec(
         model="gpt-test",
-        profile=OpenAIChatCompletionsProfile(supports_seed=False),
+        profile=OpenAIChatCompletionsProfile(
+            capabilities=replace(
+                OpenAIChatCompletionsProfile().capabilities,
+                seed=False,
+            )
+        ),
     )
     with pytest.raises(OpenAIChatCompletionsError, match="does not support seed"):
         no_seed.encode_request(seeded_request)
@@ -459,13 +472,13 @@ async def test_openai_client_decodes_sse_stream() -> None:
             deltas.append(delta)
 
         result = await model.invoke(
-            ModelRequest((Message.user("hello"),)),
+            ModelRequest(messages=(Message.user("hello"),)),
             RunContext("run-1", 1.0),
             stream=True,
             emit_delta=emit_delta,
         )
         unobserved = await model.invoke(
-            ModelRequest((Message.user("hello"),)),
+            ModelRequest(messages=(Message.user("hello"),)),
             RunContext("run-2", 1.0),
             stream=True,
             emit_delta=None,
@@ -473,5 +486,5 @@ async def test_openai_client_decodes_sse_stream() -> None:
 
     assert len(deltas) == 1
     assert isinstance(deltas[0], ModelContentDelta)
-    assert result.parts[0].text == "hello"
-    assert unobserved.parts[0].text == "hello"
+    assert result.visible_parts()[0].text == "hello"
+    assert unobserved.visible_parts()[0].text == "hello"

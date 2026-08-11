@@ -19,9 +19,9 @@ part of this contract.
 
 | Schema | Owns |
 | --- | --- |
-| `messages.schema.json` | Content, artifacts, tool calls, outcomes, and messages |
-| `model-request.schema.json` | Model options, tool choice, response format, and request |
-| `model-response.schema.json` | Complete response and usage |
+| `messages.schema.json` | Content, artifacts, ordered output items, tool calls, outcomes, and messages |
+| `model-request.schema.json` | Runtime/provider tools, model options, tool choice, response format, and request |
+| `model-response.schema.json` | Non-empty ordered model output and usage |
 | `model-error.schema.json` | Provider-neutral model failure |
 | `tools.schema.json` | Tool specifications, execution facts, and risk |
 | `tool-result.schema.json` | Tool outcomes and waiting suspension |
@@ -63,6 +63,13 @@ offline within this directory. Only versioned top-level envelopes carry
 - Repository commits atomically check revision, parent, history base, and run-scoped
   checkpoint idempotency.
 - Every model request receives the complete current durable history.
+- Model modalities describe what content the model accepts or directly emits;
+  tool ownership independently determines whether the runtime or provider
+  executes a call.
+- Assistant messages and complete model responses preserve one non-empty
+  ordered output of content, runtime tool calls, and provider tool calls.
+- Only runtime tool calls enter `ToolsPending`; provider tool calls are executed
+  remotely and remain ordered assistant output.
 - Parallel tool execution requires parallel, read-only, and idempotent execution
   facts; durable results remain in model order.
 - Only `checkpoint_committed` advances durable trace state. Other events are live

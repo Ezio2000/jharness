@@ -26,6 +26,8 @@ from jharness.kernel import (
     HistoryRewrite,
     Invocation,
     ModelRequest,
+    ProviderToolId,
+    ProviderToolSpec,
     RepositoryError,
     RequestError,
     RevisionConflict,
@@ -198,7 +200,11 @@ async def run_invocation(
     request_kind = cast(RequestKind, string(request["kind"], "request kind"))
     source = _source_for_request(request, seed, previous)
     raw_steps = tuple(sequence(fixture["model_steps"], "model steps"))
-    model = CaseModel(raw_steps)
+    provider_tools = _provider_tools(fixture.get("provider_tools", ()))
+    model = CaseModel(
+        raw_steps,
+        provider_tools=tuple(spec.tool for spec in provider_tools),
+    )
     streaming = model.streaming
     repository = CaseRepository(
         source,
@@ -209,6 +215,7 @@ async def run_invocation(
         model=model,
         tools=tools,
         limits=_limits(fixture.get("limits")),
+        provider_tools=provider_tools,
         approval_policy=_approval_policy(
             _optional_mapping(fixture.get("approval_decisions"), "approval decisions") or {},
             number(fixture.get("approval_delay_seconds", 0), "approval delay_seconds"),
@@ -533,6 +540,8 @@ def _encode_model_request(request: ModelRequest) -> dict[str, Any]:
     }
     if choice.name is not None:
         choice_wire["name"] = choice.name
+    if choice.provider_tool is not None:
+        choice_wire["provider_tool"] = _encode_provider_tool_id(choice.provider_tool)
     response = request.response_format
     if response is None:
         response_wire = None
@@ -546,7 +555,8 @@ def _encode_model_request(request: ModelRequest) -> dict[str, Any]:
         response_wire = {"type": response.type}
     return {
         "messages": [encode_message(message) for message in request.messages],
-        "tools": [encode_tool_spec(tool) for tool in request.tools],
+        "runtime_tools": [encode_tool_spec(tool) for tool in request.runtime_tools],
+        "provider_tools": [_encode_provider_tool_spec(tool) for tool in request.provider_tools],
         "options": {
             "model": options.model,
             "temperature": options.temperature,
@@ -559,6 +569,40 @@ def _encode_model_request(request: ModelRequest) -> dict[str, Any]:
         "tool_choice": choice_wire,
         "response_format": response_wire,
     }
+
+
+def _provider_tools(value: object) -> tuple[ProviderToolSpec, ...]:
+    specs: list[ProviderToolSpec] = []
+    for index, item in enumerate(sequence(value, "provider tools")):
+        raw = mapping(item, f"provider tool {index}")
+        tool = mapping(raw["tool"], f"provider tool {index} identity")
+        specs.append(
+            ProviderToolSpec(
+                tool=ProviderToolId(
+                    namespace=string(
+                        tool["namespace"],
+                        f"provider tool {index} namespace",
+                    ),
+                    type=string(tool["type"], f"provider tool {index} type"),
+                ),
+                configuration=mapping(
+                    raw["configuration"],
+                    f"provider tool {index} configuration",
+                ),
+            )
+        )
+    return tuple(specs)
+
+
+def _encode_provider_tool_spec(spec: ProviderToolSpec) -> dict[str, Any]:
+    return {
+        "tool": _encode_provider_tool_id(spec.tool),
+        "configuration": thaw_json_value(spec.configuration),
+    }
+
+
+def _encode_provider_tool_id(tool: ProviderToolId) -> dict[str, str]:
+    return {"namespace": tool.namespace, "type": tool.type}
 
 
 def _optional_mapping(value: object, label: str) -> Mapping[str, Any] | None:

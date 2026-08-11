@@ -6,7 +6,15 @@ from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from typing import Protocol, cast
 
-from jharness.kernel.messages import ArtifactRef, ContentPart, ErrorInfo, Message, TaskRef, ToolCall
+from jharness.kernel.messages import (
+    ArtifactRef,
+    ContentPart,
+    ErrorInfo,
+    Message,
+    ProviderToolCall,
+    TaskRef,
+    ToolCall,
+)
 from jharness.kernel.tools import ToolAccepted, ToolFailure, ToolOutcome, ToolWaiting
 
 
@@ -145,8 +153,15 @@ def write_message(writer: DigestWriter, value: Message) -> None:
     writer.string(value.role)
     writer.field("parts")
     write_parts(writer, value.parts)
-    writer.field("tool_calls")
-    write_tool_calls(writer, value.tool_calls)
+    writer.field("output")
+    writer.sequence(len(value.output))
+    for item in value.output:
+        if isinstance(item, ContentPart):
+            _write_content_part(writer, item)
+        elif isinstance(item, ToolCall):
+            write_tool_call(writer, item)
+        else:
+            _write_provider_tool_call(writer, item)
     writer.field("tool_call_id")
     write_optional_string(writer, value.tool_call_id)
     writer.field("outcome")
@@ -217,6 +232,29 @@ def write_tool_call(writer: DigestWriter, value: ToolCall) -> None:
     writer.string(value.name)
     writer.field("arguments")
     writer.json(value.arguments)
+
+
+def _write_provider_tool_call(writer: DigestWriter, value: ProviderToolCall) -> None:
+    writer.field("provider_tool_call")
+    writer.field("id")
+    writer.string(value.id)
+    writer.field("namespace")
+    writer.string(value.tool.namespace)
+    writer.field("type")
+    writer.string(value.tool.type)
+    writer.field("status")
+    writer.string(value.status.value)
+    writer.field("arguments")
+    writer.json(value.arguments)
+    writer.field("output")
+    write_parts(writer, value.output)
+    writer.field("error")
+    if value.error is None:
+        writer.none()
+    else:
+        write_error(writer, value.error)
+    writer.field("metadata")
+    writer.json(value.metadata)
 
 
 def _write_tool_outcome(writer: DigestWriter, value: ToolOutcome) -> None:

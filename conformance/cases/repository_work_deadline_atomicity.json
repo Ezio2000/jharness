@@ -25,14 +25,16 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [
+              "output": [
                 {
-                  "type": "text",
-                  "text": "must not commit",
-                  "metadata": {}
+                  "kind": "content",
+                  "content": {
+                    "type": "text",
+                    "text": "must not commit",
+                    "metadata": {}
+                  }
                 }
               ],
-              "tool_calls": [],
               "finish_reason": "end_turn",
               "usage": null,
               "model_id": "fixture-model",

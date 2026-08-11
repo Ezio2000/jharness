@@ -133,15 +133,17 @@
         { "$ref": "#/$defs/content_delta" },
         { "$ref": "#/$defs/tool_call_delta" },
         { "$ref": "#/$defs/reasoning_delta" },
+        { "$ref": "#/$defs/provider_tool_call_delta" },
         { "$ref": "#/$defs/usage_delta" }
       ]
     },
     "content_delta": {
       "type": "object",
-      "required": ["kind", "index", "part_type", "text_delta", "data"],
+      "required": ["kind", "output_index", "content_index", "part_type", "text_delta", "data"],
       "properties": {
         "kind": { "const": "content" },
-        "index": { "type": "integer", "minimum": 0 },
+        "output_index": { "type": "integer", "minimum": 0 },
+        "content_index": { "type": "integer", "minimum": 0 },
         "part_type": { "type": "string", "minLength": 1 },
         "text_delta": { "type": "string" },
         "data": { "type": "object" }
@@ -150,23 +152,41 @@
     },
     "tool_call_delta": {
       "type": "object",
-      "required": ["kind", "index", "id", "name", "arguments_delta"],
+      "required": ["kind", "output_index", "id", "name", "arguments_delta"],
       "properties": {
         "kind": { "const": "tool_call" },
-        "index": { "type": "integer", "minimum": 0 },
-        "id": { "type": ["string", "null"] },
-        "name": { "type": ["string", "null"] },
+        "output_index": { "type": "integer", "minimum": 0 },
+        "id": { "type": ["string", "null"], "minLength": 1 },
+        "name": { "type": ["string", "null"], "minLength": 1 },
         "arguments_delta": { "type": "string" }
       },
       "additionalProperties": false
     },
     "reasoning_delta": {
       "type": "object",
-      "required": ["kind", "index", "text_delta"],
+      "required": ["kind", "output_index", "content_index", "text_delta"],
       "properties": {
         "kind": { "const": "reasoning" },
-        "index": { "type": "integer", "minimum": 0 },
+        "output_index": { "type": "integer", "minimum": 0 },
+        "content_index": { "type": "integer", "minimum": 0 },
         "text_delta": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "provider_tool_call_delta": {
+      "type": "object",
+      "required": ["kind", "output_index", "id", "tool", "status", "event", "data"],
+      "properties": {
+        "kind": { "const": "provider_tool_call" },
+        "output_index": { "type": "integer", "minimum": 0 },
+        "id": { "type": "string", "minLength": 1 },
+        "tool": { "$ref": "messages.schema.json#/$defs/provider_tool_id" },
+        "status": {
+          "type": ["string", "null"],
+          "enum": ["in_progress", "completed", "incomplete", "failed", null]
+        },
+        "event": { "type": ["string", "null"], "minLength": 1 },
+        "data": { "type": "object" }
       },
       "additionalProperties": false
     },
@@ -181,10 +201,11 @@
     },
     "model_finished_data": {
       "type": "object",
-      "required": ["finish_reason", "tool_call_count", "usage"],
+      "required": ["finish_reason", "runtime_tool_call_count", "provider_tool_call_count", "usage"],
       "properties": {
         "finish_reason": { "type": ["string", "null"] },
-        "tool_call_count": { "type": "integer", "minimum": 0 },
+        "runtime_tool_call_count": { "type": "integer", "minimum": 0 },
+        "provider_tool_call_count": { "type": "integer", "minimum": 0 },
         "usage": {
           "oneOf": [
             { "$ref": "model-response.schema.json#/$defs/model_usage" },

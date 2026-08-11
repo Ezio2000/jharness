@@ -25,9 +25,9 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [],
-              "tool_calls": [
+              "output": [
                 {
+                  "kind": "runtime_tool_call",
                   "id": "empty-1",
                   "name": "echo",
                   "arguments": {
@@ -88,9 +88,9 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [],
-              "tool_calls": [
+              "output": [
                 {
+                  "kind": "runtime_tool_call",
                   "id": "skip-1",
                   "name": "echo",
                   "arguments": {
@@ -98,6 +98,7 @@
                   }
                 },
                 {
+                  "kind": "runtime_tool_call",
                   "id": "skip-2",
                   "name": "echo",
                   "arguments": {
@@ -158,9 +159,9 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [],
-              "tool_calls": [
+              "output": [
                 {
+                  "kind": "runtime_tool_call",
                   "id": "serial-1",
                   "name": "echo",
                   "arguments": {
@@ -168,6 +169,7 @@
                   }
                 },
                 {
+                  "kind": "runtime_tool_call",
                   "id": "serial-2",
                   "name": "echo",
                   "arguments": {
@@ -228,9 +230,9 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [],
-              "tool_calls": [
+              "output": [
                 {
+                  "kind": "runtime_tool_call",
                   "id": "unsafe-1",
                   "name": "echo",
                   "arguments": {
@@ -238,6 +240,7 @@
                   }
                 },
                 {
+                  "kind": "runtime_tool_call",
                   "id": "unsafe-2",
                   "name": "echo",
                   "arguments": {
@@ -298,9 +301,9 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [],
-              "tool_calls": [
+              "output": [
                 {
+                  "kind": "runtime_tool_call",
                   "id": "large-1",
                   "name": "delayed_echo",
                   "arguments": {
@@ -308,6 +311,7 @@
                   }
                 },
                 {
+                  "kind": "runtime_tool_call",
                   "id": "large-2",
                   "name": "delayed_echo",
                   "arguments": {

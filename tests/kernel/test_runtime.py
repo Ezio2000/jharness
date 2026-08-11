@@ -14,22 +14,29 @@ from jharness.kernel import (
     ApprovalSuspend,
     Checkpoint,
     CommitError,
+    Completed,
     ContentPart,
     DeltaSink,
     DurableCommit,
     Event,
     EventKind,
+    Failed,
     HistoryRewrite,
     Invocation,
     Message,
     Model,
     ModelCapabilities,
     ModelContentDelta,
+    ModelOptions,
     ModelRequest,
     ModelResponse,
     ModelUsage,
     PendingToolCalls,
     Planning,
+    ProviderToolCall,
+    ProviderToolId,
+    ProviderToolSpec,
+    ProviderToolStatus,
     RequestError,
     RunContext,
     RunHistory,
@@ -45,6 +52,7 @@ from jharness.kernel import (
     ToolCall,
     ToolCatalog,
     ToolCatalogProvider,
+    ToolChoice,
     ToolContext,
     ToolExecution,
     ToolFailure,
@@ -57,10 +65,18 @@ from jharness.kernel import (
 
 
 class ScriptModel(Model):
-    def __init__(self, responses: list[ModelResponse], *, streaming: bool = False) -> None:
+    def __init__(
+        self,
+        responses: list[ModelResponse],
+        *,
+        streaming: bool = False,
+        capabilities: ModelCapabilities | None = None,
+    ) -> None:
         self.responses = deque(responses)
         self.requests: list[ModelRequest] = []
-        self._capabilities = ModelCapabilities(streaming=streaming)
+        self._capabilities = (
+            ModelCapabilities(streaming=streaming) if capabilities is None else capabilities
+        )
 
     @property
     def capabilities(self) -> ModelCapabilities:
@@ -190,7 +206,7 @@ def test_start_rejects_invalid_planning_history_before_creating_invocation() -> 
     model = ScriptModel([final()])
 
     with pytest.raises(ValueError, match="unresolved"):
-        Runtime(model=model).start((Message.user("go"), Message.assistant(tool_calls=(call,))))
+        Runtime(model=model).start((Message.user("go"), Message.assistant((call,))))
 
     assert model.requests == []
 
@@ -217,12 +233,256 @@ async def test_final_run_result_and_events_share_one_execution() -> None:
 async def test_model_request_receives_complete_history() -> None:
     messages = tuple(Message.user(str(index)) for index in range(256))
     call = ToolCall("call-complete-history", "lookup")
-    model = ScriptModel([ModelResponse(tool_calls=(call,)), final()])
+    model = ScriptModel([ModelResponse((call,)), final()])
 
     checkpoint = await Runtime(model=model, tools=tool_provider()).start(messages).result()
 
     assert model.requests[0].messages == messages
     assert model.requests[1].messages == tuple(checkpoint.snapshot.history)[:-1]
+
+
+async def test_runtime_rejects_unsupported_exact_tool_choice_before_invocation() -> None:
+    model = ScriptModel(
+        [final()],
+        capabilities=ModelCapabilities(tool_choice_types=frozenset({"auto"})),
+    )
+
+    checkpoint = (
+        await Runtime(model=model, tool_choice=ToolChoice("none"))
+        .start((Message.user("hello"),))
+        .result()
+    )
+
+    assert isinstance(checkpoint.snapshot.state, Failed)
+    assert checkpoint.snapshot.state.error.message == "model does not support tool_choice='none'"
+    assert model.requests == []
+
+
+async def test_runtime_rejects_unsupported_parallel_control_before_invocation() -> None:
+    model = ScriptModel(
+        [final()],
+        capabilities=ModelCapabilities(parallel_tool_call_control=False),
+    )
+
+    checkpoint = (
+        await Runtime(
+            model=model,
+            tools=tool_provider(),
+            tool_choice=ToolChoice(allow_parallel_tool_calls=False),
+        )
+        .start((Message.user("hello"),))
+        .result()
+    )
+
+    assert isinstance(checkpoint.snapshot.state, Failed)
+    assert checkpoint.snapshot.state.error.message == "model cannot disable parallel tool calls"
+    assert model.requests == []
+
+
+async def test_runtime_rejects_unsupported_seed_before_invocation() -> None:
+    model = ScriptModel(
+        [final()],
+        capabilities=ModelCapabilities(seed=False),
+    )
+
+    checkpoint = (
+        await Runtime(
+            model=model,
+            model_options=ModelOptions(seed=7),
+        )
+        .start((Message.user("hello"),))
+        .result()
+    )
+
+    assert isinstance(checkpoint.snapshot.state, Failed)
+    assert checkpoint.snapshot.state.error.message == "model does not support seed"
+    assert model.requests == []
+
+
+async def test_provider_tool_call_is_observed_but_never_scheduled_by_runtime() -> None:
+    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    provider_call = ProviderToolCall(
+        "search-1",
+        provider_id,
+        ProviderToolStatus.COMPLETED,
+        {"query": "JHarness"},
+        metadata={"action": "search"},
+    )
+    model = ScriptModel(
+        [ModelResponse((provider_call, ContentPart.text_part("answer")))],
+        capabilities=ModelCapabilities(provider_tools=frozenset({provider_id})),
+    )
+    checkpoint, events = await collect(
+        Runtime(
+            model=model,
+            provider_tools=(ProviderToolSpec(provider_id),),
+        ).start((Message.user("search"),))
+    )
+
+    assert checkpoint.snapshot.status == "completed"
+    assert checkpoint.snapshot.metrics.tool_calls == 0
+    assistant = checkpoint.snapshot.history[-1]
+    assert assistant.provider_tool_calls() == (provider_call,)
+    finished = next(event for event in events if event.kind is EventKind.MODEL_FINISHED)
+    assert finished.data["runtime_tool_call_count"] == 0
+    assert finished.data["provider_tool_call_count"] == 1
+
+
+async def test_provider_only_output_completes_with_empty_visible_projection() -> None:
+    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    calls = tuple(
+        ProviderToolCall(
+            f"search-{index}",
+            provider_id,
+            ProviderToolStatus.COMPLETED,
+            {"query": f"query-{index}"},
+        )
+        for index in range(3)
+    )
+    model = ScriptModel(
+        [ModelResponse(calls)],
+        capabilities=ModelCapabilities(
+            parallel_tool_calls=False,
+            provider_tools=frozenset({provider_id}),
+        ),
+    )
+    checkpoint, events = await collect(
+        Runtime(
+            model=model,
+            provider_tools=(ProviderToolSpec(provider_id),),
+            tool_choice=ToolChoice(allow_parallel_tool_calls=False),
+        ).start((Message.user("search only"),))
+    )
+
+    assert checkpoint.snapshot.state == Completed(())
+    assert checkpoint.snapshot.history[-1].output == calls
+    assert checkpoint.snapshot.metrics.tool_calls == 0
+    assert not any(
+        event.kind
+        in {
+            EventKind.TOOL_BATCH_SELECTED,
+            EventKind.TOOL_STARTED,
+            EventKind.TOOL_FINISHED,
+        }
+        for event in events
+    )
+
+
+async def test_provider_output_does_not_expand_direct_output_modalities() -> None:
+    provider_id = ProviderToolId("openai.responses", "image_generation")
+    image = ContentPart(
+        "image",
+        uri="https://example.invalid/generated.png",
+        media_type="image/png",
+    )
+    provider_call = ProviderToolCall(
+        "image-1",
+        provider_id,
+        ProviderToolStatus.COMPLETED,
+        output=(image,),
+    )
+    capabilities = ModelCapabilities(
+        output_modalities=frozenset({"text"}),
+        provider_tools=frozenset({provider_id}),
+    )
+    provider_result = (
+        await Runtime(
+            model=ScriptModel([ModelResponse((provider_call,))], capabilities=capabilities),
+            provider_tools=(ProviderToolSpec(provider_id),),
+        )
+        .start((Message.user("draw"),))
+        .result()
+    )
+    direct_result = (
+        await Runtime(
+            model=ScriptModel([ModelResponse((image,))], capabilities=capabilities),
+        )
+        .start((Message.user("draw"),))
+        .result()
+    )
+
+    assert provider_result.snapshot.state == Completed((image,))
+    assert isinstance(direct_result.snapshot.state, Failed)
+    assert direct_result.snapshot.state.error.code == "model_protocol_error"
+
+
+async def test_mixed_provider_and_runtime_calls_schedule_only_runtime_call() -> None:
+    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    provider_call = ProviderToolCall(
+        "search-1",
+        provider_id,
+        ProviderToolStatus.COMPLETED,
+    )
+    runtime_call = ToolCall("runtime-1", "lookup", {"query": "JHarness"})
+    model = ScriptModel(
+        [ModelResponse((provider_call, runtime_call)), final()],
+        capabilities=ModelCapabilities(provider_tools=frozenset({provider_id})),
+    )
+    checkpoint = (
+        await Runtime(
+            model=model,
+            tools=tool_provider(),
+            provider_tools=(ProviderToolSpec(provider_id),),
+        )
+        .start((Message.user("search then lookup"),))
+        .result()
+    )
+
+    assert checkpoint.snapshot.status == "completed"
+    assert checkpoint.snapshot.metrics.tool_calls == 1
+    assert checkpoint.snapshot.history[1].output == (provider_call, runtime_call)
+    assert [
+        message.tool_call_id for message in checkpoint.snapshot.history if message.role == "tool"
+    ] == [runtime_call.id]
+
+
+async def test_invalid_dynamic_model_request_becomes_failed_checkpoint() -> None:
+    model = ScriptModel([final()])
+    checkpoint, events = await collect(
+        Runtime(
+            model=model,
+            tool_choice=ToolChoice("runtime", name="missing"),
+        ).start((Message.user("go"),))
+    )
+
+    assert isinstance(checkpoint.snapshot.state, Failed)
+    assert checkpoint.snapshot.state.error.code == "model_protocol_error"
+    assert model.requests == []
+    assert EventKind.MODEL_STARTED not in [event.kind for event in events]
+
+
+def test_runtime_rejects_invalid_static_provider_configuration() -> None:
+    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    spec = ProviderToolSpec(provider_id)
+    model = ScriptModel([final()])
+
+    with pytest.raises(ValueError, match="provider tools must be unique"):
+        Runtime(model=model, provider_tools=(spec, spec))
+    with pytest.raises(ValueError, match="unavailable provider tool"):
+        Runtime(
+            model=model,
+            tool_choice=ToolChoice("provider", provider_tool=provider_id),
+        )
+
+
+async def test_terminal_response_rejects_in_progress_provider_call() -> None:
+    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    call = ProviderToolCall("search-running", provider_id, ProviderToolStatus.IN_PROGRESS)
+    model = ScriptModel(
+        [ModelResponse((call, ContentPart.text_part("premature")))],
+        capabilities=ModelCapabilities(provider_tools=frozenset({provider_id})),
+    )
+    checkpoint = (
+        await Runtime(
+            model=model,
+            provider_tools=(ProviderToolSpec(provider_id),),
+        )
+        .start((Message.user("search"),))
+        .result()
+    )
+
+    assert isinstance(checkpoint.snapshot.state, Failed)
+    assert checkpoint.snapshot.state.error.code == "model_protocol_error"
 
 
 async def test_result_only_rejects_late_event_subscription() -> None:
@@ -263,7 +523,7 @@ async def test_finished_invocation_discards_all_control_operations() -> None:
 
 async def test_tool_result_is_committed_in_model_order() -> None:
     call = ToolCall("call-1", "lookup", {"q": "x"})
-    model = ScriptModel([ModelResponse(tool_calls=(call,)), final()])
+    model = ScriptModel([ModelResponse((call,)), final()])
     checkpoint, events = await collect(
         Runtime(model=model, tools=tool_provider()).start((Message.user("go"),))
     )
@@ -294,7 +554,7 @@ async def test_serial_tool_batches_do_not_materialize_the_remaining_suffix(
     monkeypatch.setattr(PendingToolCalls, "prefix", fail_prefix)
     checkpoint = (
         await Runtime(
-            model=ScriptModel([ModelResponse(tool_calls=calls), final()]),
+            model=ScriptModel([ModelResponse(calls), final()]),
             tools=tool_provider(),
             limits=RunLimits(max_tool_calls=len(calls), max_tool_batch_size=len(calls)),
         )
@@ -317,7 +577,7 @@ async def test_waiting_result_suspends_and_exact_resume_completes() -> None:
         return WaitingResult(ToolWaiting((ContentPart.text_part("waiting"),)), suspension)
 
     call = ToolCall("call-1", "lookup")
-    model = ScriptModel([ModelResponse(tool_calls=(call,)), final("resumed")])
+    model = ScriptModel([ModelResponse((call,)), final("resumed")])
     runtime = Runtime(model=model, tools=tool_provider(waiting))
     paused = await runtime.start((Message.user("go"),)).result()
     assert isinstance(paused.snapshot.state, Suspended)
@@ -532,7 +792,7 @@ async def test_approval_deny_is_model_visible_and_suspend_invokes_nothing() -> N
         return SettledResult(ToolSuccess((ContentPart.text_part("unexpected"),)))
 
     call = ToolCall("call-1", "lookup")
-    denied_model = ScriptModel([ModelResponse(tool_calls=(call,)), final()])
+    denied_model = ScriptModel([ModelResponse((call,)), final()])
     denied = (
         await Runtime(
             model=denied_model,
@@ -545,7 +805,7 @@ async def test_approval_deny_is_model_visible_and_suspend_invokes_nothing() -> N
     assert isinstance(denied.snapshot.history[2].outcome, ToolFailure)
     assert invoked == 0
 
-    suspended_model = ScriptModel([ModelResponse(tool_calls=(call,))])
+    suspended_model = ScriptModel([ModelResponse((call,))])
     suspended = (
         await Runtime(
             model=suspended_model,

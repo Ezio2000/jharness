@@ -46,6 +46,7 @@ from jharness.kernel.models import (
     Model,
     ModelCapabilities,
     ModelOptions,
+    ProviderToolSpec,
     ResponseFormat,
     ToolChoice,
 )
@@ -75,6 +76,7 @@ class EngineConfig:
     tools: ToolCatalogProvider = field(default_factory=EmptyToolCatalogProvider)
     limits: RunLimits = field(default_factory=RunLimits)
     model_options: ModelOptions = field(default_factory=ModelOptions)
+    provider_tools: tuple[ProviderToolSpec, ...] = ()
     tool_choice: ToolChoice = field(default_factory=ToolChoice)
     response_format: ResponseFormat | None = None
     approval: ApprovalPolicy | None = None
@@ -295,6 +297,7 @@ class Engine:
             catalog=cast(ToolCatalog, self._catalog),
             limits=self._config.limits,
             options=self._config.model_options,
+            provider_tools=self._config.provider_tools,
             tool_choice=self._config.tool_choice,
             response_format=self._config.response_format,
             stream=self._stream,

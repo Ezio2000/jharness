@@ -2,14 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
+from jharness.kernel import ModelCapabilities, ProviderToolId
 from jharness.models.anthropic import AnthropicProfile
-from jharness.models.openai import OpenAIChatCompletionsProfile
+from jharness.models.openai.profiles import (
+    OpenAIChatCompletionsProfile,
+    OpenAIResponsesProfile,
+)
 
 DeepSeekThinkingEffort = Literal["high", "max"]
+DeepSeekResponsesEffort = Literal[
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+]
 
 _THINKING_EFFORTS = frozenset({"high", "max"})
+_RESPONSES_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+_RUNTIME_TOOL_CHOICES = frozenset({"auto", "none", "required", "runtime"})
+_ALL_TOOL_CHOICES = frozenset({"auto", "none", "required", "runtime", "provider"})
 
 
 def deepseek_openai_chat_profile(
@@ -23,20 +39,23 @@ def deepseek_openai_chat_profile(
     extra_request_body = _thinking_request_body(thinking=thinking, effort=effort)
     return OpenAIChatCompletionsProfile(
         name=_profile_name("deepseek-openai-chat", thinking),
-        supports_streaming=True,
-        supports_tools=True,
-        supports_tool_choice=not thinking,
-        supports_parallel_tool_calls=True,
-        supports_parallel_tool_call_control=False,
-        supports_image_input=False,
-        supports_video_input=False,
-        supports_file_input=False,
-        supports_json_object=True,
-        supports_json_schema=False,
-        supports_seed=False,
-        requires_assistant_content_for_tool_calls=thinking,
+        capabilities=ModelCapabilities(
+            streaming=True,
+            runtime_tools=True,
+            tool_choice_types=(frozenset({"auto"}) if thinking else _RUNTIME_TOOL_CHOICES),
+            parallel_tool_calls=True,
+            parallel_tool_call_control=False,
+            input_modalities=frozenset({"text"}),
+            output_modalities=frozenset({"text"}),
+            structured_output=False,
+            json_mode=True,
+            seed=False,
+            usage_reporting=True,
+        ),
+        automatic_tool_choice_mode="implicit" if thinking else "explicit",
+        assistant_tool_call_content_mode="required" if thinking else "nullable",
         reasoning_content_mode="required_with_tools" if thinking else "live_only",
-        stream_include_usage=True,
+        stream_usage_mode="include",
         extra_request_body=extra_request_body,
     )
 
@@ -52,19 +71,67 @@ def deepseek_anthropic_profile(
     extra_request_body = _thinking_request_body(thinking=thinking, effort=None)
     return AnthropicProfile(
         name=_profile_name("deepseek-anthropic", thinking),
-        supports_streaming=True,
-        supports_tools=True,
-        supports_tool_choice=True,
-        supports_parallel_tool_calls=True,
-        supports_parallel_tool_call_control=False,
-        supports_image_input=False,
-        supports_file_input=False,
-        supports_json_object=False,
-        supports_json_schema=False,
-        supports_redacted_thinking=False,
-        stream_usage=True,
+        capabilities=ModelCapabilities(
+            streaming=True,
+            runtime_tools=True,
+            tool_choice_types=_RUNTIME_TOOL_CHOICES,
+            parallel_tool_calls=True,
+            parallel_tool_call_control=False,
+            input_modalities=frozenset({"text"}),
+            output_modalities=frozenset({"text"}),
+            structured_output=False,
+            json_mode=False,
+            seed=False,
+            usage_reporting=True,
+        ),
+        redacted_thinking_mode="reject",
+        stream_usage_mode="include",
         extra_request_body=extra_request_body,
         extra_output_config={} if effort is None else {"effort": effort},
+    )
+
+
+def deepseek_openai_responses_profile(
+    *,
+    effort: DeepSeekResponsesEffort | None = None,
+) -> OpenAIResponsesProfile:
+    """Return the native DeepSeek-V4-Flash Responses API profile."""
+
+    effort_value = cast(object, effort)
+    if effort is not None and (
+        not isinstance(effort_value, str) or effort not in _RESPONSES_EFFORTS
+    ):
+        expected = ", ".join(sorted(_RESPONSES_EFFORTS))
+        raise ValueError(f"effort must be one of: {expected}")
+    extra_request_body: dict[str, object] = {}
+    if effort is not None:
+        extra_request_body["reasoning"] = {"effort": effort}
+    return OpenAIResponsesProfile(
+        name="deepseek-openai-responses",
+        capabilities=ModelCapabilities(
+            streaming=True,
+            runtime_tools=True,
+            tool_choice_types=(
+                frozenset({"auto", "none"}) if effort != "none" else _ALL_TOOL_CHOICES
+            ),
+            parallel_tool_calls=True,
+            parallel_tool_call_control=False,
+            input_modalities=frozenset({"text"}),
+            output_modalities=frozenset({"text"}),
+            provider_tools=frozenset({ProviderToolId("deepseek.responses", "web_search")}),
+            structured_output=True,
+            json_mode=True,
+            seed=False,
+            usage_reporting=True,
+        ),
+        reasoning_history_mode="content",
+        provider_tool_configuration_fields={"web_search": frozenset()},
+        allowed_models=frozenset({"deepseek-v4-flash"}),
+        extra_request_body=extra_request_body,
+        finish_reason_map={
+            "max_output_tokens": "length",
+            "content_filter": "content_filter",
+        },
     )
 
 

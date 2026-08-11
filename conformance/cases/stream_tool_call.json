@@ -25,14 +25,14 @@
           "deltas": [
             {
               "kind": "tool_call",
-              "index": 0,
+              "output_index": 0,
               "id": "call-1",
               "name": "echo",
               "arguments_delta": "{\"text\":\""
             },
             {
               "kind": "tool_call",
-              "index": 0,
+              "output_index": 0,
               "id": null,
               "name": null,
               "arguments_delta": "streamed\"}"
@@ -41,9 +41,9 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [],
-              "tool_calls": [
+              "output": [
                 {
+                  "kind": "runtime_tool_call",
                   "id": "call-1",
                   "name": "echo",
                   "arguments": {
@@ -63,7 +63,8 @@
           "deltas": [
             {
               "kind": "content",
-              "index": 0,
+              "output_index": 0,
+              "content_index": 0,
               "text_delta": "done",
               "part_type": "text",
               "data": {}
@@ -72,14 +73,16 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [
+              "output": [
                 {
-                  "type": "text",
-                  "text": "done",
-                  "metadata": {}
+                  "kind": "content",
+                  "content": {
+                    "type": "text",
+                    "text": "done",
+                    "metadata": {}
+                  }
                 }
               ],
-              "tool_calls": [],
               "finish_reason": "end_turn",
               "usage": null,
               "model_id": "fixture-model",

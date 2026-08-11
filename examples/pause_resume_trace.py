@@ -68,7 +68,7 @@ class DemoModel:
         del context, stream, emit_delta
         if not any(message.role == "tool" for message in request.messages):
             return ModelResponse(
-                tool_calls=(ToolCall("call-1", "external_wait", {"wait_id": "job-1"}),),
+                (ToolCall("call-1", "external_wait", {"wait_id": "job-1"}),),
                 finish_reason="tool_calls",
             )
         return ModelResponse(

@@ -75,7 +75,7 @@ class _BenchmarkModel:
         del request, context, stream, emit_delta
         self._turn += 1
         if self._turn == 1:
-            return ModelResponse(tool_calls=self._calls, finish_reason="tool_calls")
+            return ModelResponse(self._calls, finish_reason="tool_calls")
         return ModelResponse((ContentPart.text_part("done"),), finish_reason="end_turn")
 
 

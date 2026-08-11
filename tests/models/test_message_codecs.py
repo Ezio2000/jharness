@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 
 import pytest
 
@@ -59,10 +60,12 @@ def tool_message(call_id: str, *, failure: bool = False) -> Message:
 
 
 def test_openai_message_codec_covers_roles_multimodal_and_native_parts() -> None:
+    default = OpenAIChatCompletionsProfile()
     profile = OpenAIChatCompletionsProfile(
-        supports_image_input=True,
-        supports_video_input=True,
-        supports_file_input=True,
+        capabilities=replace(
+            default.capabilities,
+            input_modalities=frozenset({"text", "image", "video", "file"}),
+        ),
         system_content_mode="parts",
     )
     call = ToolCall("call-1", "search", {"q": "x"})
@@ -78,8 +81,8 @@ def test_openai_message_codec_covers_roles_multimodal_and_native_parts() -> None
         (
             ContentPart.text_part("cannot"),
             ContentPart(type="refusal", text="no"),
+            call,
         ),
-        tool_calls=(call,),
     )
     encoded_assistant = encode_chat_message(assistant, profile)
     assert encoded_assistant["tool_calls"][0]["id"] == "call-1"
@@ -125,7 +128,9 @@ def test_openai_tool_codec_validates_choices_and_arguments() -> None:
     assert encode_openai_tools((spec,), profile)[0]["function"]["name"] == "search"
     assert encode_openai_choice(ToolChoice(), tool_names={"search"}, profile=profile) == "auto"
     assert encode_openai_choice(
-        ToolChoice("named", "search"), tool_names={"search"}, profile=profile
+        ToolChoice(type="runtime", name="search"),
+        tool_names={"search"},
+        profile=profile,
     ) == {"type": "function", "function": {"name": "search"}}
     calls = decode_tool_calls(
         [
@@ -148,16 +153,22 @@ def test_openai_tool_codec_validates_choices_and_arguments() -> None:
     with pytest.raises(OpenAIChatCompletionsError, match="requires at least one"):
         encode_openai_choice(ToolChoice("required"), tool_names=set(), profile=profile)
     with pytest.raises(OpenAIChatCompletionsError, match="unavailable"):
-        encode_openai_choice(ToolChoice("named", "other"), tool_names={"search"}, profile=profile)
+        encode_openai_choice(
+            ToolChoice(type="runtime", name="other"),
+            tool_names={"search"},
+            profile=profile,
+        )
     with pytest.raises(OpenAIChatCompletionsError, match="invalid JSON"):
         decode_tool_calls([{"id": "call", "function": {"name": "search", "arguments": "{"}}])
 
 
 def test_openai_message_codec_rejects_unsupported_content() -> None:
+    default = OpenAIChatCompletionsProfile()
     profile = OpenAIChatCompletionsProfile(
-        supports_image_input=False,
-        supports_video_input=False,
-        supports_file_input=False,
+        capabilities=replace(
+            default.capabilities,
+            input_modalities=frozenset({"text"}),
+        ),
     )
     with pytest.raises(OpenAIChatCompletionsError, match="image input"):
         encode_content_part(ContentPart("image", uri="https://x/image"), profile)
@@ -185,7 +196,7 @@ def test_anthropic_message_codec_covers_system_tools_and_native_parts() -> None:
         (
             Message.system("policy"),
             Message.user("hello"),
-            Message.assistant((thinking, redacted), tool_calls=(call,)),
+            Message.assistant((thinking, redacted, call)),
             tool_message("call-1", failure=True),
             Message.external("callback"),
         ),
@@ -208,9 +219,13 @@ def test_anthropic_message_codec_covers_system_tools_and_native_parts() -> None:
         {"type": "redacted_thinking", "data": "secret"},
         {"type": "tool_use", "id": "call-2", "name": "search", "input": {}},
     ]
-    parts, uses = decode_content_blocks(blocks)
-    assert [part.type for part in parts] == ["text", "thinking", "redacted_thinking"]
-    assert decode_tool_uses(uses) == [ToolCall("call-2", "search", {})]
+    decoded = Message.assistant(decode_content_blocks(blocks))
+    assert [part.type for part in decoded.visible_parts()] == [
+        "text",
+        "thinking",
+        "redacted_thinking",
+    ]
+    assert decoded.runtime_tool_calls() == (ToolCall("call-2", "search", {}),)
     assert encode_message(Message.external("callback"), profile)["role"] == "user"
 
 
@@ -227,7 +242,7 @@ def test_anthropic_message_codec_guards_redacted_thinking_replay() -> None:
 
     profile = AnthropicProfile(
         name="anthropic-without-redacted-thinking",
-        supports_redacted_thinking=False,
+        redacted_thinking_mode="reject",
     )
     expected_error = "anthropic-without-redacted-thinking does not support redacted_thinking"
     native_redacted = ContentPart(
@@ -290,7 +305,13 @@ def test_anthropic_media_and_tool_choice_codec() -> None:
 
 
 def test_anthropic_codec_rejects_invalid_roles_media_and_blocks() -> None:
-    profile = AnthropicProfile(supports_image_input=False, supports_file_input=False)
+    default = AnthropicProfile()
+    profile = AnthropicProfile(
+        capabilities=replace(
+            default.capabilities,
+            input_modalities=frozenset({"text"}),
+        )
+    )
     with pytest.raises(AnthropicError, match="mid-conversation"):
         encode_messages(
             (Message.user("hello"), Message.system("late")),

@@ -95,7 +95,7 @@ class _EndToEndModel(Model):
         self.child_requests.append((request, context))
         assert request.options == self.expected_options
         assert request.tool_choice == self.expected_tool_choice
-        assert [spec.name for spec in request.tools] == ["Read"]
+        assert [spec.name for spec in request.runtime_tools] == ["Read"]
         assert context.parent_run_id is not None
         assert context.parent_tool_call_id is not None
 
@@ -107,9 +107,7 @@ class _EndToEndModel(Model):
             except asyncio.CancelledError:
                 self.child_model_cancelled = True
                 raise
-            return ModelResponse(
-                tool_calls=(ToolCall("child-read", "Read", {"file_path": "evidence.txt"}),)
-            )
+            return ModelResponse((ToolCall("child-read", "Read", {"file_path": "evidence.txt"}),))
 
         outcome = tool_messages[-1].outcome
         assert isinstance(outcome, ToolSuccess)
@@ -141,7 +139,7 @@ class _EndToEndModel(Model):
         tool_messages = [message for message in request.messages if message.role == "tool"]
         if not tool_messages:
             return ModelResponse(
-                tool_calls=(
+                (
                     ToolCall(
                         "delegate-child",
                         "Agent",
@@ -178,17 +176,13 @@ class _EndToEndModel(Model):
         agent_id: str,
     ) -> ModelResponse:
         if len(tool_messages) == 1:
-            return ModelResponse(
-                tool_calls=(ToolCall("get-child", "AgentGet", {"agent_id": agent_id}),)
-            )
+            return ModelResponse((ToolCall("get-child", "AgentGet", {"agent_id": agent_id}),))
         assert len(tool_messages) == 2
         get_outcome = tool_messages[-1].outcome
         assert isinstance(get_outcome, ToolSuccess)
         payload = thaw_json_value(get_outcome.structured_content)
         assert isinstance(payload, dict) and payload["status"] == "running"
-        return ModelResponse(
-            tool_calls=(ToolCall("wait-child", "AgentWait", {"agent_id": agent_id}),)
-        )
+        return ModelResponse((ToolCall("wait-child", "AgentWait", {"agent_id": agent_id}),))
 
     def _cancel_step(
         self,
@@ -196,9 +190,7 @@ class _EndToEndModel(Model):
         agent_id: str,
     ) -> ModelResponse:
         if len(tool_messages) == 1:
-            return ModelResponse(
-                tool_calls=(ToolCall("cancel-child", "AgentCancel", {"agent_id": agent_id}),)
-            )
+            return ModelResponse((ToolCall("cancel-child", "AgentCancel", {"agent_id": agent_id}),))
         cancel_outcome = tool_messages[-1].outcome
         assert isinstance(cancel_outcome, ToolSuccess)
         payload = thaw_json_value(cancel_outcome.structured_content)

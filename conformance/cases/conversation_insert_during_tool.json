@@ -25,9 +25,9 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [],
-              "tool_calls": [
+              "output": [
                 {
+                  "kind": "runtime_tool_call",
                   "id": "call-1",
                   "name": "delayed_echo",
                   "arguments": {
@@ -48,14 +48,16 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [
+              "output": [
                 {
-                  "type": "text",
-                  "text": "saw insert",
-                  "metadata": {}
+                  "kind": "content",
+                  "content": {
+                    "type": "text",
+                    "text": "saw insert",
+                    "metadata": {}
+                  }
                 }
               ],
-              "tool_calls": [],
               "finish_reason": "end_turn",
               "usage": null,
               "model_id": "fixture-model",

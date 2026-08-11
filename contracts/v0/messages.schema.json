@@ -27,24 +27,17 @@
     },
     "assistant_message": {
       "type": "object",
-      "required": ["role", "parts", "tool_calls", "metadata"],
+      "required": ["role", "output", "metadata"],
       "properties": {
         "role": { "const": "assistant" },
-        "parts": {
+        "output": {
           "type": "array",
-          "items": { "$ref": "#/$defs/content_part" }
-        },
-        "tool_calls": {
-          "type": "array",
-          "$comment": "Tool call ids must be unique. SDK semantic validation enforces uniqueness by id.",
-          "items": { "$ref": "#/$defs/tool_call" }
+          "minItems": 1,
+          "$comment": "Runtime and provider tool call ids must be unique across the ordered output. SDK semantic validation enforces uniqueness by id.",
+          "items": { "$ref": "#/$defs/model_output_item" }
         },
         "metadata": { "type": "object" }
       },
-      "anyOf": [
-        { "properties": { "parts": { "minItems": 1 } } },
-        { "properties": { "tool_calls": { "minItems": 1 } } }
-      ],
       "additionalProperties": false
     },
     "tool_message": {
@@ -66,6 +59,99 @@
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1 },
         "arguments": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "model_output_item": {
+      "oneOf": [
+        { "$ref": "#/$defs/content_output_item" },
+        { "$ref": "#/$defs/runtime_tool_call_output_item" },
+        { "$ref": "#/$defs/provider_tool_call_output_item" }
+      ]
+    },
+    "content_output_item": {
+      "type": "object",
+      "required": ["kind", "content"],
+      "properties": {
+        "kind": { "const": "content" },
+        "content": { "$ref": "#/$defs/content_part" }
+      },
+      "additionalProperties": false
+    },
+    "runtime_tool_call_output_item": {
+      "type": "object",
+      "required": ["kind", "id", "name", "arguments"],
+      "properties": {
+        "kind": { "const": "runtime_tool_call" },
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "arguments": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "provider_tool_call_output_item": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "tool",
+        "status",
+        "arguments",
+        "output",
+        "error",
+        "metadata"
+      ],
+      "properties": {
+        "kind": { "const": "provider_tool_call" },
+        "id": { "type": "string", "minLength": 1 },
+        "tool": { "$ref": "#/$defs/provider_tool_id" },
+        "status": {
+          "enum": ["in_progress", "completed", "incomplete", "failed"]
+        },
+        "arguments": { "type": "object" },
+        "output": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/content_part" }
+        },
+        "error": {
+          "oneOf": [
+            { "$ref": "#/$defs/error_info" },
+            { "type": "null" }
+          ]
+        },
+        "metadata": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "failed" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": { "error": { "$ref": "#/$defs/error_info" } }
+          },
+          "else": {
+            "properties": { "error": { "type": "null" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "in_progress" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": { "output": { "maxItems": 0 } }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "provider_tool_id": {
+      "type": "object",
+      "required": ["namespace", "type"],
+      "properties": {
+        "namespace": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
     },

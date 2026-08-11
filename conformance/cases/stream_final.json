@@ -25,14 +25,16 @@
           "deltas": [
             {
               "kind": "content",
-              "index": 0,
+              "output_index": 0,
+              "content_index": 0,
               "text_delta": "he",
               "part_type": "text",
               "data": {}
             },
             {
               "kind": "content",
-              "index": 0,
+              "output_index": 0,
+              "content_index": 0,
               "text_delta": "llo",
               "part_type": "text",
               "data": {}
@@ -41,14 +43,16 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [
+              "output": [
                 {
-                  "type": "text",
-                  "text": "hello",
-                  "metadata": {}
+                  "kind": "content",
+                  "content": {
+                    "type": "text",
+                    "text": "hello",
+                    "metadata": {}
+                  }
                 }
               ],
-              "tool_calls": [],
               "finish_reason": "end_turn",
               "usage": null,
               "model_id": "fixture-model",

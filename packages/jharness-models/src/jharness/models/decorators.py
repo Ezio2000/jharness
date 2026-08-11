@@ -106,15 +106,24 @@ class FallbackModel:
     def capabilities(self) -> ModelCapabilities:
         primary = self.primary.capabilities
         backup = self.backup.capabilities
+        provider_tools = primary.provider_tools & backup.provider_tools
+        tool_choice_types = primary.tool_choice_types & backup.tool_choice_types
+        if not provider_tools:
+            tool_choice_types = tool_choice_types.difference({"provider"})
         return ModelCapabilities(
             streaming=primary.streaming and backup.streaming,
-            tools=primary.tools and backup.tools,
-            tool_choice=primary.tool_choice and backup.tool_choice,
+            runtime_tools=primary.runtime_tools and backup.runtime_tools,
+            tool_choice_types=tool_choice_types,
             parallel_tool_calls=(primary.parallel_tool_calls and backup.parallel_tool_calls),
-            multimodal_input=primary.multimodal_input and backup.multimodal_input,
-            multimodal_output=primary.multimodal_output and backup.multimodal_output,
+            parallel_tool_call_control=(
+                primary.parallel_tool_call_control and backup.parallel_tool_call_control
+            ),
+            input_modalities=primary.input_modalities & backup.input_modalities,
+            output_modalities=primary.output_modalities & backup.output_modalities,
+            provider_tools=provider_tools,
             structured_output=primary.structured_output and backup.structured_output,
             json_mode=primary.json_mode and backup.json_mode,
+            seed=primary.seed and backup.seed,
             usage_reporting=primary.usage_reporting and backup.usage_reporting,
         )
 

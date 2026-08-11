@@ -13,7 +13,6 @@ from jharness.models.anthropic.messages_api.messages import (
     encode_messages,
 )
 from jharness.models.anthropic.messages_api.tools import (
-    decode_tool_uses,
     encode_tool_choice,
     encode_tools,
 )
@@ -97,7 +96,7 @@ class AnthropicCodec:
         if seed is None:
             return
         seed_field = self.profile.seed_field
-        if not seed_field:
+        if not self.profile.capabilities.seed or not seed_field:
             raise AnthropicError(f"{self.profile.name} does not support seed")
         if seed_field in _RESERVED_REQUEST_FIELDS or seed_field in payload:
             raise AnthropicError(f"seed_field conflicts with reserved request field: {seed_field}")
@@ -108,12 +107,12 @@ class AnthropicCodec:
         payload: JsonObject,
         request: ModelRequest,
     ) -> None:
-        tools = encode_tools(request.tools, self.profile)
+        tools = encode_tools(request.runtime_tools, self.profile)
         if tools:
             payload["tools"] = tools
         tool_choice = encode_tool_choice(
             request.tool_choice,
-            tool_names={tool.name for tool in request.tools},
+            tool_names={tool.name for tool in request.runtime_tools},
             profile=self.profile,
         )
         if tool_choice is not None:
@@ -128,7 +127,7 @@ class AnthropicCodec:
 
     def _add_stream_option(self, payload: JsonObject, *, stream: bool) -> None:
         if stream:
-            if not self.profile.supports_streaming:
+            if not self.profile.capabilities.streaming:
                 raise AnthropicError(f"{self.profile.name} does not support streaming")
             payload["stream"] = True
 
@@ -158,8 +157,8 @@ class AnthropicCodec:
             raise AnthropicError("Anthropic response requires role='assistant'")
         if "content" not in value or value["content"] is None:
             raise AnthropicError("Anthropic response requires content")
-        parts, tool_blocks = decode_content_blocks(value["content"])
-        if not parts and not tool_blocks:
+        output = decode_content_blocks(value["content"])
+        if not output:
             raise AnthropicError("Anthropic assistant response requires content or tool_use")
         stop_reason = ANTHROPIC_JSON.required_string(
             value.get("stop_reason"), "Anthropic stop_reason"
@@ -169,8 +168,7 @@ class AnthropicCodec:
         metadata["type"] = response_type
         metadata["role"] = role
         return ModelResponse(
-            parts=tuple(parts),
-            tool_calls=tuple(decode_tool_uses(tool_blocks)),
+            output=tuple(output),
             finish_reason=self.profile.finish_reason(stop_reason),
             usage=usage,
             model_id=ANTHROPIC_JSON.optional_string(value.get("model")),
@@ -182,7 +180,7 @@ class AnthropicCodec:
         if response_format.type == "text":
             return {}
         if response_format.type == "json_object":
-            if not self.profile.supports_json_object:
+            if not self.profile.capabilities.json_mode:
                 raise AnthropicError(f"{self.profile.name} does not support JSON object mode")
             return {
                 "format": {
@@ -191,7 +189,7 @@ class AnthropicCodec:
                 }
             }
         if response_format.type == "json_schema":
-            if not self.profile.supports_json_schema:
+            if not self.profile.capabilities.structured_output:
                 raise AnthropicError(f"{self.profile.name} does not support JSON schema output")
             if response_format.schema is None:
                 raise AnthropicError("JSON schema response format requires schema")

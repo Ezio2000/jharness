@@ -62,7 +62,7 @@ def test_openai_stream_completion_guards_usage_and_metadata() -> None:
     )
     assert any(isinstance(delta, ModelContentDelta) for delta in deltas)
     response = complete.completed_response()
-    assert response.parts[0].type == "refusal"
+    assert response.visible_parts()[0].type == "refusal"
     assert response.metadata["object"] == "chat.completion.chunk"
     assert response.metadata["created"] == 7
 
@@ -136,7 +136,7 @@ def test_openai_stream_rejects_metadata_changes_and_post_finish_choices() -> Non
     assert empty_call.apply_chunk(openai_choice({"tool_calls": [{"unused": None}]})) == []
 
 
-def test_openai_stream_round_trips_reasoning_with_distinct_content_indexes() -> None:
+def test_openai_stream_round_trips_reasoning_with_distinct_output_indexes() -> None:
     decoder = OpenAIChatStreamDecoder(
         OpenAIChatCompletionsProfile(reasoning_content_mode="round_trip")
     )
@@ -153,15 +153,20 @@ def test_openai_stream_round_trips_reasoning_with_distinct_content_indexes() -> 
     )
 
     assert [
-        (type(delta), getattr(delta, "index", None), getattr(delta, "part_type", None))
+        (
+            type(delta),
+            getattr(delta, "output_index", None),
+            getattr(delta, "content_index", None),
+            getattr(delta, "part_type", None),
+        )
         for delta in deltas
     ] == [
-        (ModelReasoningDelta, 0, None),
-        (ModelContentDelta, 0, "reasoning"),
-        (ModelContentDelta, 1, "text"),
-        (ModelContentDelta, 2, "refusal"),
+        (ModelReasoningDelta, 0, 0, None),
+        (ModelContentDelta, 0, 0, "reasoning"),
+        (ModelContentDelta, 1, 0, "text"),
+        (ModelContentDelta, 2, 0, "refusal"),
     ]
-    assert [(part.type, part.text) for part in decoder.completed_response().parts] == [
+    assert [(part.type, part.text) for part in decoder.completed_response().visible_parts()] == [
         ("reasoning", "why"),
         ("text", "answer"),
         ("refusal", "no"),
@@ -171,9 +176,9 @@ def test_openai_stream_round_trips_reasoning_with_distinct_content_indexes() -> 
         OpenAIChatCompletionsProfile(reasoning_content_mode="round_trip")
     )
     reasoning_only.apply_chunk(openai_choice({"reasoning_content": "only"}, finish_reason="stop"))
-    assert [(part.type, part.text) for part in reasoning_only.completed_response().parts] == [
-        ("reasoning", "only")
-    ]
+    assert [
+        (part.type, part.text) for part in reasoning_only.completed_response().visible_parts()
+    ] == [("reasoning", "only")]
 
 
 @pytest.mark.parametrize(
@@ -190,8 +195,9 @@ def test_openai_stream_round_trip_uses_compact_indexes_without_reasoning(
     deltas = decoder.apply_chunk(openai_choice({wire_field: "only"}, finish_reason="stop"))
 
     content_delta = next(delta for delta in deltas if isinstance(delta, ModelContentDelta))
-    assert content_delta.index == 0
-    assert [(part.type, part.text) for part in decoder.completed_response().parts] == [
+    assert content_delta.output_index == 0
+    assert content_delta.content_index == 0
+    assert [(part.type, part.text) for part in decoder.completed_response().visible_parts()] == [
         (part_type, "only")
     ]
 
@@ -245,8 +251,8 @@ def test_openai_stream_requires_reasoning_for_round_trip_tool_calls() -> None:
         )
     )
     response = complete.completed_response()
-    assert response.parts[0].type == "reasoning"
-    assert response.tool_calls == (ToolCall("call-1", "search", {}),)
+    assert response.visible_parts()[0].type == "reasoning"
+    assert response.runtime_tool_calls() == (ToolCall("call-1", "search", {}),)
 
 
 def anthropic_started(*, profile: AnthropicProfile | None = None) -> AnthropicStreamDecoder:
@@ -434,8 +440,8 @@ def test_anthropic_stream_interleaves_blocks_and_keeps_monotonic_tool_order() ->
     decoder.apply_event("message_stop", {"type": "message_stop"})
 
     response = decoder.completed_response()
-    assert response.parts[0].text == "ab"
-    assert [(call.id, call.name, call.arguments) for call in response.tool_calls] == [
+    assert response.visible_parts()[0].text == "ab"
+    assert [(call.id, call.name, call.arguments) for call in response.runtime_tool_calls()] == [
         ("call-1", "first", {"x": 1}),
         ("call-2", "second", {"y": 2}),
     ]
@@ -509,7 +515,7 @@ def test_anthropic_stream_terminal_guards_and_disabled_usage() -> None:
             {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
         )
 
-    no_usage = anthropic_started(profile=AnthropicProfile(stream_usage=False))
+    no_usage = anthropic_started(profile=AnthropicProfile(stream_usage_mode="omit"))
     anthropic_start_block(no_usage, {"type": "text", "text": "x"})
     anthropic_stop(no_usage)
     _, usage = no_usage.apply_event(

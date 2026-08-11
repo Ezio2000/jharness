@@ -47,6 +47,7 @@ class OpenAIChatStreamDecoder:
         self._has_tool_calls = False
         self._content_part_indexes: dict[_ContentPartType, int] = {}
         self._last_content_part_rank = -1
+        self._tool_output_offset: int | None = None
         self._phase: Literal["initial", "active", "finished"] = "initial"
 
     def apply_chunk(self, value: Mapping[str, Any]) -> list[ModelDelta]:
@@ -211,7 +212,7 @@ class OpenAIChatStreamDecoder:
         if not content:
             return None
         return ModelContentDelta(
-            index=self._content_part_index("text"),
+            output_index=self._content_part_index("text"),
             text_delta=content,
         )
 
@@ -220,13 +221,13 @@ class OpenAIChatStreamDecoder:
         if not reasoning:
             return []
         if self._profile.reasoning_content_mode == "live_only":
-            return [ModelReasoningDelta(index=0, text_delta=reasoning)]
+            return [ModelReasoningDelta(output_index=0, text_delta=reasoning)]
         self._has_reasoning_content = True
         index = self._content_part_index("reasoning")
         return [
-            ModelReasoningDelta(index=index, text_delta=reasoning),
+            ModelReasoningDelta(output_index=index, text_delta=reasoning),
             ModelContentDelta(
-                index=index,
+                output_index=index,
                 text_delta=reasoning,
                 part_type="reasoning",
             ),
@@ -237,12 +238,16 @@ class OpenAIChatStreamDecoder:
         if not refusal:
             return None
         return ModelContentDelta(
-            index=self._content_part_index("refusal"),
+            output_index=self._content_part_index("refusal"),
             text_delta=refusal,
             part_type="refusal",
         )
 
     def _content_part_index(self, part_type: _ContentPartType) -> int:
+        if self._tool_output_offset is not None:
+            raise OpenAIChatCompletionsError(
+                "chat completion stream emitted content after tool calls"
+            )
         if self._profile.reasoning_content_mode == "live_only":
             return 0
         rank = _CONTENT_PART_RANK[part_type]
@@ -274,6 +279,8 @@ class OpenAIChatStreamDecoder:
                 f"unsupported chat completion stream tool call type: {call_type}"
             )
         call_index = _tool_call_index(call)
+        if self._tool_output_offset is None:
+            self._tool_output_offset = len(self._content_part_indexes)
         function = call.get("function")
         function_mapping = (
             OPENAI_JSON.mapping(function, "chat completion stream tool function")
@@ -286,7 +293,7 @@ class OpenAIChatStreamDecoder:
         if call_id is None and name is None and arguments_delta is None:
             return None
         return ModelToolCallDelta(
-            index=call_index,
+            output_index=self._tool_output_offset + call_index,
             id=call_id,
             name=name,
             arguments_delta=arguments_delta or "",

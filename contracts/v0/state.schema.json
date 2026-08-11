@@ -36,7 +36,7 @@
         "pending": {
           "type": "array",
           "minItems": 1,
-          "$comment": "Pending call ids must be unique and preserve assistant call order.",
+          "$comment": "Pending runtime call ids must be unique and preserve assistant output order. Provider tool calls never enter this state.",
           "items": { "$ref": "messages.schema.json#/$defs/tool_call" }
         }
       },
@@ -70,7 +70,6 @@
         "kind": { "const": "completed" },
         "parts": {
           "type": "array",
-          "minItems": 1,
           "items": { "$ref": "messages.schema.json#/$defs/content_part" }
         }
       },

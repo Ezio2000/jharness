@@ -25,9 +25,9 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [],
-              "tool_calls": [
+              "output": [
                 {
+                  "kind": "runtime_tool_call",
                   "id": "call-1",
                   "name": "echo",
                   "arguments": {

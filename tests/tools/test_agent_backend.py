@@ -369,7 +369,7 @@ async def test_in_memory_backend_maps_child_failures_and_limits() -> None:
 async def test_in_memory_backend_maps_unsupported_child_suspension() -> None:
     model = _StaticModel(
         ModelResponse(
-            tool_calls=(
+            (
                 ToolCall(
                     "ask",
                     "AskQuestion",

@@ -20,7 +20,7 @@ def encode_tools(
 ) -> list[JsonObject]:
     if not tools:
         return []
-    if not profile.supports_tools:
+    if not profile.capabilities.runtime_tools:
         raise OpenAIChatCompletionsError(f"{profile.name} does not support tools")
     return [
         {
@@ -41,18 +41,22 @@ def encode_tool_choice(
     tool_names: Collection[str],
     profile: OpenAIChatCompletionsProfile,
 ) -> str | JsonObject | None:
+    if choice.type not in profile.capabilities.tool_choice_types:
+        raise OpenAIChatCompletionsError(
+            f"{profile.name} does not support tool_choice={choice.type!r}"
+        )
     if not tool_names:
-        if choice.type in {"required", "named"}:
+        if choice.type in {"required", "runtime", "provider"}:
             raise OpenAIChatCompletionsError(
                 f"tool_choice={choice.type!r} requires at least one tool"
             )
         return None
-    if not profile.supports_tool_choice:
-        if choice.type == "auto":
-            return None
-        raise OpenAIChatCompletionsError(f"{profile.name} does not support tool_choice")
+    if choice.type == "auto" and profile.automatic_tool_choice_mode == "implicit":
+        return None
     if choice.type in {"auto", "none", "required"}:
         return choice.type
+    if choice.type == "provider":
+        raise OpenAIChatCompletionsError("Chat Completions does not support provider tool choice")
     if choice.name is None or choice.name not in tool_names:
         raise OpenAIChatCompletionsError(f"tool_choice names an unavailable tool: {choice.name}")
     return {"type": "function", "function": {"name": choice.name}}

@@ -85,19 +85,7 @@ class AnthropicModel:
 
     @property
     def capabilities(self) -> ModelCapabilities:
-        return ModelCapabilities(
-            streaming=self.profile.supports_streaming,
-            tools=self.profile.supports_tools,
-            tool_choice=self.profile.supports_tool_choice,
-            parallel_tool_calls=self.profile.supports_parallel_tool_calls,
-            multimodal_input=(
-                self.profile.supports_image_input or self.profile.supports_file_input
-            ),
-            multimodal_output=False,
-            structured_output=self.profile.supports_json_schema,
-            json_mode=self.profile.supports_json_object,
-            usage_reporting=True,
-        )
+        return self.profile.capabilities
 
     async def invoke(
         self,

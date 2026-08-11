@@ -201,10 +201,10 @@ def test_runtime_model_calls_bash_and_observes_result_before_final_response(
     observed: dict[str, object] = {}
 
     def respond(turn: int, request: ModelRequest) -> ModelResponse:
-        assert [spec.name for spec in request.tools] == ["Bash"]
+        assert [spec.name for spec in request.runtime_tools] == ["Bash"]
         if turn == 0:
             return ModelResponse(
-                tool_calls=(
+                (
                     ToolCall(
                         "bash-call",
                         "Bash",
@@ -246,7 +246,7 @@ def test_runtime_model_calls_bash_and_observes_result_before_final_response(
     assert duration_ms >= 0
     assert model.turns == 2
     assert checkpoint.snapshot.status == "completed"
-    assert checkpoint.snapshot.history[-1].parts[0].text == "handled Bash result"
+    assert checkpoint.snapshot.history[-1].visible_parts()[0].text == "handled Bash result"
     assert [event.kind for event in events].count(EventKind.TOOL_STARTED) == 1
     assert [event.kind for event in events].count(EventKind.TOOL_FINISHED) == 1
 
@@ -257,7 +257,7 @@ def test_runtime_bash_approval_deny_never_starts_or_changes_workspace(tmp_path: 
     def respond(turn: int, request: ModelRequest) -> ModelResponse:
         if turn == 0:
             return ModelResponse(
-                tool_calls=(
+                (
                     ToolCall(
                         "denied-bash",
                         "Bash",
@@ -299,7 +299,7 @@ def test_runtime_two_bash_calls_execute_strictly_serially(tmp_path: Path) -> Non
     def respond(turn: int, request: ModelRequest) -> ModelResponse:
         if turn == 0:
             return ModelResponse(
-                tool_calls=(
+                (
                     ToolCall(
                         "bash-first",
                         "Bash",
@@ -375,7 +375,7 @@ def test_runtime_active_cancel_cleans_up_bash_descendants(tmp_path: Path) -> Non
     def respond(turn: int, request: ModelRequest) -> ModelResponse:
         if turn == 0:
             return ModelResponse(
-                tool_calls=(
+                (
                     ToolCall(
                         "cancel-bash",
                         "Bash",
@@ -441,7 +441,7 @@ def test_runtime_bash_root_exit_cleans_up_background_descendant(tmp_path: Path) 
     def respond(turn: int, request: ModelRequest) -> ModelResponse:
         if turn == 0:
             return ModelResponse(
-                tool_calls=(
+                (
                     ToolCall(
                         "root-exit-bash",
                         "Bash",
@@ -491,7 +491,7 @@ def test_runtime_deadline_cleans_up_bash_descendants_before_return(tmp_path: Pat
     def respond(turn: int, request: ModelRequest) -> ModelResponse:
         if turn == 0:
             return ModelResponse(
-                tool_calls=(
+                (
                     ToolCall(
                         "deadline-bash",
                         "Bash",

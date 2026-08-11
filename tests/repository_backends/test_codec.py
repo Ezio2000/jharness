@@ -31,7 +31,7 @@ def _pending_commit(call_count: int) -> tuple[DurableCommit, DurableCommit]:
     calls = tuple(
         ToolCall(f"call-{index}", "tool", {"index": index}) for index in range(call_count)
     )
-    assistant = Message.assistant((), tool_calls=calls)
+    assistant = Message.assistant(calls)
     before = initial.checkpoint.snapshot.history
     history = RunHistory((*before, assistant))
     snapshot = RunSnapshot(

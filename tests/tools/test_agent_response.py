@@ -228,7 +228,7 @@ def test_current_waiting_outcome_defenses() -> None:
         "Agent",
         {"description": "Inspect", "prompt": "Do it"},
     )
-    assistant = Message.assistant(tool_calls=(call,))
+    assistant = Message.assistant((call,))
     waiting_message = Message.tool("call-1", _waiting())
 
     with pytest.raises(ValueError, match="waiting tool batch"):
@@ -275,9 +275,7 @@ def test_current_waiting_outcome_defenses() -> None:
             "call-1",
             "Agent",
         )
-    wrong_call = Message.assistant(
-        tool_calls=(ToolCall("call-1", "AgentWait", {"agent_id": "agent-1"}),)
-    )
+    wrong_call = Message.assistant((ToolCall("call-1", "AgentWait", {"agent_id": "agent-1"}),))
     with pytest.raises(ValueError, match="wrong identity"):
         agent_response._current_waiting_outcome(
             cast(

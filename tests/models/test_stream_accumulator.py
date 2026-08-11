@@ -9,15 +9,15 @@ def test_delta_accumulator_handles_many_tiny_chunks_without_changing_the_result(
     assert accumulator.has_output is False
     chunk_count = 4_096
     for _ in range(chunk_count):
-        accumulator.apply(ModelContentDelta(0, "x"))
+        accumulator.apply(ModelContentDelta(output_index=0, text_delta="x", content_index=0))
     assert accumulator.has_output is True
 
     encoded_arguments = '{"value":"' + ("y" * chunk_count) + '"}'
     for index, chunk in enumerate(encoded_arguments):
         accumulator.apply(
             ModelToolCallDelta(
-                0,
-                chunk,
+                output_index=1,
+                arguments_delta=chunk,
                 id="call-1" if index == 0 else None,
                 name="search" if index == 0 else None,
             )
@@ -30,5 +30,5 @@ def test_delta_accumulator_handles_many_tiny_chunks_without_changing_the_result(
         metadata={},
     )
 
-    assert response.parts[0].text == "x" * chunk_count
-    assert response.tool_calls[0].arguments == {"value": "y" * chunk_count}
+    assert response.visible_parts()[0].text == "x" * chunk_count
+    assert response.runtime_tool_calls()[0].arguments == {"value": "y" * chunk_count}

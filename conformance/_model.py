@@ -14,12 +14,15 @@ from jharness.kernel import (
     ModelDelta,
     ModelError,
     ModelErrorInfo,
+    ModelProviderToolCallDelta,
     ModelReasoningDelta,
     ModelRequest,
     ModelResponse,
     ModelToolCallDelta,
     ModelUsageDelta,
     ProtocolError,
+    ProviderToolId,
+    ProviderToolStatus,
     RunContext,
 )
 from jharness.kernel.wire import decode_model_response, decode_model_usage
@@ -28,13 +31,24 @@ from jharness.kernel.wire import decode_model_response, decode_model_usage
 class CaseModel:
     """Consume exactly one fixture step per logical model invocation."""
 
-    def __init__(self, steps: Sequence[object]) -> None:
+    def __init__(
+        self,
+        steps: Sequence[object],
+        *,
+        provider_tools: Sequence[ProviderToolId] = (),
+    ) -> None:
         self._steps = tuple(mapping(step, "model step") for step in steps)
         self._cursor = 0
         self.streaming = any(
             sequence(step.get("deltas", ()), "model deltas") for step in self._steps
         )
-        self.capabilities = ModelCapabilities(streaming=self.streaming)
+        modalities = frozenset({"text", "image", "audio", "video", "file"})
+        self.capabilities = ModelCapabilities(
+            streaming=self.streaming,
+            input_modalities=modalities,
+            output_modalities=modalities,
+            provider_tools=frozenset(provider_tools),
+        )
         self.requests: list[ModelRequest] = []
 
     async def invoke(
@@ -114,22 +128,45 @@ def _delta(value: Mapping[str, Any]) -> ModelDelta:
     kind = string(value["kind"], "model delta kind")
     if kind == "content":
         return ModelContentDelta(
-            index=integer(value["index"], "content delta index"),
+            output_index=integer(value["output_index"], "content delta output_index"),
             text_delta=string(value["text_delta"], "content delta text"),
             part_type=string(value["part_type"], "content delta part_type"),
+            content_index=integer(value["content_index"], "content delta content_index"),
             data=mapping(value["data"], "content delta data"),
         )
     if kind == "tool_call":
         return ModelToolCallDelta(
-            index=integer(value["index"], "tool call delta index"),
+            output_index=integer(value["output_index"], "tool call delta output_index"),
             arguments_delta=string(value["arguments_delta"], "tool call arguments delta"),
             id=_optional_string(value["id"], "tool call delta id"),
             name=_optional_string(value["name"], "tool call delta name"),
         )
     if kind == "reasoning":
         return ModelReasoningDelta(
-            index=integer(value["index"], "reasoning delta index"),
+            output_index=integer(value["output_index"], "reasoning delta output_index"),
             text_delta=string(value["text_delta"], "reasoning delta text"),
+            content_index=integer(value["content_index"], "reasoning delta content_index"),
+        )
+    if kind == "provider_tool_call":
+        tool = mapping(value["tool"], "provider tool delta tool")
+        raw_status = value["status"]
+        return ModelProviderToolCallDelta(
+            output_index=integer(
+                value["output_index"],
+                "provider tool delta output_index",
+            ),
+            id=string(value["id"], "provider tool delta id"),
+            tool=ProviderToolId(
+                namespace=string(tool["namespace"], "provider tool delta namespace"),
+                type=string(tool["type"], "provider tool delta type"),
+            ),
+            status=(
+                None
+                if raw_status is None
+                else ProviderToolStatus(string(raw_status, "provider tool delta status"))
+            ),
+            event=_optional_string(value["event"], "provider tool delta event"),
+            data=mapping(value["data"], "provider tool delta data"),
         )
     if kind == "usage":
         return ModelUsageDelta(decode_model_usage(value["usage"]))

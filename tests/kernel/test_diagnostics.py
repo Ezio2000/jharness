@@ -27,9 +27,16 @@ from jharness.kernel.diagnostics import (
 )
 from jharness.kernel.events import Event, EventKind
 from jharness.kernel.history import RunHistory
-from jharness.kernel.messages import ContentPart, Message
+from jharness.kernel.messages import (
+    ContentPart,
+    Message,
+    ProviderToolCall,
+    ProviderToolId,
+    ProviderToolStatus,
+)
 from jharness.kernel.snapshot import RunSnapshot
 from jharness.kernel.state import Completed, Planning, RunMetrics
+from jharness.kernel.wire import decode_run_view, encode_run_view
 
 _USAGE = {
     "input_tokens": None,
@@ -122,7 +129,8 @@ def _completed_events(*, delta_count: int = 1) -> tuple[Event, ...]:
             EventKind.MODEL_DELTA,
             {
                 "kind": "content",
-                "index": 0,
+                "output_index": 0,
+                "content_index": 0,
                 "part_type": "text",
                 "text_delta": "x",
                 "data": {},
@@ -145,7 +153,84 @@ def _completed_events(*, delta_count: int = 1) -> tuple[Event, ...]:
             *deltas,
             (
                 EventKind.MODEL_FINISHED,
-                {"finish_reason": "end_turn", "tool_call_count": 0, "usage": None},
+                {
+                    "finish_reason": "end_turn",
+                    "runtime_tool_call_count": 0,
+                    "provider_tool_call_count": 0,
+                    "usage": None,
+                },
+            ),
+            (EventKind.CHECKPOINT_COMMITTED, _checkpoint_data(completed)),
+            (
+                EventKind.INVOCATION_STOPPED,
+                {"reason": "terminal", "last_checkpoint_id": "cp-1"},
+            ),
+        ]
+    )
+
+
+def _provider_only_completed_events() -> tuple[Event, ...]:
+    context = RunContext("run-1", 0)
+    user = Message.user("search")
+    started = Checkpoint(
+        "cp-0",
+        RunSnapshot(0, context, RunHistory((user,)), RunMetrics(), Planning()),
+        StartedFact(1, ("user",)),
+    )
+    provider_tool = ProviderToolId("deepseek.responses", "web_search")
+    provider_calls = (
+        ProviderToolCall(
+            "provider-search-1",
+            provider_tool,
+            ProviderToolStatus.COMPLETED,
+            {"type": "search", "queries": ["JHarness"]},
+        ),
+        ProviderToolCall(
+            "provider-search-2",
+            provider_tool,
+            ProviderToolStatus.COMPLETED,
+            {"type": "open_page", "url": "https://example.invalid/jharness"},
+        ),
+    )
+    completed = Checkpoint(
+        "cp-1",
+        RunSnapshot(
+            1,
+            context,
+            RunHistory((user, Message.assistant(provider_calls))),
+            RunMetrics(planning_steps=1),
+            Completed(()),
+        ),
+        ModelTurnFact(
+            4,
+            ModelTurnResult.COMPLETED,
+            0,
+            (),
+            "stop",
+            None,
+            None,
+        ),
+    )
+    return _events(
+        [
+            (
+                EventKind.INVOCATION_STARTED,
+                {
+                    "request_kind": "start",
+                    "starting_checkpoint_id": None,
+                    "starting": None,
+                },
+            ),
+            (EventKind.CHECKPOINT_COMMITTED, _checkpoint_data(started)),
+            (EventKind.MODEL_STARTED, {"planning_step": 1}),
+            (
+                EventKind.MODEL_FINISHED,
+                {
+                    "finish_reason": "stop",
+                    "runtime_tool_call_count": 0,
+                    "provider_tool_call_count": 2,
+                    "usage": None,
+                },
             ),
             (EventKind.CHECKPOINT_COMMITTED, _checkpoint_data(completed)),
             (
@@ -299,6 +384,18 @@ def test_build_trace_compacts_identity_and_verifies_shared_fact_rules() -> None:
 
     with pytest.raises(TypeError, match="immutable"):
         cast(Any, trace.entries[0].data)["extra"] = True
+
+
+def test_provider_only_completion_round_trips_zero_part_run_view_and_trace() -> None:
+    events = _provider_only_completed_events()
+    trace = build_trace(events, "start")
+    result = verify_trace(trace)
+    final_view = cast(Mapping[str, Any], result.final_view)
+
+    assert final_view["state"] == {"kind": "completed", "part_count": 0}
+    assert decode_run_view(encode_run_view(final_view)) == final_view
+    assert result.checkpoint_count == 2
+    assert result.final_checkpoint_id == "cp-1"
 
 
 def test_build_trace_rejects_incomplete_or_mixed_invocations() -> None:
@@ -484,7 +581,12 @@ def test_model_lifecycle_and_fact_mismatches_are_rejected() -> None:
     finished_index = len(trace.entries) - 3
     wrong_count = replace(
         trace.entries[finished_index],
-        data={"finish_reason": "end_turn", "tool_call_count": 1, "usage": None},
+        data={
+            "finish_reason": "end_turn",
+            "runtime_tool_call_count": 1,
+            "provider_tool_call_count": 0,
+            "usage": None,
+        },
     )
     with pytest.raises(TraceError) as count_error:
         verify_trace(_replace_entry(trace, finished_index, wrong_count))
@@ -492,11 +594,54 @@ def test_model_lifecycle_and_fact_mismatches_are_rejected() -> None:
 
     wrong_reason = replace(
         trace.entries[finished_index],
-        data={"finish_reason": "other", "tool_call_count": 0, "usage": None},
+        data={
+            "finish_reason": "other",
+            "runtime_tool_call_count": 0,
+            "provider_tool_call_count": 0,
+            "usage": None,
+        },
     )
     with pytest.raises(TraceError) as reason_error:
         verify_trace(_replace_entry(trace, finished_index, wrong_reason))
     assert reason_error.value.code == "model_fact_mismatch"
+
+
+def test_model_finished_separates_runtime_and_provider_tool_counts() -> None:
+    trace = build_trace(_completed_events(), "start")
+    finished_index = len(trace.entries) - 3
+    finished = trace.entries[finished_index]
+
+    provider_only = replace(
+        finished,
+        data={
+            "finish_reason": "end_turn",
+            "runtime_tool_call_count": 0,
+            "provider_tool_call_count": 1,
+            "usage": None,
+        },
+    )
+    assert verify_trace(_replace_entry(trace, finished_index, provider_only)).checkpoint_count == 2
+
+    legacy_count = replace(
+        finished,
+        data={"finish_reason": "end_turn", "tool_call_count": 0, "usage": None},
+    )
+    with pytest.raises(TraceError) as legacy_error:
+        verify_trace(_replace_entry(trace, finished_index, legacy_count))
+    assert legacy_error.value.code == "invalid_entry"
+
+    negative_provider_count = replace(
+        finished,
+        data={
+            "finish_reason": "end_turn",
+            "runtime_tool_call_count": 0,
+            "provider_tool_call_count": -1,
+            "usage": None,
+        },
+    )
+    with pytest.raises(TraceError) as provider_error:
+        verify_trace(_replace_entry(trace, finished_index, negative_provider_count))
+    assert provider_error.value.code == "invalid_entry"
 
 
 def test_approval_and_tool_lifecycle_evidence_is_checked() -> None:

@@ -446,14 +446,24 @@ class _Verifier:
             "model fact tool_call_ids",
         )
         finished = self._model_finished
-        count = _integer(
+        runtime_count = _integer(
             entry,
-            _required(entry, finished, "tool_call_count"),
-            "model_finished tool_call_count",
+            _required(entry, finished, "runtime_tool_call_count"),
+            "model_finished runtime_tool_call_count",
             minimum=0,
         )
-        if count != len(calls):
-            _fail(entry, "model_fact_mismatch", "model tool-call count differs from its fact")
+        _integer(
+            entry,
+            _required(entry, finished, "provider_tool_call_count"),
+            "model_finished provider_tool_call_count",
+            minimum=0,
+        )
+        if runtime_count != len(calls):
+            _fail(
+                entry,
+                "model_fact_mismatch",
+                "model runtime tool-call count differs from its fact",
+            )
         for key in ("finish_reason", "usage"):
             if _required(entry, finished, key) != _required(entry, data, key):
                 _fail(entry, "model_fact_mismatch", f"model {key} differs from its fact")

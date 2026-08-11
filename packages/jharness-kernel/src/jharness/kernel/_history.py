@@ -163,8 +163,9 @@ def _advance_linkage(
         return unresolved.advance(1), seen
     if message.role == "tool":
         raise ValueError("tool message requires a preceding assistant tool request")
-    if message.role == "assistant" and message.tool_calls:
-        return PendingToolCalls(message.tool_calls), _record_call_ids(message.tool_calls, seen)
+    calls = message.runtime_tool_calls() if message.role == "assistant" else ()
+    if calls:
+        return PendingToolCalls(calls), _record_call_ids(calls, seen)
     return None, seen
 
 

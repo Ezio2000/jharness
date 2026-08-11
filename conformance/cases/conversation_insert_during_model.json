@@ -30,14 +30,16 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [
+              "output": [
                 {
-                  "type": "text",
-                  "text": "after insert",
-                  "metadata": {}
+                  "kind": "content",
+                  "content": {
+                    "type": "text",
+                    "text": "after insert",
+                    "metadata": {}
+                  }
                 }
               ],
-              "tool_calls": [],
               "finish_reason": "end_turn",
               "usage": null,
               "model_id": "fixture-model",

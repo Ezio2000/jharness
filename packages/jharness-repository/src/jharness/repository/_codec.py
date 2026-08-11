@@ -392,8 +392,9 @@ def _unresolved_tool_calls(history: RunHistory) -> tuple[ToolCall, ...]:
         cursor = 0
         if message.role == "tool":
             raise ProtocolError("stored history tool result has no request")
-        if message.role == "assistant" and message.tool_calls:
-            pending = message.tool_calls
+        calls = message.runtime_tool_calls() if message.role == "assistant" else ()
+        if calls:
+            pending = calls
     return pending[cursor:]
 
 

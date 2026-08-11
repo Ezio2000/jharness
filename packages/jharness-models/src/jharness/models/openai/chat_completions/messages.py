@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from jharness.kernel import ContentPart, Message
+from jharness.kernel import ContentPart, Message, ProviderToolCall, ToolCall
 from jharness.models.openai.errors import OPENAI_JSON, OpenAIChatCompletionsError
 from jharness.models.openai.profiles import OpenAIChatCompletionsProfile
 
@@ -31,28 +31,38 @@ def encode_chat_message(
 
     reasoning_content = None
     content_parts = message.parts
+    runtime_calls: tuple[ToolCall, ...] = ()
     if role == "assistant":
-        reasoning_content, content_parts = _extract_assistant_reasoning(message.parts, profile)
+        if any(isinstance(item, ProviderToolCall) for item in message.output):
+            raise OpenAIChatCompletionsError(
+                "Chat Completions cannot encode provider tool output history"
+            )
+        assistant_parts = tuple(item for item in message.output if isinstance(item, ContentPart))
+        runtime_calls = message.runtime_tool_calls()
+        reasoning_content, content_parts = _extract_assistant_reasoning(
+            assistant_parts,
+            profile,
+        )
     content = encode_message_content(content_parts, role, profile)
     data: JsonObject = {"role": role, "content": content}
     if role == "assistant":
         if reasoning_content is not None:
             data["reasoning_content"] = reasoning_content
         if (
-            message.tool_calls
+            runtime_calls
             and profile.reasoning_content_mode == "required_with_tools"
             and reasoning_content is None
         ):
             raise OpenAIChatCompletionsError(
                 f"{profile.name} requires non-empty reasoning content for assistant tool calls"
             )
-        if message.tool_calls:
+        if runtime_calls:
             from jharness.models.openai.chat_completions.tools import (
                 encode_assistant_tool_calls,
             )
 
-            data["tool_calls"] = encode_assistant_tool_calls(message.tool_calls)
-            if content == "" and not profile.requires_assistant_content_for_tool_calls:
+            data["tool_calls"] = encode_assistant_tool_calls(runtime_calls)
+            if content == "" and profile.assistant_tool_call_content_mode == "nullable":
                 data["content"] = None
     return data
 
@@ -81,17 +91,17 @@ def encode_content_part(part: ContentPart, profile: OpenAIChatCompletionsProfile
     if part.type == "text":
         return {"type": "text", "text": part.text or ""}
     if part.type == "image":
-        if not profile.supports_image_input:
+        if "image" not in profile.capabilities.input_modalities:
             raise OpenAIChatCompletionsError(f"{profile.name} does not support image input")
         uri = _required_uri(part, "image")
         return {"type": "image_url", "image_url": {"url": uri}}
     if part.type == "video":
-        if not profile.supports_video_input:
+        if "video" not in profile.capabilities.input_modalities:
             raise OpenAIChatCompletionsError(f"{profile.name} does not support video input")
         uri = _required_uri(part, "video")
         return {"type": "video_url", "video_url": {"url": uri}}
     if part.type in {"artifact", "file"}:
-        if not profile.supports_file_input:
+        if "file" not in profile.capabilities.input_modalities:
             raise OpenAIChatCompletionsError(f"{profile.name} does not support file input")
         if part.artifact is not None:
             return {"type": "file", "file": {"file_id": part.artifact.ref}}

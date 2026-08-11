@@ -6,7 +6,7 @@ Portable lifecycle is one flat discriminated union:
 
 ```text
 Planning
-ToolsPending(non-empty ordered calls)
+ToolsPending(non-empty ordered runtime tool calls)
 Suspended(resume_to: Planning | ToolsPending, suspension)
 Completed(final content)
 Failed(error)
@@ -42,14 +42,16 @@ increments snapshot revision exactly once. Fact kinds are `started`, `resumed`,
 `control`.
 
 A model turn is durable only after `Model.invoke` returns a complete response.
-A serial tool call is a tool batch of one. A parallel batch is durable only
-after every selected call has a normalized result. A checkpoint stores tool
-messages in model call order.
+The complete non-empty ordered output is persisted as one assistant message.
+Provider-executed tool calls stay in that output; only runtime tool calls become
+pending work. A serial runtime tool call is a tool batch of one. A parallel
+batch is durable only after every selected runtime call has a normalized
+result. A checkpoint stores tool messages in model call order.
 
 ## Metrics
 
 - `planning_steps` increases by one for each committed complete model response.
-- `tool_calls` increases by the number of committed tool messages.
+- `tool_calls` increases by the number of committed runtime tool messages.
 - usage accumulates only reported fields from committed model responses.
 - counters never decrease.
 
@@ -58,11 +60,14 @@ metrics.
 
 ## Completion
 
-A complete model response always commits its assistant message, usage, and one
-planning-step increment together. Its model-turn fact has a `result` that
-determines the after state: `completed` uses its part count, `tools_pending`
-uses its ordered call ids, and `limited` records `max_total_tokens`. No separate
-terminal checkpoint is required for the same response.
+A complete model response always commits its ordered assistant output, usage,
+and one planning-step increment together. Its model-turn fact has a `result`
+that determines the after state: `completed` uses its visible-part count,
+`tools_pending` uses its ordered runtime call ids, and `limited` records
+`max_total_tokens`. Visible parts consist of direct content plus completed or
+failed provider-tool output in output order. Provider tool calls never create
+`ToolsPending`. No separate terminal checkpoint is required for the same
+response.
 
 ## Suspension
 

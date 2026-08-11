@@ -11,6 +11,7 @@ from jharness.kernel import (
     ContentPart,
     ModelContentDelta,
     ModelDelta,
+    ModelProviderToolCallDelta,
     ModelReasoningDelta,
     ModelResponse,
     ModelToolCallDelta,
@@ -37,12 +38,11 @@ class _ToolCallBuffer:
 class DeltaAccumulator:
     """Build one final response inside a provider adapter."""
 
-    __slots__ = ("_content", "_error_factory", "_tools", "_usage")
+    __slots__ = ("_error_factory", "_items", "_usage")
 
     def __init__(self, error_factory: Callable[[str], Exception]) -> None:
         self._error_factory = error_factory
-        self._content: dict[int, _ContentBuffer] = {}
-        self._tools: dict[int, _ToolCallBuffer] = {}
+        self._items: dict[tuple[int, int], _ContentBuffer | _ToolCallBuffer] = {}
         self._usage: ModelUsage | None = None
 
     def apply(self, delta: ModelDelta) -> None:
@@ -54,14 +54,14 @@ class DeltaAccumulator:
             self._usage = (
                 delta.usage if self._usage is None else self._usage.merge_snapshot(delta.usage)
             )
-        elif not isinstance(cast(object, delta), ModelReasoningDelta):
+        elif not isinstance(cast(object, delta), ModelReasoningDelta | ModelProviderToolCallDelta):
             self._raise("provider stream produced an unsupported model delta")
 
     @property
     def has_output(self) -> bool:
         """Whether accumulated deltas can produce response content or tool calls."""
 
-        return bool(self._content or self._tools)
+        return bool(self._items)
 
     def response(
         self,
@@ -72,18 +72,20 @@ class DeltaAccumulator:
         metadata: Mapping[str, Any],
     ) -> ModelResponse:
         try:
-            return ModelResponse(
-                parts=tuple(
+            output = tuple(
+                (
                     ContentPart(
                         type=buffer.part_type,
                         text="".join(buffer.text_chunks),
                         data=buffer.data,
                     )
-                    for _, buffer in sorted(self._content.items())
-                ),
-                tool_calls=tuple(
-                    self._build_tool_call(buffer) for _, buffer in sorted(self._tools.items())
-                ),
+                    if isinstance(buffer, _ContentBuffer)
+                    else self._build_tool_call(buffer)
+                )
+                for _, buffer in sorted(self._items.items())
+            )
+            return ModelResponse(
+                output=output,
                 finish_reason=finish_reason,
                 usage=self._usage,
                 model_id=model_id,
@@ -94,17 +96,34 @@ class DeltaAccumulator:
             self._raise(f"provider stream produced an invalid response: {exc}", cause=exc)
 
     def _apply_content(self, delta: ModelContentDelta) -> None:
-        current = self._content.setdefault(delta.index, _ContentBuffer(delta.part_type))
+        key = (delta.output_index, delta.content_index)
+        self._reject_output_kind_conflict(delta.output_index, _ContentBuffer)
+        current = self._items.setdefault(key, _ContentBuffer(delta.part_type))
+        if not isinstance(current, _ContentBuffer):
+            self._raise("stream output index changed item kind")
         if current.part_type != delta.part_type:
             self._raise("content delta part_type changed for one index")
         current.text_chunks.append(delta.text_delta)
         current.data.update(delta.data)
 
     def _apply_tool_call(self, delta: ModelToolCallDelta) -> None:
-        current = self._tools.setdefault(delta.index, _ToolCallBuffer())
+        key = (delta.output_index, -1)
+        self._reject_output_kind_conflict(delta.output_index, _ToolCallBuffer)
+        current = self._items.setdefault(key, _ToolCallBuffer())
+        if not isinstance(current, _ToolCallBuffer):
+            self._raise("stream output index changed item kind")
         current.id = self._consistent_value(current.id, delta.id, "id")
         current.name = self._consistent_value(current.name, delta.name, "name")
         current.argument_chunks.append(delta.arguments_delta)
+
+    def _reject_output_kind_conflict(
+        self,
+        output_index: int,
+        expected: type[_ContentBuffer] | type[_ToolCallBuffer],
+    ) -> None:
+        for (existing_index, _), buffer in self._items.items():
+            if existing_index == output_index and not isinstance(buffer, expected):
+                self._raise("stream output index changed item kind")
 
     def _build_tool_call(self, buffer: _ToolCallBuffer) -> ToolCall:
         if buffer.id is None or buffer.name is None:

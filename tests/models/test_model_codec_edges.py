@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -55,13 +56,15 @@ from jharness.models.openai.chat_completions.tools import (
 
 
 def test_openai_content_edges_and_incremental_native_parts() -> None:
+    default = OpenAIChatCompletionsProfile()
     profile = OpenAIChatCompletionsProfile(
-        supports_image_input=True,
-        supports_video_input=True,
-        supports_file_input=True,
+        capabilities=replace(
+            default.capabilities,
+            input_modalities=frozenset({"text", "image", "video", "file"}),
+        ),
     )
     call = ToolCall("call", "lookup")
-    assert encode_chat_message(Message.assistant(tool_calls=(call,)), profile)["content"] is None
+    assert encode_chat_message(Message.assistant((call,)), profile)["content"] is None
     assert encode_openai_content((), "user", profile) == ""
     assert encode_openai_content((ContentPart.text_part("ok"),), "tool", profile) == "ok"
     assert decode_message_content(None) == []
@@ -100,20 +103,24 @@ def test_openai_content_edges_and_incremental_native_parts() -> None:
 def test_openai_content_rejects_missing_or_unsupported_sources(
     part: ContentPart, pattern: str
 ) -> None:
+    default = OpenAIChatCompletionsProfile()
     profile = OpenAIChatCompletionsProfile(
-        supports_image_input=True,
-        supports_video_input=True,
-        supports_file_input=True,
+        capabilities=replace(
+            default.capabilities,
+            input_modalities=frozenset({"text", "image", "video", "file"}),
+        ),
     )
     with pytest.raises(OpenAIChatCompletionsError, match=pattern):
         encode_content_part(part, profile)
 
 
 def test_openai_content_rejects_disabled_capabilities_and_bad_native_data() -> None:
+    default = OpenAIChatCompletionsProfile()
     disabled = OpenAIChatCompletionsProfile(
-        supports_image_input=False,
-        supports_video_input=False,
-        supports_file_input=False,
+        capabilities=replace(
+            default.capabilities,
+            input_modalities=frozenset({"text"}),
+        ),
     )
     for part, pattern in (
         (ContentPart("image", uri="https://x/image"), "image input"),
@@ -123,7 +130,7 @@ def test_openai_content_rejects_disabled_capabilities_and_bad_native_data() -> N
         with pytest.raises(OpenAIChatCompletionsError, match=pattern):
             encode_content_part(part, disabled)
 
-    profile = OpenAIChatCompletionsProfile(supports_image_input=True)
+    profile = OpenAIChatCompletionsProfile()
     with pytest.raises(OpenAIChatCompletionsError, match="only support text"):
         encode_openai_content((ContentPart("image", uri="https://x/image"),), "system", profile)
     for part, pattern in (
@@ -169,10 +176,24 @@ def test_openai_tool_codec_edges() -> None:
     spec = ToolSpec("lookup", "lookup", {"type": "object"})
     profile = OpenAIChatCompletionsProfile()
     assert encode_openai_tools((), profile) == []
+    disabled_capabilities = replace(
+        profile.capabilities,
+        runtime_tools=False,
+        tool_choice_types=frozenset({"auto", "none"}),
+    )
     with pytest.raises(OpenAIChatCompletionsError, match="does not support tools"):
-        encode_openai_tools((spec,), OpenAIChatCompletionsProfile(supports_tools=False))
+        encode_openai_tools(
+            (spec,),
+            OpenAIChatCompletionsProfile(capabilities=disabled_capabilities),
+        )
     assert encode_openai_choice(ToolChoice(), tool_names=set(), profile=profile) is None
-    no_choice = OpenAIChatCompletionsProfile(supports_tool_choice=False)
+    no_choice = OpenAIChatCompletionsProfile(
+        capabilities=replace(
+            profile.capabilities,
+            tool_choice_types=frozenset({"auto"}),
+        ),
+        automatic_tool_choice_mode="implicit",
+    )
     assert encode_openai_choice(ToolChoice(), tool_names={"lookup"}, profile=no_choice) is None
     with pytest.raises(OpenAIChatCompletionsError, match="does not support tool_choice"):
         encode_openai_choice(ToolChoice("none"), tool_names={"lookup"}, profile=no_choice)
@@ -220,7 +241,7 @@ def test_anthropic_message_grouping_and_mid_conversation_system_edges() -> None:
     with pytest.raises(AnthropicError, match="unsupported Anthropic message role"):
         encode_anthropic_message(Message.system("policy"), blocks)
 
-    enabled = AnthropicProfile(supports_mid_conversation_system=True)
+    enabled = AnthropicProfile(mid_conversation_system_mode="encode")
     _, final_system = encode_anthropic_messages(
         (Message.user("one"), Message.system("instruction")), enabled
     )
@@ -255,7 +276,7 @@ def test_anthropic_content_shapes_and_native_metadata() -> None:
     call = ToolCall("call", "lookup")
     assert encode_anthropic_content((), "user", profile) == ""
     assert encode_anthropic_content((ContentPart.text_part("a"),), "assistant", profile) == "a"
-    assert encode_anthropic_message(Message.assistant(tool_calls=(call,)), profile)["content"] == [
+    assert encode_anthropic_message(Message.assistant((call,)), profile)["content"] == [
         {"type": "tool_use", "id": "call", "name": "lookup", "input": {}}
     ]
     assert encode_tool_result_content((), profile) == ""
@@ -320,6 +341,14 @@ def test_anthropic_content_decoder_rejects_invalid_blocks(block: object, pattern
 
 def test_anthropic_native_blocks_validate_role_shape_and_capabilities() -> None:
     profile = AnthropicProfile(system_content_mode="blocks")
+    text_only = replace(
+        profile.capabilities,
+        input_modalities=frozenset({"text"}),
+    )
+    without_image = replace(
+        profile.capabilities,
+        input_modalities=frozenset({"text", "file"}),
+    )
     native_text = ContentPart(
         "opaque",
         data={"anthropic": {"type": "text", "text": "policy"}},
@@ -344,12 +373,12 @@ def test_anthropic_native_blocks_validate_role_shape_and_capabilities() -> None:
         ),
         (
             ContentPart("opaque", data={"anthropic": {"type": "image", "source": {}}}),
-            AnthropicProfile(supports_image_input=False),
+            AnthropicProfile(capabilities=without_image),
             "does not support image",
         ),
         (
             ContentPart("opaque", data={"anthropic": {"type": "document", "source": {}}}),
-            AnthropicProfile(supports_file_input=False),
+            AnthropicProfile(capabilities=text_only),
             "does not support file",
         ),
         (
@@ -394,10 +423,24 @@ def test_anthropic_tool_codec_edges() -> None:
     profile = AnthropicProfile()
     call = ToolCall("call", "lookup", {"x": 1})
     assert encode_anthropic_tools((), profile) == []
+    disabled_capabilities = replace(
+        profile.capabilities,
+        runtime_tools=False,
+        tool_choice_types=frozenset({"auto", "none"}),
+    )
     with pytest.raises(AnthropicError, match="does not support tools"):
-        encode_anthropic_tools((spec,), AnthropicProfile(supports_tools=False))
+        encode_anthropic_tools(
+            (spec,),
+            AnthropicProfile(capabilities=disabled_capabilities),
+        )
     assert encode_anthropic_choice(ToolChoice(), tool_names=set(), profile=profile) is None
-    no_choice = AnthropicProfile(supports_tool_choice=False)
+    no_choice = AnthropicProfile(
+        capabilities=replace(
+            profile.capabilities,
+            tool_choice_types=frozenset({"auto"}),
+        ),
+        automatic_tool_choice_mode="implicit",
+    )
     assert encode_anthropic_choice(ToolChoice(), tool_names={"lookup"}, profile=no_choice) is None
     with pytest.raises(AnthropicError, match="does not support tool_choice"):
         encode_anthropic_choice(ToolChoice("none"), tool_names={"lookup"}, profile=no_choice)

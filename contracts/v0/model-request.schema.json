@@ -3,17 +3,22 @@
   "$id": "https://jharness.invalid/spec/v0/model-request.schema.json",
   "title": "Kernel v0 Model Request",
   "type": "object",
-  "required": ["messages", "tools", "options", "tool_choice", "response_format"],
+  "required": ["messages", "runtime_tools", "provider_tools", "options", "tool_choice", "response_format"],
   "properties": {
     "messages": {
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "messages.schema.json#/$defs/message" }
     },
-    "tools": {
+    "runtime_tools": {
       "type": "array",
-      "$comment": "Tool names must be unique; SDK semantic validation enforces uniqueness by name.",
+      "$comment": "Runtime tool names must be unique; SDK semantic validation enforces uniqueness by name.",
       "items": { "$ref": "tools.schema.json#/$defs/tool_spec" }
+    },
+    "provider_tools": {
+      "type": "array",
+      "$comment": "Provider tool identities must be unique; SDK semantic validation enforces uniqueness by ProviderToolId.",
+      "items": { "$ref": "#/$defs/provider_tool_spec" }
     },
     "options": { "$ref": "#/$defs/model_options" },
     "tool_choice": { "$ref": "#/$defs/tool_choice" },
@@ -62,13 +67,32 @@
           "type": "object",
           "required": ["type", "name", "allow_parallel_tool_calls"],
           "properties": {
-            "type": { "const": "named" },
+            "type": { "const": "runtime" },
             "name": { "type": "string", "minLength": 1 },
+            "allow_parallel_tool_calls": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "provider_tool", "allow_parallel_tool_calls"],
+          "properties": {
+            "type": { "const": "provider" },
+            "provider_tool": { "$ref": "messages.schema.json#/$defs/provider_tool_id" },
             "allow_parallel_tool_calls": { "type": "boolean" }
           },
           "additionalProperties": false
         }
       ]
+    },
+    "provider_tool_spec": {
+      "type": "object",
+      "required": ["tool", "configuration"],
+      "properties": {
+        "tool": { "$ref": "messages.schema.json#/$defs/provider_tool_id" },
+        "configuration": { "type": "object" }
+      },
+      "additionalProperties": false
     },
     "response_format": {
       "oneOf": [

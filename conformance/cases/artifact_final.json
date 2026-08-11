@@ -25,21 +25,23 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [
+              "output": [
                 {
-                  "type": "artifact",
-                  "artifact": {
-                    "ref": "artifact-1",
-                    "media_type": "text/csv",
-                    "name": "data.csv",
-                    "size_bytes": 12,
-                    "sha256": "abc",
+                  "kind": "content",
+                  "content": {
+                    "type": "artifact",
+                    "artifact": {
+                      "ref": "artifact-1",
+                      "media_type": "text/csv",
+                      "name": "data.csv",
+                      "size_bytes": 12,
+                      "sha256": "abc",
+                      "metadata": {}
+                    },
                     "metadata": {}
-                  },
-                  "metadata": {}
+                  }
                 }
               ],
-              "tool_calls": [],
               "finish_reason": "end_turn",
               "usage": null,
               "model_id": "fixture-model",

@@ -25,7 +25,8 @@
           "deltas": [
             {
               "kind": "reasoning",
-              "index": 0,
+              "output_index": 0,
+              "content_index": 0,
               "text_delta": "private reasoning"
             },
             {
@@ -41,7 +42,8 @@
             },
             {
               "kind": "content",
-              "index": 0,
+              "output_index": 0,
+              "content_index": 0,
               "text_delta": "answer",
               "part_type": "text",
               "data": {}
@@ -61,14 +63,16 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [
+              "output": [
                 {
-                  "type": "text",
-                  "text": "answer",
-                  "metadata": {}
+                  "kind": "content",
+                  "content": {
+                    "type": "text",
+                    "text": "answer",
+                    "metadata": {}
+                  }
                 }
               ],
-              "tool_calls": [],
               "finish_reason": "end_turn",
               "usage": {
                 "input_tokens": 3,

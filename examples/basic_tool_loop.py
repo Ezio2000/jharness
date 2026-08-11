@@ -63,7 +63,7 @@ class DemoModel:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                tool_calls=(ToolCall("call-1", "echo", {"text": "hello"}),),
+                (ToolCall("call-1", "echo", {"text": "hello"}),),
                 finish_reason="tool_calls",
             )
         outcome = request.messages[-1].outcome

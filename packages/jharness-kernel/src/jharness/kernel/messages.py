@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from jharness.kernel._validation import (
     expect_instance,
@@ -128,7 +129,7 @@ class ContentPart:
 
 @dataclass(frozen=True, slots=True)
 class ToolCall:
-    """One model-requested tool invocation."""
+    """One model-requested invocation that the JHarness runtime must execute."""
 
     id: str
     name: str
@@ -138,6 +139,27 @@ class ToolCall:
         expect_non_empty_str(self.id, "tool call id")
         expect_non_empty_str(self.name, "tool call name")
         object.__setattr__(self, "arguments", freeze_mapping(self.arguments, "tool arguments"))
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderToolId:
+    """Namespaced identity of one provider-executed tool kind."""
+
+    namespace: str
+    type: str
+
+    def __post_init__(self) -> None:
+        expect_non_empty_str(self.namespace, "provider tool namespace")
+        expect_non_empty_str(self.type, "provider tool type")
+
+
+class ProviderToolStatus(StrEnum):
+    """Portable lifecycle projection for one provider-executed tool call."""
+
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    INCOMPLETE = "incomplete"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,12 +189,53 @@ class ErrorInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderToolCall:
+    """One tool invocation executed by the remote model provider."""
+
+    id: str
+    tool: ProviderToolId
+    status: ProviderToolStatus
+    arguments: Mapping[str, Any] = field(default_factory=dict[str, Any])
+    output: tuple[ContentPart, ...] = ()
+    error: ErrorInfo | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict[str, Any])
+
+    def __post_init__(self) -> None:
+        expect_non_empty_str(self.id, "provider tool call id")
+        expect_instance(self.tool, ProviderToolId, "provider tool call tool")
+        expect_instance(self.status, ProviderToolStatus, "provider tool call status")
+        output = expect_instance_tuple(self.output, ContentPart, "provider tool call output")
+        if self.status is ProviderToolStatus.FAILED:
+            if self.error is None:
+                raise ValueError("failed provider tool call requires error")
+            expect_instance(self.error, ErrorInfo, "provider tool call error")
+        elif self.error is not None:
+            raise ValueError("only failed provider tool call may carry error")
+        if self.status is ProviderToolStatus.IN_PROGRESS and output:
+            raise ValueError("in-progress provider tool call cannot carry final output")
+        object.__setattr__(
+            self,
+            "arguments",
+            freeze_mapping(self.arguments, "provider tool arguments"),
+        )
+        object.__setattr__(self, "output", output)
+        object.__setattr__(
+            self,
+            "metadata",
+            freeze_mapping(self.metadata, "provider tool metadata"),
+        )
+
+
+ModelOutputItem: TypeAlias = ContentPart | ToolCall | ProviderToolCall
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
     """Immutable conversation message with role-specific invariants."""
 
     role: str
     parts: tuple[ContentPart, ...] = ()
-    tool_calls: tuple[ToolCall, ...] = ()
+    output: tuple[ModelOutputItem, ...] = ()
     tool_call_id: str | None = None
     outcome: ToolOutcome | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict[str, Any])
@@ -182,18 +245,18 @@ class Message:
         if role not in _ROLES:
             raise ValueError(f"unsupported message role: {role}")
         parts = expect_instance_tuple(self.parts, ContentPart, "message parts")
-        calls = expect_instance_tuple(self.tool_calls, ToolCall, "message tool_calls")
+        output = _expect_model_output(self.output, "assistant output")
         tool_call_id = expect_optional_str(self.tool_call_id, "tool_call_id")
         outcome = None if self.outcome is None else _expect_tool_outcome(self.outcome)
         object.__setattr__(self, "parts", parts)
-        object.__setattr__(self, "tool_calls", calls)
+        object.__setattr__(self, "output", output)
         object.__setattr__(self, "metadata", freeze_mapping(self.metadata, "message metadata"))
         if role in _REGULAR_ROLES:
-            _validate_regular_message(role, parts, calls, tool_call_id, outcome)
+            _validate_regular_message(role, parts, output, tool_call_id, outcome)
         elif role == "assistant":
-            _validate_assistant_message(parts, calls, tool_call_id, outcome)
+            _validate_assistant_message(parts, output, tool_call_id, outcome)
         else:
-            _validate_tool_message(parts, calls, tool_call_id, outcome)
+            _validate_tool_message(parts, output, tool_call_id, outcome)
 
     @classmethod
     def system(
@@ -237,15 +300,13 @@ class Message:
     @classmethod
     def assistant(
         cls,
-        parts: Sequence[ContentPart] = (),
+        output: Sequence[ModelOutputItem],
         *,
-        tool_calls: Sequence[ToolCall] = (),
         metadata: Mapping[str, Any] | None = None,
     ) -> Message:
         return cls(
             "assistant",
-            tuple(parts),
-            tuple(tool_calls),
+            output=tuple(output),
             metadata={} if metadata is None else metadata,
         )
 
@@ -264,6 +325,27 @@ class Message:
             metadata={} if metadata is None else metadata,
         )
 
+    def runtime_tool_calls(self) -> tuple[ToolCall, ...]:
+        """Return model-ordered calls that the JHarness runtime must execute."""
+
+        return tuple(item for item in self.output if isinstance(item, ToolCall))
+
+    def provider_tool_calls(self) -> tuple[ProviderToolCall, ...]:
+        """Return model-ordered calls executed by the provider."""
+
+        return tuple(item for item in self.output if isinstance(item, ProviderToolCall))
+
+    def visible_parts(self) -> tuple[ContentPart, ...]:
+        """Project model-visible content from ordered assistant output."""
+
+        parts: list[ContentPart] = []
+        for item in self.output:
+            if isinstance(item, ContentPart):
+                parts.append(item)
+            elif isinstance(item, ProviderToolCall):
+                parts.extend(item.output)
+        return tuple(parts)
+
 
 def _expect_tool_outcome(value: object) -> ToolOutcome:
     from jharness.kernel.tools import ToolOutcome
@@ -276,41 +358,52 @@ def _expect_tool_outcome(value: object) -> ToolOutcome:
 def _validate_regular_message(
     role: str,
     parts: tuple[ContentPart, ...],
-    calls: tuple[ToolCall, ...],
+    output: tuple[ModelOutputItem, ...],
     tool_call_id: str | None,
     outcome: ToolOutcome | None,
 ) -> None:
     if not parts:
         raise ValueError(f"{role} message requires at least one part")
-    if calls or tool_call_id is not None or outcome is not None:
+    if output or tool_call_id is not None or outcome is not None:
         raise ValueError(f"{role} message cannot carry tool fields")
 
 
 def _validate_assistant_message(
     parts: tuple[ContentPart, ...],
-    calls: tuple[ToolCall, ...],
+    output: tuple[ModelOutputItem, ...],
     tool_call_id: str | None,
     outcome: ToolOutcome | None,
 ) -> None:
-    if not parts and not calls:
-        raise ValueError("assistant message requires parts or tool calls")
+    if parts:
+        raise ValueError("assistant message content must be carried by ordered output")
+    if not output:
+        raise ValueError("assistant message requires output")
     if tool_call_id is not None or outcome is not None:
         raise ValueError("assistant message cannot carry tool outcome fields")
-    ids = [call.id for call in calls]
+    ids = [item.id for item in output if isinstance(item, ToolCall | ProviderToolCall)]
     if len(ids) != len(set(ids)):
         raise ValueError("assistant tool call ids must be unique")
 
 
 def _validate_tool_message(
     parts: tuple[ContentPart, ...],
-    calls: tuple[ToolCall, ...],
+    output: tuple[ModelOutputItem, ...],
     tool_call_id: str | None,
     outcome: ToolOutcome | None,
 ) -> None:
-    if parts or calls:
+    if parts or output:
         raise ValueError("tool message content is owned by its outcome")
     if tool_call_id is None:
         raise ValueError("tool message requires tool_call_id")
     expect_non_empty_str(tool_call_id, "tool_call_id")
     if outcome is None:
         raise ValueError("tool message requires outcome")
+
+
+def _expect_model_output(value: object, label: str) -> tuple[ModelOutputItem, ...]:
+    if not isinstance(value, tuple):
+        raise TypeError(f"{label} must be a tuple")
+    items = cast(tuple[object, ...], value)
+    if any(not isinstance(item, ContentPart | ToolCall | ProviderToolCall) for item in items):
+        raise TypeError(f"{label} contains an unsupported item")
+    return cast(tuple[ModelOutputItem, ...], items)

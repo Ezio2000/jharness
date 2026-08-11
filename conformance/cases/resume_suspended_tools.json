@@ -25,9 +25,9 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [],
-              "tool_calls": [
+              "output": [
                 {
+                  "kind": "runtime_tool_call",
                   "id": "call-1",
                   "name": "wait",
                   "arguments": {
@@ -35,6 +35,7 @@
                   }
                 },
                 {
+                  "kind": "runtime_tool_call",
                   "id": "call-2",
                   "name": "echo",
                   "arguments": {
@@ -94,14 +95,16 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [
+              "output": [
                 {
-                  "type": "text",
-                  "text": "all done",
-                  "metadata": {}
+                  "kind": "content",
+                  "content": {
+                    "type": "text",
+                    "text": "all done",
+                    "metadata": {}
+                  }
                 }
               ],
-              "tool_calls": [],
               "finish_reason": "end_turn",
               "usage": null,
               "model_id": "fixture-model",
