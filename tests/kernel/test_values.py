@@ -36,12 +36,17 @@ from jharness.kernel import (
     Message,
     ModelCapabilities,
     ModelOptions,
+    ModelRequest,
     ModelResponse,
     ModelTurnFact,
     ModelTurnResult,
     ModelUsage,
     PendingToolCalls,
     Planning,
+    ProviderToolCall,
+    ProviderToolId,
+    ProviderToolSpec,
+    ProviderToolStatus,
     ResponseFormat,
     RevisionConflict,
     RunContext,
@@ -58,6 +63,7 @@ from jharness.kernel import (
     ToolAccepted,
     ToolBatchFact,
     ToolCall,
+    ToolChoice,
     ToolExecution,
     ToolFailure,
     ToolOutcomeKind,
@@ -138,7 +144,7 @@ def tool_checkpoints() -> tuple[Checkpoint, Checkpoint, Checkpoint]:
                 None,
             ),
             ToolsPending(pending_calls(call)),
-            append=(Message.assistant(tool_calls=(call,)),),
+            append=(Message.assistant((call,)),),
             planning_steps=1,
         ),
         checkpoint_id="cp-1",
@@ -168,11 +174,11 @@ def test_message_content_and_tool_result_have_one_authoritative_shape() -> None:
     artifact = ArtifactRef("artifact:1", media_type="text/plain")
     assert ContentPart.artifact_part(artifact).artifact is artifact
     call = ToolCall("call-1", "search", {"q": "x"})
-    assistant = Message.assistant(tool_calls=(call,))
+    assistant = Message.assistant((call,))
     success = ToolSuccess((ContentPart.text_part("ok"),), {"count": 1})
     result = SettledResult(success)
     tool = Message.tool(call.id, result.outcome)
-    assert assistant.tool_calls == (call,)
+    assert assistant.runtime_tool_calls() == (call,)
     assert tool.parts == ()
     assert tool.outcome is success
     assert thaw_json_value(success.structured_content) == {"count": 1}
@@ -236,9 +242,96 @@ def test_model_tool_and_limit_values_are_strict() -> None:
         ModelUsage(total_tokens=True)  # type: ignore[arg-type]
 
 
+def test_model_capabilities_validate_exact_tool_choice_inventory() -> None:
+    provider_tool = ProviderToolId("test", "search")
+    with pytest.raises(ValueError, match="must include auto"):
+        ModelCapabilities(tool_choice_types=frozenset({"none"}))
+    with pytest.raises(ValueError, match="unsupported model tool choice"):
+        ModelCapabilities(tool_choice_types=frozenset({"auto", "other"}))
+    with pytest.raises(ValueError, match="cannot include runtime"):
+        ModelCapabilities(
+            runtime_tools=False,
+            tool_choice_types=frozenset({"auto", "runtime"}),
+        )
+    with pytest.raises(ValueError, match="cannot include provider"):
+        ModelCapabilities(tool_choice_types=frozenset({"auto", "provider"}))
+
+    capabilities = ModelCapabilities(
+        tool_choice_types=frozenset({"auto", "provider"}),
+        provider_tools=frozenset({provider_tool}),
+    )
+    assert capabilities.tool_choice_types == frozenset({"auto", "provider"})
+
+
+def test_ordered_model_output_separates_runtime_and_provider_tool_ownership() -> None:
+    image = ContentPart(
+        "image",
+        uri="https://example.invalid/generated.png",
+        media_type="image/png",
+    )
+    provider_id = ProviderToolId("openai.responses", "image_generation")
+    provider_call = ProviderToolCall(
+        "provider-1",
+        provider_id,
+        ProviderToolStatus.COMPLETED,
+        {"prompt": "draw a lighthouse"},
+        (image,),
+    )
+    runtime_call = ToolCall("runtime-1", "persist_result", {"name": "lighthouse.png"})
+    response = ModelResponse((ContentPart.text_part("creating"), provider_call, runtime_call))
+
+    assert response.output == (
+        ContentPart.text_part("creating"),
+        provider_call,
+        runtime_call,
+    )
+    assert response.provider_tool_calls() == (provider_call,)
+    assert response.runtime_tool_calls() == (runtime_call,)
+    assert response.visible_parts() == (ContentPart.text_part("creating"), image)
+    assert response.to_assistant_message().output == response.output
+
+    spec = ProviderToolSpec(provider_id, {"quality": "high"})
+    request = ModelRequest(
+        messages=(Message.user("draw"),),
+        provider_tools=(spec,),
+        tool_choice=ToolChoice("provider", provider_tool=provider_id),
+    )
+    assert request.provider_tools == (spec,)
+    assert request.runtime_tools == ()
+
+    with pytest.raises(ValueError, match="unavailable provider tool"):
+        ModelRequest(
+            messages=(Message.user("draw"),),
+            tool_choice=ToolChoice("provider", provider_tool=provider_id),
+        )
+    with pytest.raises(ValueError, match="ids must be unique"):
+        ModelResponse((provider_call, ToolCall(provider_call.id, "duplicate")))
+
+
+def test_provider_tool_incomplete_is_terminal_without_becoming_failure() -> None:
+    partial = ContentPart.text_part("partial provider result")
+    call = ProviderToolCall(
+        "provider-incomplete",
+        ProviderToolId("deepseek.responses", "web_search"),
+        ProviderToolStatus.INCOMPLETE,
+        output=(partial,),
+    )
+
+    assert call.output == (partial,)
+    assert call.error is None
+
+    with pytest.raises(ValueError, match="in-progress"):
+        ProviderToolCall(
+            "provider-running",
+            call.tool,
+            ProviderToolStatus.IN_PROGRESS,
+            output=(partial,),
+        )
+
+
 def test_snapshot_validates_history_against_flat_state() -> None:
     call = ToolCall("c", "tool")
-    messages = history(Message.user("go"), Message.assistant(tool_calls=(call,)))
+    messages = history(Message.user("go"), Message.assistant((call,)))
     snapshot = RunSnapshot(1, context(), messages, RunMetrics(), ToolsPending(pending_calls(call)))
     assert snapshot.status == "tools_pending"
     with pytest.raises(ValueError, match="unresolved"):
@@ -388,7 +481,7 @@ def test_recovered_pending_proof_canonicalizes_once_then_advances_without_scans(
     snapshot = RunSnapshot(
         1,
         context(),
-        history(Message.user("go"), Message.assistant(tool_calls=history_calls)),
+        history(Message.user("go"), Message.assistant(history_calls)),
         RunMetrics(),
         state,
     )
@@ -516,7 +609,7 @@ def test_change_append_uses_incremental_proof_and_rejects_old_tool_call_id(
                     None,
                 ),
                 ToolsPending(pending_calls(reused)),
-                append=(Message.assistant(tool_calls=(reused,)),),
+                append=(Message.assistant((reused,)),),
                 planning_steps=1,
             ),
             checkpoint_id="cp-3",

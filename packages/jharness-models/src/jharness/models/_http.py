@@ -44,6 +44,11 @@ PayloadFactory = Callable[[], Mapping[str, object]]
 HeadersFactory = Callable[[Mapping[str, object]], Mapping[str, str]]
 ResponseDecoder = Callable[[Mapping[str, object]], ModelResponse]
 FrameDecoder = Callable[[str | None, str], tuple[bool, Sequence[ModelDelta]]]
+BodyErrorPredicate = Callable[[Mapping[str, object]], bool]
+
+
+def _default_body_error_predicate(value: Mapping[str, object]) -> bool:
+    return value.get("error") is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +173,7 @@ async def invoke_json_model(
     decode: ResponseDecoder,
     errors: ModelErrorPolicy,
     response_shape_error: str,
+    body_error_predicate: BodyErrorPredicate = _default_body_error_predicate,
     max_response_body_bytes: int = _DEFAULT_MAX_RESPONSE_BODY_BYTES,
 ) -> ModelResponse:
     """Execute one JSON model request through the shared provider error boundary."""
@@ -195,7 +201,7 @@ async def invoke_json_model(
             if not isinstance(value, Mapping):
                 raise errors.codec_error(response_shape_error)
             decoded = cast(Mapping[str, object], value)
-            if "error" in decoded:
+            if body_error_predicate(decoded):
                 raise ModelError(
                     _body_error_info(
                         decoded,

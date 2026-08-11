@@ -33,7 +33,8 @@ from jharness.kernel.wire.tools import decode_risk_value, encode_risk_value
 __all__ = ["decode_event", "encode_event"]
 
 _REQUEST_KINDS = frozenset({"start", "continue", "resume"})
-_DELTA_KINDS = frozenset({"content", "tool_call", "reasoning", "usage"})
+_DELTA_KINDS = frozenset({"content", "tool_call", "reasoning", "provider_tool_call", "usage"})
+_PROVIDER_TOOL_STATUSES = frozenset({"in_progress", "completed", "incomplete", "failed"})
 _OUTCOME_KINDS = frozenset({"success", "failure", "accepted", "waiting"})
 _STOP_REASONS = frozenset(
     {"terminal", "suspended", "cancelled", "consumer_closed", "repository_error"}
@@ -200,11 +201,29 @@ def _decode_model_delta(value: object) -> dict[str, Any]:
         data = object_fields(
             raw,
             "content delta",
-            frozenset({"kind", "index", "part_type", "text_delta", "data"}),
+            frozenset(
+                {
+                    "kind",
+                    "output_index",
+                    "content_index",
+                    "part_type",
+                    "text_delta",
+                    "data",
+                }
+            ),
         )
         return {
             "kind": "content",
-            "index": integer(data["index"], "content delta index", minimum=0),
+            "output_index": integer(
+                data["output_index"],
+                "content delta output_index",
+                minimum=0,
+            ),
+            "content_index": integer(
+                data["content_index"],
+                "content delta content_index",
+                minimum=0,
+            ),
             "part_type": string(data["part_type"], "content part_type", non_empty=True),
             "text_delta": string(data["text_delta"], "content text_delta"),
             "data": thaw_object(json_object(data["data"], "content delta data")),
@@ -213,21 +232,86 @@ def _decode_model_delta(value: object) -> dict[str, Any]:
         data = object_fields(
             raw,
             "tool call delta",
-            frozenset({"kind", "index", "id", "name", "arguments_delta"}),
+            frozenset({"kind", "output_index", "id", "name", "arguments_delta"}),
         )
         return {
             "kind": "tool_call",
-            "index": integer(data["index"], "tool call delta index", minimum=0),
+            "output_index": integer(
+                data["output_index"],
+                "tool call delta output_index",
+                minimum=0,
+            ),
             "id": optional_string(data["id"], "tool call delta id", non_empty=True),
             "name": optional_string(data["name"], "tool call delta name", non_empty=True),
             "arguments_delta": string(data["arguments_delta"], "arguments_delta"),
         }
     if kind == "reasoning":
-        data = object_fields(raw, "reasoning delta", frozenset({"kind", "index", "text_delta"}))
+        data = object_fields(
+            raw,
+            "reasoning delta",
+            frozenset({"kind", "output_index", "content_index", "text_delta"}),
+        )
         return {
             "kind": "reasoning",
-            "index": integer(data["index"], "reasoning delta index", minimum=0),
+            "output_index": integer(
+                data["output_index"],
+                "reasoning delta output_index",
+                minimum=0,
+            ),
+            "content_index": integer(
+                data["content_index"],
+                "reasoning delta content_index",
+                minimum=0,
+            ),
             "text_delta": string(data["text_delta"], "reasoning text_delta"),
+        }
+    if kind == "provider_tool_call":
+        data = object_fields(
+            raw,
+            "provider tool call delta",
+            frozenset({"kind", "output_index", "id", "tool", "status", "event", "data"}),
+        )
+        tool = object_fields(
+            data["tool"],
+            "provider tool delta identity",
+            frozenset({"namespace", "type"}),
+        )
+        raw_status = data["status"]
+        return {
+            "kind": "provider_tool_call",
+            "output_index": integer(
+                data["output_index"],
+                "provider tool delta output_index",
+                minimum=0,
+            ),
+            "id": string(data["id"], "provider tool delta id", non_empty=True),
+            "tool": {
+                "namespace": string(
+                    tool["namespace"],
+                    "provider tool delta namespace",
+                    non_empty=True,
+                ),
+                "type": string(
+                    tool["type"],
+                    "provider tool delta type",
+                    non_empty=True,
+                ),
+            },
+            "status": (
+                None
+                if raw_status is None
+                else enum_string(
+                    raw_status,
+                    "provider tool delta status",
+                    _PROVIDER_TOOL_STATUSES,
+                )
+            ),
+            "event": optional_string(
+                data["event"],
+                "provider tool delta event",
+                non_empty=True,
+            ),
+            "data": thaw_object(json_object(data["data"], "provider tool delta data")),
         }
     data = object_fields(raw, "usage delta", frozenset({"kind", "usage"}))
     return {
@@ -240,12 +324,28 @@ def _decode_model_finished(value: object) -> dict[str, Any]:
     data = object_fields(
         value,
         "model_finished data",
-        frozenset({"finish_reason", "tool_call_count", "usage"}),
+        frozenset(
+            {
+                "finish_reason",
+                "runtime_tool_call_count",
+                "provider_tool_call_count",
+                "usage",
+            }
+        ),
     )
     raw_usage = data["usage"]
     return {
         "finish_reason": optional_string(data["finish_reason"], "finish_reason"),
-        "tool_call_count": integer(data["tool_call_count"], "tool_call_count", minimum=0),
+        "runtime_tool_call_count": integer(
+            data["runtime_tool_call_count"],
+            "runtime_tool_call_count",
+            minimum=0,
+        ),
+        "provider_tool_call_count": integer(
+            data["provider_tool_call_count"],
+            "provider_tool_call_count",
+            minimum=0,
+        ),
         "usage": (
             None if raw_usage is None else encode_model_usage(decode_model_usage_value(raw_usage))
         ),

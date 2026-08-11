@@ -1,13 +1,20 @@
 # Kernel v0 Tool Scheduling
 
+This contract schedules only runtime tools: calls whose implementation is
+owned by the JHarness host. Provider tools are declared separately on the model
+request, executed by the remote provider, and recorded in the assistant's
+ordered output. A `provider_tool_call` is never catalog-bound, approved, placed
+in `ToolsPending`, counted against the runtime tool-call budget, or converted
+to a tool message.
+
 ## Binding
 
-One immutable tool catalog is opened per invocation. Each pending call is bound
-before approval. Binding validates catalog membership and input schema and
-captures the exact implementation and spec. When a spec declares an output
-schema, that schema validates the structured content of non-failure results.
-`ToolFailure` is the framework error envelope and is not interpreted as a
-successful business payload.
+One immutable runtime tool catalog is opened per invocation. Each pending
+runtime call is bound before approval. Binding validates catalog membership and
+input schema and captures the exact implementation and spec. When a spec
+declares an output schema, that schema validates the structured content of
+non-failure results. `ToolFailure` is the framework error envelope and is not
+interpreted as a successful business payload.
 
 Invalid calls become precomputed tool failures and do not reach approval.
 

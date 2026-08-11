@@ -224,7 +224,7 @@ async def test_parallel_tool_finished_events_follow_physical_settlement_order() 
     for _ in range(20):
         settlements: list[str] = []
         calls = (ToolCall("a", "lookup"), ToolCall("b", "lookup"))
-        model = _ScriptModel((ModelResponse(tool_calls=calls), _final()))
+        model = _ScriptModel((ModelResponse(calls), _final()))
         checkpoint, events = await _collect(
             Runtime(model=model, tools=_StaticProvider(_ParallelCatalog(settlements))).start(
                 (Message.user("go"),)
@@ -245,7 +245,7 @@ async def test_parallel_tool_finished_events_follow_physical_settlement_order() 
 async def test_cooperative_cancellation_is_observed_only_after_its_event() -> None:
     observed = asyncio.Event()
     call = ToolCall("call-1", "lookup")
-    model = _ScriptModel((ModelResponse(tool_calls=(call,)), _final()))
+    model = _ScriptModel((ModelResponse((call,)), _final()))
     invocation = Runtime(
         model=model,
         tools=_StaticProvider(_CancellationCatalog(observed)),

@@ -7,7 +7,7 @@ import binascii
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
-from jharness.kernel import ContentPart, Message
+from jharness.kernel import ContentPart, Message, ModelOutputItem, ToolCall
 from jharness.models.anthropic.errors import ANTHROPIC_JSON, AnthropicError
 from jharness.models.anthropic.profiles import AnthropicProfile
 
@@ -38,7 +38,7 @@ def encode_messages(
             if not conversation_started:
                 system_blocks.extend(_encode_system_parts(message.parts, profile))
                 continue
-            if not profile.supports_mid_conversation_system:
+            if profile.mid_conversation_system_mode == "reject":
                 raise AnthropicError(
                     f"{profile.name} does not support mid-conversation system messages"
                 )
@@ -92,13 +92,10 @@ def encode_message(
     role = "user" if message.role == "external" else message.role
     if role not in {"user", "assistant"}:
         raise AnthropicError(f"unsupported Anthropic message role: {message.role}")
-    content = encode_message_content(message.parts, role, profile)
-    if role == "assistant" and message.tool_calls:
-        blocks = _content_blocks(content)
-        from jharness.models.anthropic.messages_api.tools import encode_assistant_tool_uses
-
-        blocks.extend(encode_assistant_tool_uses(message.tool_calls))
-        content = blocks
+    if role == "assistant":
+        content = _encode_assistant_output(message.output, profile)
+    else:
+        content = encode_message_content(message.parts, role, profile)
     return {"role": role, "content": content}
 
 
@@ -148,11 +145,11 @@ def encode_user_content_part(part: ContentPart, profile: AnthropicProfile) -> Js
     if part.type == "text":
         return {"type": "text", "text": part.text or ""}
     if part.type == "image":
-        if not profile.supports_image_input:
+        if "image" not in profile.capabilities.input_modalities:
             raise AnthropicError(f"{profile.name} does not support image input")
         return {"type": "image", "source": _encode_media_source(part, "image")}
     if part.type in {"artifact", "file"}:
-        if not profile.supports_file_input:
+        if "file" not in profile.capabilities.input_modalities:
             raise AnthropicError(f"{profile.name} does not support file input")
         block: JsonObject = {"type": "document", "source": _encode_media_source(part, "file")}
         name = part.artifact.name if part.artifact is not None else part.name
@@ -174,22 +171,47 @@ def encode_tool_result_content(
     return [encode_user_content_part(part, profile) for part in parts]
 
 
-def decode_content_blocks(value: object) -> tuple[list[ContentPart], list[Mapping[str, Any]]]:
+def decode_content_blocks(value: object) -> list[ModelOutputItem]:
     if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
         raise AnthropicError("Anthropic response content must be an array")
-    parts: list[ContentPart] = []
-    tool_uses: list[Mapping[str, Any]] = []
+    output: list[ModelOutputItem] = []
     for item in cast(Sequence[object], value):
         block = ANTHROPIC_JSON.mapping(item, "Anthropic content block")
         block_type = _content_block_type(block)
         if block_type == "tool_use":
-            tool_uses.append(block)
+            from jharness.models.anthropic.messages_api.tools import decode_tool_uses
+
+            output.extend(decode_tool_uses((block,)))
             continue
         decoder = _CONTENT_BLOCK_DECODERS.get(block_type)
         if decoder is None:
             raise AnthropicError(f"unsupported Anthropic assistant content block: {block_type}")
-        parts.append(decoder(block))
-    return parts, tool_uses
+        output.append(decoder(block))
+    return output
+
+
+def _encode_assistant_output(
+    output: Sequence[ModelOutputItem],
+    profile: AnthropicProfile,
+) -> str | list[JsonObject]:
+    blocks: list[JsonObject] = []
+    for item in output:
+        if isinstance(item, ContentPart):
+            blocks.append(_encode_assistant_part(item, profile))
+            continue
+        if isinstance(item, ToolCall):
+            from jharness.models.anthropic.messages_api.tools import (
+                encode_assistant_tool_uses,
+            )
+
+            blocks.extend(encode_assistant_tool_uses((item,)))
+            continue
+        raise AnthropicError("Anthropic provider tool history is not supported by this profile")
+    if not blocks:
+        return ""
+    if all(block.get("type") == "text" for block in blocks):
+        return "".join(cast(str, block.get("text", "")) for block in blocks)
+    return blocks
 
 
 def _content_block_type(block: Mapping[str, Any]) -> str:
@@ -280,7 +302,7 @@ def _encode_assistant_part(part: ContentPart, profile: AnthropicProfile) -> Json
             block["signature"] = signature
         return block
     if part.type == "redacted_thinking":
-        if not profile.supports_redacted_thinking:
+        if profile.redacted_thinking_mode == "reject":
             raise AnthropicError(f"{profile.name} does not support redacted_thinking")
         data = _anthropic_metadata_str(part, "data")
         if data is None:
@@ -309,11 +331,11 @@ def _wire_block(
         )
     if role == "system" and profile.system_content_mode != "blocks":
         raise AnthropicError("Anthropic-native system blocks require system_content_mode='blocks'")
-    if block_type == "image" and not profile.supports_image_input:
+    if block_type == "image" and "image" not in profile.capabilities.input_modalities:
         raise AnthropicError(f"{profile.name} does not support image input")
-    if block_type == "document" and not profile.supports_file_input:
+    if block_type == "document" and "file" not in profile.capabilities.input_modalities:
         raise AnthropicError(f"{profile.name} does not support file input")
-    if block_type == "redacted_thinking" and not profile.supports_redacted_thinking:
+    if block_type == "redacted_thinking" and profile.redacted_thinking_mode == "reject":
         raise AnthropicError(f"{profile.name} does not support redacted_thinking")
     _validate_wire_block(mapping, block_type)
     return dict(mapping)
@@ -353,12 +375,6 @@ def _anthropic_metadata_str(part: ContentPart, key: str) -> str | None:
     if not isinstance(value, str):
         raise AnthropicError(f"Anthropic metadata {key} must be a string")
     return value
-
-
-def _content_blocks(value: str | list[JsonObject]) -> list[JsonObject]:
-    if isinstance(value, str):
-        return [{"type": "text", "text": value}] if value else []
-    return [dict(block) for block in value]
 
 
 def _encode_media_source(part: ContentPart, label: str) -> JsonObject:

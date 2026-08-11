@@ -105,7 +105,7 @@ class ToolRisk:
 
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
-    """Immutable model-neutral tool declaration."""
+    """Immutable declaration for a tool executed by the JHarness runtime."""
 
     name: str
     description: str

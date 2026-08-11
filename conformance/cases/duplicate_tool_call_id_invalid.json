@@ -5,14 +5,15 @@
   "target": "message",
   "value": {
     "role": "assistant",
-    "parts": [],
-    "tool_calls": [
+    "output": [
       {
+        "kind": "runtime_tool_call",
         "id": "duplicate",
         "name": "echo",
         "arguments": {}
       },
       {
+        "kind": "runtime_tool_call",
         "id": "duplicate",
         "name": "echo",
         "arguments": {}

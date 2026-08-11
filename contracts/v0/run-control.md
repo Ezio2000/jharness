@@ -67,9 +67,9 @@ external message, commits a `conversation_insert` checkpoint, and continues
 planning.
 
 An insert received during tool execution remains queued until `Planning`. It
-never appears between an assistant tool request and its tool messages. If the
-invocation suspends or ends first, the host resubmits the uncommitted insert;
-the runtime does not hide a durable command queue.
+never appears between an assistant runtime-tool request and its tool messages.
+If the invocation suspends or ends first, the host resubmits the uncommitted
+insert; the runtime does not hide a durable command queue.
 
 ### Tool Cancellation
 

@@ -92,6 +92,7 @@
         "tool_call_ids": {
           "type": "array",
           "uniqueItems": true,
+          "$comment": "Runtime tool call ids only, preserving assistant output order; provider tool calls remain in the assistant message.",
           "items": { "type": "string", "minLength": 1 }
         },
         "finish_reason": { "type": ["string", "null"] },
@@ -113,7 +114,6 @@
           "if": { "properties": { "result": { "const": "completed" } }, "required": ["result"] },
           "then": {
             "properties": {
-              "part_count": { "minimum": 1 },
               "tool_call_ids": { "maxItems": 0 },
               "limit_reason": { "type": "null" }
             }
@@ -283,7 +283,7 @@
       "required": ["kind", "part_count"],
       "properties": {
         "kind": { "const": "completed" },
-        "part_count": { "type": "integer", "minimum": 1 }
+        "part_count": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },

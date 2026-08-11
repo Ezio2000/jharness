@@ -12,7 +12,7 @@ Install only what the application uses:
 | --- | --- | --- | --- |
 | `jharness-kernel` | `uv add jharness-kernel` | `jharness.kernel` | Runtime, state, ports, checkpoints, and wire codecs |
 | `jharness-toolkit` | `uv add jharness-toolkit` | `jharness.toolkit` | Tool registry, function adapters, validation, and policies |
-| `jharness-models` | `uv add jharness-models` | `jharness.models` | OpenAI/Anthropic adapters, DeepSeek profiles, retry, and fallback |
+| `jharness-models` | `uv add jharness-models` | `jharness.models` | OpenAI Chat/Responses and Anthropic Messages adapters, DeepSeek profiles, retry, and fallback |
 | `jharness-repository` | `uv add jharness-repository` | `jharness.repository` | Memory, SQLite, MySQL, and Redis persistence |
 | `jharness-tools` | `uv add jharness-tools` | `jharness.tools` | Filesystem, shell, interaction, and child-agent tools |
 
@@ -70,6 +70,12 @@ root = Path.cwd()
 tools = ToolRegistry((ReadTool(root), LsTool(root), GlobTool(root), GrepTool(root)))
 runtime = Runtime(model=model, tools=tools)
 ```
+
+Model output is one ordered sequence of content, runtime-owned tool calls, and
+provider-owned tool calls. Only runtime-owned `ToolCall` values enter JHarness tool
+scheduling; hosted calls such as Responses image generation or web search are executed
+by the provider and recorded as `ProviderToolCall` values. Exact input/output
+modalities are advertised independently by each model profile.
 
 Provider setup is covered in [model adapters](docs/model-adapters.md); additional
 runnable examples live in [`examples`](examples/).

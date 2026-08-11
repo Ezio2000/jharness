@@ -52,7 +52,6 @@ class AnthropicStreamDecoder:
         self._response_id: str | None = None
         self._usage: ModelUsage | None = None
         self._blocks: dict[int, _BlockState] = {}
-        self._next_tool_index = 0
         self._phase: Literal["initial", "active", "delta_seen", "stopped"] = "initial"
 
     def apply_event(
@@ -101,7 +100,10 @@ class AnthropicStreamDecoder:
         )
         return replace(
             response,
-            parts=tuple(_complete_native_thinking(part) for part in response.parts),
+            output=tuple(
+                _complete_native_thinking(item) if isinstance(item, ContentPart) else item
+                for item in response.output
+            ),
         )
 
     def _message_start_events(self, value: Mapping[str, Any]) -> list[ModelDelta]:
@@ -151,9 +153,8 @@ class AnthropicStreamDecoder:
         elif block_type == "redacted_thinking":
             events = self._redacted_thinking_start_events(index, block)
         elif block_type == "tool_use":
-            tool_index = self._next_tool_index
+            tool_index = index
             events = self._tool_use_start_events(tool_index, block)
-            self._next_tool_index += 1
         else:
             raise AnthropicError(f"unsupported Anthropic stream content block: {block_type}")
         self._blocks[index] = _BlockState(block_type, bool(events), tool_index)
@@ -169,7 +170,7 @@ class AnthropicStreamDecoder:
             raise AnthropicError("Anthropic redacted_thinking block requires non-empty data")
         return [
             ModelContentDelta(
-                index=index,
+                output_index=index,
                 text_delta="",
                 part_type="redacted_thinking",
                 data={"anthropic": {"type": "redacted_thinking", "data": data}},
@@ -187,12 +188,17 @@ class AnthropicStreamDecoder:
         if not isinstance(raw_input, Mapping):
             raise AnthropicError("Anthropic tool_use input must be an object")
         deltas: list[ModelDelta] = [
-            ModelToolCallDelta(index=call_index, arguments_delta="", id=call_id, name=name)
+            ModelToolCallDelta(
+                output_index=call_index,
+                arguments_delta="",
+                id=call_id,
+                name=name,
+            )
         ]
         if raw_input:
             deltas.append(
                 ModelToolCallDelta(
-                    index=call_index,
+                    output_index=call_index,
                     arguments_delta=json.dumps(
                         cast(Mapping[str, Any], raw_input), separators=(",", ":"), sort_keys=True
                     ),
@@ -250,7 +256,7 @@ class AnthropicStreamDecoder:
             return []
         return [
             ModelContentDelta(
-                index=index,
+                output_index=index,
                 text_delta="",
                 part_type="thinking",
                 data={"anthropic": {"type": "thinking", "signature": signature}},
@@ -265,7 +271,11 @@ class AnthropicStreamDecoder:
         partial = delta.get("partial_json")
         if not isinstance(partial, str):
             raise AnthropicError("Anthropic input JSON delta requires partial_json")
-        return [ModelToolCallDelta(index=call_index, arguments_delta=partial)] if partial else []
+        return (
+            [ModelToolCallDelta(output_index=call_index, arguments_delta=partial)]
+            if partial
+            else []
+        )
 
     def _accumulate(self, deltas: Sequence[ModelDelta]) -> None:
         for delta in deltas:
@@ -329,7 +339,7 @@ class AnthropicStreamDecoder:
             raise AnthropicError(f"Anthropic {event_type} requires message_start")
 
     def _usage_events(self, value: object) -> list[ModelDelta]:
-        if not self._profile.stream_usage:
+        if self._profile.stream_usage_mode == "omit":
             return []
         usage = decode_usage(value)
         if usage is None:
@@ -349,10 +359,10 @@ def _text_events(
         raise AnthropicError(error_message)
     if not value:
         return []
-    content = ModelContentDelta(index=index, text_delta=value, part_type=part_type)
+    content = ModelContentDelta(output_index=index, text_delta=value, part_type=part_type)
     if part_type == "text":
         return [content]
-    return [ModelReasoningDelta(index=index, text_delta=value), content]
+    return [ModelReasoningDelta(output_index=index, text_delta=value), content]
 
 
 def _merge_usage(existing: ModelUsage | None, update: ModelUsage) -> ModelUsage:

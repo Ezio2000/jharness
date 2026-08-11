@@ -19,18 +19,27 @@ from jharness.kernel.control import ControlInbox, Insert, Pause
 from jharness.kernel.errors import ModelError
 from jharness.kernel.events import EventKind
 from jharness.kernel.limits import LimitReason, RunLimits
+from jharness.kernel.messages import (
+    ContentPart,
+    Message,
+    ProviderToolCall,
+    ProviderToolStatus,
+    ToolCall,
+)
 from jharness.kernel.models import (
     Model,
     ModelCapabilities,
     ModelContentDelta,
     ModelDelta,
     ModelOptions,
+    ModelProviderToolCallDelta,
     ModelReasoningDelta,
     ModelRequest,
     ModelResponse,
     ModelToolCallDelta,
     ModelUsage,
     ModelUsageDelta,
+    ProviderToolSpec,
     ResponseFormat,
     ToolChoice,
 )
@@ -59,6 +68,7 @@ class PlanningStep:
         "_limits",
         "_model",
         "_options",
+        "_provider_tools",
         "_response_format",
         "_stream",
         "_tool_choice",
@@ -72,6 +82,7 @@ class PlanningStep:
         catalog: ToolCatalog,
         limits: RunLimits,
         options: ModelOptions,
+        provider_tools: tuple[ProviderToolSpec, ...],
         tool_choice: ToolChoice,
         response_format: ResponseFormat | None,
         stream: bool,
@@ -82,6 +93,7 @@ class PlanningStep:
         self._catalog = catalog
         self._limits = limits
         self._options = options
+        self._provider_tools = provider_tools
         self._tool_choice = tool_choice
         self._response_format = response_format
         self._stream = stream
@@ -90,18 +102,19 @@ class PlanningStep:
     async def run(
         self, snapshot: RunSnapshot, *, deadline: Deadline, inbox: ControlInbox
     ) -> Change:
-        request = ModelRequest(
-            tuple(snapshot.history),
-            self._catalog.specs(),
-            self._options,
-            self._tool_choice,
-            self._response_format,
-        )
-        await self._emit(
-            EventKind.MODEL_STARTED,
-            {"planning_step": snapshot.metrics.planning_steps + 1},
-        )
         try:
+            request = ModelRequest(
+                messages=tuple(snapshot.history),
+                runtime_tools=self._catalog.specs(),
+                provider_tools=self._provider_tools,
+                options=self._options,
+                tool_choice=self._tool_choice,
+                response_format=self._response_format,
+            )
+            await self._emit(
+                EventKind.MODEL_STARTED,
+                {"planning_step": snapshot.metrics.planning_steps + 1},
+            )
             response = await self._invoke(request, snapshot, deadline, inbox)
         except EffectInterrupted as interrupted:
             return _interrupted(interrupted)
@@ -116,7 +129,8 @@ class PlanningStep:
             EventKind.MODEL_FINISHED,
             {
                 "finish_reason": response.finish_reason,
-                "tool_call_count": len(response.tool_calls),
+                "runtime_tool_call_count": len(response.runtime_tool_calls()),
+                "provider_tool_call_count": len(response.provider_tool_calls()),
                 "usage": usage_data(response.usage),
             },
         )
@@ -150,6 +164,8 @@ class PlanningStep:
         return response
 
     def _change(self, snapshot: RunSnapshot, response: ModelResponse) -> Change:
+        calls = response.runtime_tool_calls()
+        parts = response.visible_parts()
         total_tokens = snapshot.metrics.usage.total_tokens
         if response.usage is not None and response.usage.total_tokens is not None:
             total_tokens = (total_tokens or 0) + response.usage.total_tokens
@@ -160,16 +176,16 @@ class PlanningStep:
         )
         if over_tokens:
             state = Limited(LimitReason.MAX_TOTAL_TOKENS)
-        elif response.tool_calls:
-            state = ToolsPending(PendingToolCalls(response.tool_calls))
+        elif calls:
+            state = ToolsPending(PendingToolCalls(calls))
         else:
-            state = Completed(response.parts)
+            state = Completed(parts)
         return Change(
             fact=ModelTurnFact(
                 at=time(),
                 result=ModelTurnResult(state.kind),
-                part_count=len(response.parts),
-                tool_call_ids=tuple(call.id for call in response.tool_calls),
+                part_count=len(parts),
+                tool_call_ids=tuple(call.id for call in calls),
                 finish_reason=response.finish_reason,
                 usage=response.usage,
                 limit_reason=state.reason if isinstance(state, Limited) else None,
@@ -207,7 +223,8 @@ def delta_data(delta: ModelDelta) -> Mapping[str, Any]:
     if isinstance(delta, ModelContentDelta):
         return {
             "kind": "content",
-            "index": delta.index,
+            "output_index": delta.output_index,
+            "content_index": delta.content_index,
             "part_type": delta.part_type,
             "text_delta": delta.text_delta,
             "data": delta.data,
@@ -215,33 +232,81 @@ def delta_data(delta: ModelDelta) -> Mapping[str, Any]:
     if isinstance(delta, ModelToolCallDelta):
         return {
             "kind": "tool_call",
-            "index": delta.index,
+            "output_index": delta.output_index,
             "id": delta.id,
             "name": delta.name,
             "arguments_delta": delta.arguments_delta,
         }
     if isinstance(delta, ModelReasoningDelta):
-        return {"kind": "reasoning", "index": delta.index, "text_delta": delta.text_delta}
+        return {
+            "kind": "reasoning",
+            "output_index": delta.output_index,
+            "content_index": delta.content_index,
+            "text_delta": delta.text_delta,
+        }
+    if isinstance(delta, ModelProviderToolCallDelta):
+        return {
+            "kind": "provider_tool_call",
+            "output_index": delta.output_index,
+            "id": delta.id,
+            "tool": {
+                "namespace": delta.tool.namespace,
+                "type": delta.tool.type,
+            },
+            "status": None if delta.status is None else delta.status.value,
+            "event": delta.event,
+            "data": delta.data,
+        }
     if not isinstance(cast(object, delta), ModelUsageDelta):
         raise TypeError("model emitted an invalid delta")
     return {"kind": "usage", "usage": usage_data(delta.usage)}
 
 
 def _validate_request(request: ModelRequest, capabilities: ModelCapabilities) -> None:
-    if request.tools and not capabilities.tools:
-        raise ValueError("model does not support tools")
-    if request.tool_choice.type != "auto" and not capabilities.tool_choice:
-        raise ValueError("model does not support explicit tool_choice")
+    _validate_request_tools(request, capabilities)
+    if request.options.seed is not None and not capabilities.seed:
+        raise ValueError("model does not support seed")
     response_format = request.response_format
     if response_format is not None:
         if response_format.type == "json_object" and not capabilities.json_mode:
             raise ValueError("model does not support JSON object mode")
         if response_format.type == "json_schema" and not capabilities.structured_output:
             raise ValueError("model does not support structured output")
-    if not capabilities.multimodal_input and any(
-        part.type not in _TEXT_LIKE for message in request.messages for part in message.parts
+    # Provider-tool output is governed by the requested ProviderToolId, not by
+    # the model's direct output modalities.
+    unsupported_modalities = {
+        _part_modality(part)
+        for message in request.messages
+        for part in _message_input_parts(message)
+        if _part_modality(part) not in capabilities.input_modalities
+    }
+    if unsupported_modalities:
+        raise ValueError(
+            "model does not support input modalities: " + ", ".join(sorted(unsupported_modalities))
+        )
+
+
+def _validate_request_tools(request: ModelRequest, capabilities: ModelCapabilities) -> None:
+    if request.runtime_tools and not capabilities.runtime_tools:
+        raise ValueError("model does not support runtime tools")
+    if request.provider_tools:
+        unsupported = tuple(
+            spec.tool
+            for spec in request.provider_tools
+            if spec.tool not in capabilities.provider_tools
+        )
+        if unsupported:
+            raise ValueError("model does not support requested provider tools")
+    if request.tool_choice.type not in capabilities.tool_choice_types:
+        raise ValueError(f"model does not support tool_choice={request.tool_choice.type!r}")
+    has_tools = bool(request.runtime_tools or request.provider_tools)
+    if (
+        has_tools
+        and request.tool_choice.type != "none"
+        and not request.tool_choice.allow_parallel_tool_calls
+        and not capabilities.parallel_tool_call_control
     ):
-        raise ValueError("model does not support multimodal input")
+        raise ValueError("model cannot disable parallel tool calls")
 
 
 def _validate_response(
@@ -249,21 +314,95 @@ def _validate_response(
     request: ModelRequest,
     capabilities: ModelCapabilities,
 ) -> None:
-    calls = response.tool_calls
-    choice = request.tool_choice
-    if calls and not capabilities.tools:
-        raise ValueError("model returned unsupported tool calls")
+    calls = response.runtime_tool_calls()
+    provider_calls = response.provider_tool_calls()
+    _validate_response_tools(calls, provider_calls, request, capabilities)
+    _validate_response_modalities(response, capabilities)
+    if not calls and not provider_calls and not response.visible_parts():
+        raise ValueError("terminal model response requires visible output")
+
+
+def _validate_response_tools(
+    calls: tuple[ToolCall, ...],
+    provider_calls: tuple[ProviderToolCall, ...],
+    request: ModelRequest,
+    capabilities: ModelCapabilities,
+) -> None:
+    if calls and not capabilities.runtime_tools:
+        raise ValueError("model returned unsupported runtime tool calls")
+    requested_provider_tools = {spec.tool for spec in request.provider_tools}
+    if any(call.tool not in capabilities.provider_tools for call in provider_calls):
+        raise ValueError("model returned an unsupported provider tool call")
+    if any(call.tool not in requested_provider_tools for call in provider_calls):
+        raise ValueError("model returned an unrequested provider tool call")
+    if any(call.status is ProviderToolStatus.IN_PROGRESS for call in provider_calls):
+        raise ValueError("terminal model response contains an in-progress provider tool call")
     if len(calls) > 1 and (
-        not capabilities.parallel_tool_calls or not choice.allow_parallel_tool_calls
+        not capabilities.parallel_tool_calls or not request.tool_choice.allow_parallel_tool_calls
     ):
-        raise ValueError("model returned disallowed parallel tool calls")
-    if choice.type == "none" and calls:
+        raise ValueError("model returned disallowed parallel runtime tool calls")
+    _validate_response_tool_choice(calls, provider_calls, request.tool_choice)
+
+
+def _validate_response_tool_choice(
+    calls: tuple[ToolCall, ...],
+    provider_calls: tuple[ProviderToolCall, ...],
+    choice: ToolChoice,
+) -> None:
+    all_calls = (*calls, *provider_calls)
+    if choice.type == "none" and all_calls:
         raise ValueError("model returned tool calls for tool_choice=none")
-    if choice.type == "required" and not calls:
+    if choice.type == "required" and not all_calls:
         raise ValueError("model omitted required tool call")
-    if choice.type == "named" and any(call.name != choice.name for call in calls):
-        raise ValueError("model returned a tool other than the named tool_choice")
-    if not capabilities.multimodal_output and any(
-        part.type not in _TEXT_LIKE for part in response.parts
+    if choice.type == "runtime" and (
+        provider_calls or not calls or any(call.name != choice.name for call in calls)
     ):
-        raise ValueError("model returned unsupported multimodal output")
+        raise ValueError("model returned a tool other than the selected runtime tool")
+    if choice.type == "provider" and (
+        calls
+        or not provider_calls
+        or any(call.tool != choice.provider_tool for call in provider_calls)
+    ):
+        raise ValueError("model returned a tool other than the selected provider tool")
+
+
+def _validate_response_modalities(
+    response: ModelResponse,
+    capabilities: ModelCapabilities,
+) -> None:
+    unsupported_modalities = {
+        _part_modality(item)
+        for item in response.output
+        if isinstance(item, ContentPart)
+        and _part_modality(item) not in capabilities.output_modalities
+    }
+    if unsupported_modalities:
+        raise ValueError(
+            "model returned unsupported output modalities: "
+            + ", ".join(sorted(unsupported_modalities))
+        )
+
+
+def _message_input_parts(message: Message) -> tuple[ContentPart, ...]:
+    if message.role == "assistant":
+        return tuple(item for item in message.output if isinstance(item, ContentPart))
+    if message.role == "tool" and message.outcome is not None:
+        return message.outcome.parts
+    return message.parts
+
+
+def _part_modality(part: ContentPart) -> str:
+    if part.type in _TEXT_LIKE:
+        return "text"
+    if part.type in {"image", "input_image", "output_image"}:
+        return "image"
+    if part.type in {"audio", "input_audio", "output_audio"}:
+        return "audio"
+    if part.type in {"video", "input_video", "output_video"}:
+        return "video"
+    media_type = part.media_type or (None if part.artifact is None else part.artifact.media_type)
+    if media_type is not None:
+        family = media_type.partition("/")[0]
+        if family in {"image", "audio", "video"}:
+            return family
+    return "file"

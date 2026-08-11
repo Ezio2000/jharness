@@ -24,6 +24,7 @@ from jharness.kernel import (
     ModelRequest,
     ModelResponse,
     ModelUsage,
+    ProviderToolId,
     RunContext,
     Runtime,
 )
@@ -90,12 +91,12 @@ class _ScriptModel:
         return action
 
 
-_REQUEST = ModelRequest((Message.user("hello"),))
+_REQUEST = ModelRequest(messages=(Message.user("hello"),))
 _CONTEXT = RunContext("run-1", 1.0)
 
 
 def _response(text: str) -> ModelResponse:
-    return ModelResponse(parts=(ContentPart.text_part(text),))
+    return ModelResponse(output=(ContentPart.text_part(text),))
 
 
 def _error(code: str, *, retryable: bool = True) -> ModelError:
@@ -548,7 +549,7 @@ async def test_retry_stops_if_deadline_expires_during_backoff(
 
 
 async def test_retry_is_allowed_before_the_first_delta() -> None:
-    delta = ModelContentDelta(0, "visible")
+    delta = ModelContentDelta(output_index=0, text_delta="visible", content_index=0)
     response = _response("done")
     base = _ScriptModel((_error("before-delta"), _EmitThen(delta, response)))
     observed: list[ModelDelta] = []
@@ -575,7 +576,7 @@ async def test_retry_is_allowed_before_the_first_delta() -> None:
 
 
 async def test_retry_is_forbidden_after_the_first_delta() -> None:
-    delta = ModelContentDelta(0, "partial")
+    delta = ModelContentDelta(output_index=0, text_delta="partial", content_index=0)
     failure = _error("after-delta")
     base = _ScriptModel((_EmitThen(delta, failure), _response("unused")))
     observed: list[ModelDelta] = []
@@ -605,7 +606,7 @@ async def test_retry_is_forbidden_after_the_first_delta() -> None:
 async def test_retry_propagates_sink_failure_unchanged_without_retry(
     sink_failure: BaseException,
 ) -> None:
-    delta = ModelContentDelta(0, "partial")
+    delta = ModelContentDelta(output_index=0, text_delta="partial", content_index=0)
     base = _ScriptModel((_EmitThen(delta, _response("unused")), _response("unused")))
 
     async def emit_delta(_item: ModelDelta, /) -> None:
@@ -773,15 +774,29 @@ async def test_fallback_does_not_start_backup_after_the_deadline(
     assert backup.calls == []
 
 
-_CAPABILITY_FIELDS = (
+_BOOLEAN_CAPABILITY_FIELDS = (
     "streaming",
-    "tools",
-    "tool_choice",
+    "runtime_tools",
     "parallel_tool_calls",
-    "multimodal_input",
-    "multimodal_output",
+    "parallel_tool_call_control",
     "structured_output",
     "json_mode",
+    "seed",
+    "usage_reporting",
+)
+
+_CAPABILITY_FIELDS = (
+    "streaming",
+    "runtime_tools",
+    "tool_choice_types",
+    "parallel_tool_calls",
+    "parallel_tool_call_control",
+    "input_modalities",
+    "output_modalities",
+    "provider_tools",
+    "structured_output",
+    "json_mode",
+    "seed",
     "usage_reporting",
 )
 
@@ -790,10 +805,13 @@ def test_fallback_capability_inventory_tracks_kernel_contract() -> None:
     assert tuple(field.name for field in fields(ModelCapabilities)) == _CAPABILITY_FIELDS
 
 
-@pytest.mark.parametrize("field", _CAPABILITY_FIELDS)
+@pytest.mark.parametrize("field", _BOOLEAN_CAPABILITY_FIELDS)
 def test_fallback_capabilities_are_the_safe_intersection(field: str) -> None:
     all_enabled = ModelCapabilities(streaming=True)
-    one_disabled = replace(all_enabled, **cast(Any, {field: False}))
+    changes: dict[str, object] = {field: False}
+    if field == "runtime_tools":
+        changes["tool_choice_types"] = frozenset({"auto", "none"})
+    one_disabled = replace(all_enabled, **cast(Any, changes))
     primary_disabled = FallbackModel(
         _ScriptModel((_response("unused"),), capabilities=one_disabled),
         _ScriptModel((_response("unused"),), capabilities=all_enabled),
@@ -807,13 +825,51 @@ def test_fallback_capabilities_are_the_safe_intersection(field: str) -> None:
     assert getattr(backup_disabled, field) is False
     assert all(
         getattr(primary_disabled, other) is True and getattr(backup_disabled, other) is True
-        for other in _CAPABILITY_FIELDS
+        for other in _BOOLEAN_CAPABILITY_FIELDS
         if other != field
     )
 
 
+def test_fallback_capabilities_intersect_exact_tool_choice_types() -> None:
+    primary = ModelCapabilities(
+        tool_choice_types=frozenset({"auto", "none", "required", "runtime"})
+    )
+    backup = ModelCapabilities(tool_choice_types=frozenset({"auto", "none"}))
+
+    capabilities = FallbackModel(
+        _ScriptModel((_response("unused"),), capabilities=primary),
+        _ScriptModel((_response("unused"),), capabilities=backup),
+    ).capabilities
+
+    assert capabilities.tool_choice_types == frozenset({"auto", "none"})
+
+
+def test_fallback_capabilities_intersect_modalities_and_provider_tools() -> None:
+    web_search = ProviderToolId("test", "web_search")
+    image_generation = ProviderToolId("test", "image_generation")
+    primary = ModelCapabilities(
+        input_modalities=frozenset({"text", "image"}),
+        output_modalities=frozenset({"text", "image"}),
+        provider_tools=frozenset({web_search, image_generation}),
+    )
+    backup = ModelCapabilities(
+        input_modalities=frozenset({"text", "file"}),
+        output_modalities=frozenset({"text"}),
+        provider_tools=frozenset({web_search}),
+    )
+
+    capabilities = FallbackModel(
+        _ScriptModel((_response("unused"),), capabilities=primary),
+        _ScriptModel((_response("unused"),), capabilities=backup),
+    ).capabilities
+
+    assert capabilities.input_modalities == frozenset({"text"})
+    assert capabilities.output_modalities == frozenset({"text"})
+    assert capabilities.provider_tools == frozenset({web_search})
+
+
 async def test_fallback_is_allowed_before_the_first_delta() -> None:
-    delta = ModelContentDelta(0, "fallback")
+    delta = ModelContentDelta(output_index=0, text_delta="fallback", content_index=0)
     response = _response("done")
     primary = _ScriptModel((_error("before-delta"),))
     backup = _ScriptModel((_EmitThen(delta, response),))
@@ -835,7 +891,7 @@ async def test_fallback_is_allowed_before_the_first_delta() -> None:
 
 
 async def test_fallback_is_forbidden_after_the_first_delta() -> None:
-    delta = ModelContentDelta(0, "primary")
+    delta = ModelContentDelta(output_index=0, text_delta="primary", content_index=0)
     failure = _error("after-delta")
     primary = _ScriptModel((_EmitThen(delta, failure),))
     backup = _ScriptModel((_response("unused"),))
@@ -866,7 +922,14 @@ async def test_fallback_is_forbidden_after_the_first_delta() -> None:
 async def test_fallback_propagates_sink_failure_without_calling_backup(
     sink_failure: BaseException,
 ) -> None:
-    primary = _ScriptModel((_EmitThen(ModelContentDelta(0, "partial"), _response("unused")),))
+    primary = _ScriptModel(
+        (
+            _EmitThen(
+                ModelContentDelta(output_index=0, text_delta="partial", content_index=0),
+                _response("unused"),
+            ),
+        )
+    )
     backup = _ScriptModel((_response("unused"),))
 
     async def emit_delta(_item: ModelDelta, /) -> None:
@@ -914,12 +977,12 @@ async def test_direct_retry_and_fallback_composition_uses_expected_call_order() 
 
     result = await _invoke(model)
 
-    assert result.parts[0].text == "recovered"
+    assert result.visible_parts()[0].text == "recovered"
     assert order == ["primary", "primary", "backup", "backup"]
 
 
 async def test_nested_retry_delta_commit_prevents_outer_fallback() -> None:
-    delta = ModelContentDelta(0, "committed")
+    delta = ModelContentDelta(output_index=0, text_delta="committed", content_index=0)
     failure = _error("after-delta")
     primary = _ScriptModel((_EmitThen(delta, failure), _response("unused")))
     backup = _ScriptModel((_response("unused"),))
@@ -961,7 +1024,7 @@ async def test_retrying_and_fallback_models_are_directly_composable() -> None:
     result = await _invoke(model)
 
     assert isinstance(model, Model)
-    assert result.parts[0].text == "primary"
+    assert result.visible_parts()[0].text == "primary"
     assert len(primary.calls) == 1
     assert backup.calls == []
 
@@ -987,7 +1050,7 @@ async def test_nested_fallback_models_follow_expression_order() -> None:
 
     result = await _invoke(model)
 
-    assert result.parts[0].text == "third"
+    assert result.visible_parts()[0].text == "third"
     assert order == ["primary", "second", "third"]
 
 
@@ -1009,7 +1072,7 @@ def test_model_decorators_reject_invalid_models_at_the_boundary() -> None:
 async def test_runtime_observes_nested_attempts_as_one_logical_model_operation() -> None:
     primary = _ScriptModel((_error("first"), _error("second")))
     final = ModelResponse(
-        parts=(ContentPart.text_part("from fallback"),),
+        output=(ContentPart.text_part("from fallback"),),
         usage=ModelUsage(input_tokens=2, output_tokens=3, total_tokens=5),
     )
     backup = _ScriptModel((final,))
@@ -1033,7 +1096,7 @@ async def test_runtime_observes_nested_attempts_as_one_logical_model_operation()
     assert checkpoint.snapshot.metrics.planning_steps == 1
     assert checkpoint.snapshot.metrics.usage.total_tokens == 5
     assert len(checkpoint.snapshot.history) == 2
-    assert checkpoint.snapshot.history[-1].parts[0].text == "from fallback"
+    assert checkpoint.snapshot.history[-1].visible_parts()[0].text == "from fallback"
     assert [event.kind.value for event in observed].count("model_started") == 1
     assert [event.kind.value for event in observed].count("model_finished") == 1
     assert len(primary.calls) == 2

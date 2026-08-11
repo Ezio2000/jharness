@@ -1864,7 +1864,7 @@ def _question_checkpoint(
     )
     history = (
         Message.user("Ask"),
-        Message.assistant(tool_calls=(call,)),
+        Message.assistant((call,)),
         Message.tool(tool_call_id, result.outcome),
     )
     return _forged_checkpoint(
@@ -2007,7 +2007,7 @@ def test_extract_question_request_binds_snapshot_context_contract_and_assistant_
     malformed_call = ToolCall("call:one", "AskQuestion", {"questions": []})
     malformed_history = (
         user_message,
-        Message.assistant(tool_calls=(malformed_call,)),
+        Message.assistant((malformed_call,)),
         tool_message,
     )
     with pytest.raises(ValueError, match="assistant call"):
@@ -2027,7 +2027,7 @@ def test_extract_question_request_binds_snapshot_context_contract_and_assistant_
     )
     changed_history = (
         user_message,
-        Message.assistant(tool_calls=(changed_call,)),
+        Message.assistant((changed_call,)),
         tool_message,
     )
     with pytest.raises(ValueError, match=r"questions.*assistant call"):
@@ -2048,7 +2048,7 @@ def test_current_waiting_outcome_rejects_stale_or_unproven_tool_messages() -> No
     user_message, assistant_message, tool_message = checkpoint.snapshot.history
     waiting, assistant_call = question_response_module._current_waiting_outcome(checkpoint, "call")
     assert waiting is tool_message.outcome
-    assert assistant_call is assistant_message.tool_calls[0]
+    assert assistant_call is assistant_message.runtime_tool_calls()[0]
 
     bad_fact = replace(fact, call_ids=("other",))
     with pytest.raises(ValueError, match="current waiting tool call"):
@@ -2120,9 +2120,7 @@ def test_current_waiting_outcome_rejects_stale_or_unproven_tool_messages() -> No
             "call",
         )
 
-    wrong_identity = Message.assistant(
-        tool_calls=(ToolCall("call", "Other", assistant_call.arguments),)
-    )
+    wrong_identity = Message.assistant((ToolCall("call", "Other", assistant_call.arguments),))
     with pytest.raises(ValueError, match="wrong identity"):
         question_response_module._current_waiting_outcome(
             _forged_checkpoint(
@@ -2133,9 +2131,7 @@ def test_current_waiting_outcome_rejects_stale_or_unproven_tool_messages() -> No
             "call",
         )
 
-    wrong_call_id = Message.assistant(
-        tool_calls=(ToolCall("other", "AskQuestion", assistant_call.arguments),)
-    )
+    wrong_call_id = Message.assistant((ToolCall("other", "AskQuestion", assistant_call.arguments),))
     with pytest.raises(ValueError, match="wrong identity"):
         question_response_module._current_waiting_outcome(
             _forged_checkpoint(

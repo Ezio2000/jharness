@@ -33,7 +33,17 @@ from jharness.kernel.errors import ProtocolError, RequestError
 from jharness.kernel.events import Event, EventKind
 from jharness.kernel.history import RunHistory
 from jharness.kernel.limits import LimitReason
-from jharness.kernel.messages import ArtifactRef, ContentPart, ErrorInfo, Message, TaskRef, ToolCall
+from jharness.kernel.messages import (
+    ArtifactRef,
+    ContentPart,
+    ErrorInfo,
+    Message,
+    ProviderToolCall,
+    ProviderToolId,
+    ProviderToolStatus,
+    TaskRef,
+    ToolCall,
+)
 from jharness.kernel.models import ModelResponse, ModelUsage
 from jharness.kernel.snapshot import RunSnapshot
 from jharness.kernel.state import (
@@ -127,7 +137,7 @@ def _suspended(*, pending: bool = False) -> Checkpoint:
     resume_to: Planning | ToolsPending
     if pending:
         call = ToolCall("call-1", "lookup", {"q": "x"})
-        history = _history(Message.user("go"), Message.assistant(tool_calls=(call,)))
+        history = _history(Message.user("go"), Message.assistant((call,)))
         resume_to = ToolsPending(_pending(call))
     else:
         history = _history(Message.user("hello"))
@@ -197,15 +207,38 @@ def test_message_content_and_outcome_round_trips() -> None:
 
 
 def test_model_tool_spec_and_result_round_trips() -> None:
+    provider_call = ProviderToolCall(
+        "search-1",
+        ProviderToolId("deepseek.responses", "web_search"),
+        ProviderToolStatus.COMPLETED,
+        {"query": "JHarness"},
+        (ContentPart.text_part("search result"),),
+        metadata={"provider_status": "completed"},
+    )
     response = ModelResponse(
-        (ContentPart.text_part("done"),),
+        (ContentPart.text_part("before"), provider_call, ContentPart.text_part("done")),
         finish_reason="stop",
         usage=ModelUsage(2, 3, 5),
         model_id="model-1",
         response_id="response-1",
         metadata={"provider": "test"},
     )
-    assert decode_model_response(encode_model_response(response)) == response
+    encoded_response = encode_model_response(response)
+    assert [item["kind"] for item in encoded_response["output"]] == [
+        "content",
+        "provider_tool_call",
+        "content",
+    ]
+    assert decode_model_response(encoded_response) == response
+
+    incomplete_call = ProviderToolCall(
+        "search-incomplete",
+        ProviderToolId("deepseek.responses", "web_search"),
+        ProviderToolStatus.INCOMPLETE,
+    )
+    assert decode_message(encode_message(Message.assistant((incomplete_call,)))) == (
+        Message.assistant((incomplete_call,))
+    )
 
     spec = ToolSpec(
         "lookup",
@@ -322,7 +355,7 @@ def test_run_request_round_trips_and_enforces_cross_fields() -> None:
 
     call = ToolCall("call-1", "lookup")
     with pytest.raises(ValueError, match="unresolved"):
-        StartRequest(_history(Message.user("go"), Message.assistant(tool_calls=(call,))))
+        StartRequest(_history(Message.user("go"), Message.assistant((call,))))
 
 
 def test_checkpoint_rejects_fact_snapshot_message_mismatches() -> None:
@@ -345,7 +378,7 @@ def test_checkpoint_rejects_fact_snapshot_message_mismatches() -> None:
     outcome = ToolSuccess((ContentPart.text_part("ok"),))
     tool_history = _history(
         Message.user("go"),
-        Message.assistant(tool_calls=(call,)),
+        Message.assistant((call,)),
         Message.tool(call.id, outcome),
     )
     tool_snapshot = RunSnapshot(
@@ -425,10 +458,7 @@ def test_checkpoint_rejects_fact_snapshot_message_mismatches() -> None:
             HistoryRewriteFact(2.0, 2, ("system",), "compact", ()),
         )
 
-    assistant = Message.assistant(
-        (ContentPart.text_part("partial"),),
-        tool_calls=(call,),
-    )
+    assistant = Message.assistant((ContentPart.text_part("partial"), call))
     limited_snapshot = RunSnapshot(
         1,
         _context(),
@@ -501,21 +531,68 @@ def test_every_event_data_shape_round_trips() -> None:
         ("model_started", {"planning_step": 1}),
         (
             "model_delta",
-            {"kind": "content", "index": 0, "part_type": "text", "text_delta": "a", "data": {}},
+            {
+                "kind": "content",
+                "output_index": 0,
+                "content_index": 0,
+                "part_type": "text",
+                "text_delta": "a",
+                "data": {},
+            },
         ),
         (
             "model_delta",
             {
                 "kind": "tool_call",
-                "index": 0,
+                "output_index": 1,
                 "id": "call-1",
                 "name": "lookup",
                 "arguments_delta": "{}",
             },
         ),
-        ("model_delta", {"kind": "reasoning", "index": 0, "text_delta": "why"}),
+        (
+            "model_delta",
+            {
+                "kind": "reasoning",
+                "output_index": 0,
+                "content_index": 0,
+                "text_delta": "why",
+            },
+        ),
+        (
+            "model_delta",
+            {
+                "kind": "provider_tool_call",
+                "output_index": 2,
+                "id": "search-1",
+                "tool": {"namespace": "deepseek.responses", "type": "web_search"},
+                "status": "in_progress",
+                "event": "searching",
+                "data": {"query": "JHarness"},
+            },
+        ),
+        (
+            "model_delta",
+            {
+                "kind": "provider_tool_call",
+                "output_index": 2,
+                "id": "search-1",
+                "tool": {"namespace": "deepseek.responses", "type": "web_search"},
+                "status": "incomplete",
+                "event": "response.output_item.done",
+                "data": {},
+            },
+        ),
         ("model_delta", {"kind": "usage", "usage": usage}),
-        ("model_finished", {"finish_reason": "stop", "tool_call_count": 0, "usage": usage}),
+        (
+            "model_finished",
+            {
+                "finish_reason": "stop",
+                "runtime_tool_call_count": 0,
+                "provider_tool_call_count": 1,
+                "usage": usage,
+            },
+        ),
         (
             "tool_batch_selected",
             {

@@ -350,7 +350,7 @@ def _decode_state_view(value: object, *, active: bool = False) -> dict[str, Any]
         data = object_fields(raw, "completed view", frozenset({"kind", "part_count"}))
         return {
             "kind": "completed",
-            "part_count": integer(data["part_count"], "view part_count", minimum=1),
+            "part_count": integer(data["part_count"], "view part_count", minimum=0),
         }
     if kind == "failed":
         data = object_fields(raw, "failed view", frozenset({"kind", "code"}))

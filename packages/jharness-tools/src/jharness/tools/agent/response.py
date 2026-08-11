@@ -189,9 +189,10 @@ def _current_waiting_outcome(
     assistant_message = history[-2]
     if tool_message.role != "tool" or tool_message.tool_call_id != tool_call_id:
         raise ValueError("Agent checkpoint has no matching trailing tool message")
-    if assistant_message.role != "assistant" or len(assistant_message.tool_calls) != 1:
+    calls = assistant_message.runtime_tool_calls()
+    if assistant_message.role != "assistant" or len(calls) != 1:
         raise ValueError("Agent completion tools must be the only call in their assistant turn")
-    assistant_call = assistant_message.tool_calls[0]
+    assistant_call = calls[0]
     if assistant_call.id != tool_call_id or assistant_call.name != source:
         raise ValueError("Agent checkpoint assistant call has the wrong identity")
     outcome = tool_message.outcome

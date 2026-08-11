@@ -19,7 +19,15 @@ from jharness.kernel._validation import (
     freeze_mapping,
 )
 from jharness.kernel.context import RunContext
-from jharness.kernel.messages import ContentPart, Message, ToolCall
+from jharness.kernel.messages import (
+    ContentPart,
+    Message,
+    ModelOutputItem,
+    ProviderToolCall,
+    ProviderToolId,
+    ProviderToolStatus,
+    ToolCall,
+)
 
 if TYPE_CHECKING:
     from jharness.kernel.tools import ToolSpec
@@ -61,17 +69,26 @@ class ToolChoice:
 
     type: str = "auto"
     name: str | None = None
+    provider_tool: ProviderToolId | None = None
     allow_parallel_tool_calls: bool = True
 
     def __post_init__(self) -> None:
         choice_type = expect_str(self.type, "tool choice type")
-        if choice_type not in {"auto", "none", "required", "named"}:
+        if choice_type not in {"auto", "none", "required", "runtime", "provider"}:
             raise ValueError(f"unsupported tool choice: {choice_type}")
-        if choice_type == "named":
+        if choice_type == "runtime":
             if self.name is None or not expect_str(self.name, "tool choice name"):
-                raise ValueError("named tool choice requires name")
-        elif self.name is not None:
-            raise ValueError("only named tool choice may carry name")
+                raise ValueError("runtime tool choice requires name")
+            if self.provider_tool is not None:
+                raise ValueError("runtime tool choice cannot carry provider_tool")
+        elif choice_type == "provider":
+            if self.name is not None:
+                raise ValueError("provider tool choice cannot carry name")
+            if self.provider_tool is None:
+                raise ValueError("provider tool choice requires provider_tool")
+            expect_instance(self.provider_tool, ProviderToolId, "tool choice provider_tool")
+        elif self.name is not None or self.provider_tool is not None:
+            raise ValueError("only targeted tool choice may carry a target")
         expect_bool(self.allow_parallel_tool_calls, "allow_parallel_tool_calls")
 
 
@@ -172,17 +189,38 @@ class ModelUsage:
         )
 
 
-_CAPABILITY_FIELDS = (
+_BOOLEAN_CAPABILITY_FIELDS = (
     "streaming",
-    "tools",
-    "tool_choice",
+    "runtime_tools",
     "parallel_tool_calls",
-    "multimodal_input",
-    "multimodal_output",
+    "parallel_tool_call_control",
     "structured_output",
     "json_mode",
+    "seed",
     "usage_reporting",
 )
+
+_TOOL_CHOICE_TYPES = frozenset({"auto", "none", "required", "runtime", "provider"})
+
+
+def _modality_set(value: object, label: str) -> frozenset[str]:
+    if not isinstance(value, frozenset):
+        raise TypeError(f"{label} must be a frozenset")
+    modalities = cast(frozenset[object], value)
+    if not modalities:
+        raise ValueError(f"{label} must not be empty")
+    if any(not isinstance(item, str) or not item for item in modalities):
+        raise ValueError(f"{label} must contain non-empty strings")
+    return cast(frozenset[str], modalities)
+
+
+def _model_output(value: object, label: str) -> tuple[ModelOutputItem, ...]:
+    if not isinstance(value, tuple):
+        raise TypeError(f"{label} must be a tuple")
+    items = cast(tuple[object, ...], value)
+    if any(not isinstance(item, ContentPart | ToolCall | ProviderToolCall) for item in items):
+        raise TypeError(f"{label} contains an unsupported item")
+    return cast(tuple[ModelOutputItem, ...], items)
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,18 +228,84 @@ class ModelCapabilities:
     """Immutable advertised model capabilities."""
 
     streaming: bool = False
-    tools: bool = True
-    tool_choice: bool = True
+    runtime_tools: bool = True
+    tool_choice_types: frozenset[str] = field(
+        default_factory=lambda: frozenset({"auto", "none", "required", "runtime"})
+    )
     parallel_tool_calls: bool = True
-    multimodal_input: bool = True
-    multimodal_output: bool = True
+    parallel_tool_call_control: bool = True
+    input_modalities: frozenset[str] = field(default_factory=lambda: frozenset({"text"}))
+    output_modalities: frozenset[str] = field(default_factory=lambda: frozenset({"text"}))
+    provider_tools: frozenset[ProviderToolId] = field(
+        default_factory=lambda: frozenset[ProviderToolId]()
+    )
     structured_output: bool = True
     json_mode: bool = True
+    seed: bool = True
     usage_reporting: bool = True
 
     def __post_init__(self) -> None:
-        for name in _CAPABILITY_FIELDS:
+        for name in _BOOLEAN_CAPABILITY_FIELDS:
             expect_bool(getattr(self, name), f"model capability {name}")
+        object.__setattr__(
+            self,
+            "input_modalities",
+            _modality_set(self.input_modalities, "model input modalities"),
+        )
+        object.__setattr__(
+            self,
+            "output_modalities",
+            _modality_set(self.output_modalities, "model output modalities"),
+        )
+        raw_tool_choice_types = cast(object, self.tool_choice_types)
+        if not isinstance(raw_tool_choice_types, frozenset):
+            raise TypeError("model tool_choice_types must be a frozenset")
+        tool_choice_types = cast(frozenset[object], raw_tool_choice_types)
+        if any(not isinstance(item, str) or not item for item in tool_choice_types):
+            raise ValueError("model tool_choice_types must contain non-empty strings")
+        unsupported_choices = tool_choice_types.difference(_TOOL_CHOICE_TYPES)
+        if unsupported_choices:
+            choice = min(cast(frozenset[str], unsupported_choices))
+            raise ValueError(f"unsupported model tool choice type: {choice}")
+        if "auto" not in tool_choice_types:
+            raise ValueError("model tool_choice_types must include auto")
+        if not self.runtime_tools and "runtime" in tool_choice_types:
+            raise ValueError(
+                "model tool_choice_types cannot include runtime when runtime_tools is false"
+            )
+        object.__setattr__(
+            self,
+            "tool_choice_types",
+            cast(frozenset[str], tool_choice_types),
+        )
+        raw_provider_tools = cast(object, self.provider_tools)
+        if not isinstance(raw_provider_tools, frozenset):
+            raise TypeError("model provider_tools must be a frozenset")
+        provider_tools = cast(frozenset[object], raw_provider_tools)
+        if any(not isinstance(item, ProviderToolId) for item in provider_tools):
+            raise TypeError("model provider_tools must contain ProviderToolId values")
+        typed_provider_tools = cast(frozenset[ProviderToolId], provider_tools)
+        if not typed_provider_tools and "provider" in tool_choice_types:
+            raise ValueError(
+                "model tool_choice_types cannot include provider without provider_tools"
+            )
+        object.__setattr__(self, "provider_tools", typed_provider_tools)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderToolSpec:
+    """Provider-specific tool configuration carried through the neutral model port."""
+
+    tool: ProviderToolId
+    configuration: Mapping[str, Any] = field(default_factory=dict[str, Any])
+
+    def __post_init__(self) -> None:
+        expect_instance(self.tool, ProviderToolId, "provider tool spec tool")
+        object.__setattr__(
+            self,
+            "configuration",
+            freeze_mapping(self.configuration, "provider tool configuration"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +313,8 @@ class ModelRequest:
     """Complete provider-neutral model input."""
 
     messages: tuple[Message, ...]
-    tools: tuple[ToolSpec, ...] = ()
+    runtime_tools: tuple[ToolSpec, ...] = ()
+    provider_tools: tuple[ProviderToolSpec, ...] = ()
     options: ModelOptions = field(default_factory=ModelOptions)
     tool_choice: ToolChoice = field(default_factory=ToolChoice)
     response_format: ResponseFormat | None = None
@@ -218,26 +323,47 @@ class ModelRequest:
         from jharness.kernel.tools import ToolSpec
 
         messages = expect_instance_tuple(self.messages, Message, "model request messages")
-        tools = expect_instance_tuple(self.tools, ToolSpec, "model request tools")
+        tools = expect_instance_tuple(self.runtime_tools, ToolSpec, "model request runtime_tools")
+        provider_tools = expect_instance_tuple(
+            self.provider_tools,
+            ProviderToolSpec,
+            "model request provider_tools",
+        )
         if not messages:
             raise ValueError("model request requires messages")
         names = [tool.name for tool in tools]
         if len(names) != len(set(names)):
             raise ValueError("model request tool names must be unique")
         expect_instance(self.options, ModelOptions, "model request options")
-        expect_instance(self.tool_choice, ToolChoice, "model request tool_choice")
+        provider_ids = [spec.tool for spec in provider_tools]
+        if len(provider_ids) != len(set(provider_ids)):
+            raise ValueError("model request provider tools must be unique")
+        expect_instance(
+            self.tool_choice,
+            ToolChoice,
+            "model request tool_choice",
+        )
+        if self.tool_choice.type == "runtime" and self.tool_choice.name not in names:
+            raise ValueError("model request tool choice names an unavailable runtime tool")
+        if (
+            self.tool_choice.type == "provider"
+            and self.tool_choice.provider_tool not in provider_ids
+        ):
+            raise ValueError("model request tool choice names an unavailable provider tool")
+        if self.tool_choice.type == "required" and not tools and not provider_tools:
+            raise ValueError("required tool choice requires at least one tool")
         if self.response_format is not None:
             expect_instance(self.response_format, ResponseFormat, "model request response_format")
         object.__setattr__(self, "messages", messages)
-        object.__setattr__(self, "tools", tools)
+        object.__setattr__(self, "runtime_tools", tools)
+        object.__setattr__(self, "provider_tools", provider_tools)
 
 
 @dataclass(frozen=True, slots=True)
 class ModelResponse:
     """The sole complete provider-neutral model result."""
 
-    parts: tuple[ContentPart, ...] = ()
-    tool_calls: tuple[ToolCall, ...] = ()
+    output: tuple[ModelOutputItem, ...]
     finish_reason: str | None = None
     usage: ModelUsage | None = None
     model_id: str | None = None
@@ -245,11 +371,10 @@ class ModelResponse:
     metadata: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
     def __post_init__(self) -> None:
-        parts = expect_instance_tuple(self.parts, ContentPart, "model response parts")
-        calls = expect_instance_tuple(self.tool_calls, ToolCall, "model response tool_calls")
-        if not parts and not calls:
-            raise ValueError("model response requires parts or tool calls")
-        ids = [call.id for call in calls]
+        output = _model_output(self.output, "model response output")
+        if not output:
+            raise ValueError("model response requires output")
+        ids = [item.id for item in output if isinstance(item, ToolCall | ProviderToolCall)]
         if len(ids) != len(set(ids)):
             raise ValueError("model response tool call ids must be unique")
         if self.finish_reason is not None:
@@ -260,27 +385,43 @@ class ModelResponse:
             expect_str(self.model_id, "model_id")
         if self.response_id is not None:
             expect_str(self.response_id, "response_id")
-        object.__setattr__(self, "parts", parts)
-        object.__setattr__(self, "tool_calls", calls)
+        object.__setattr__(self, "output", output)
         object.__setattr__(self, "metadata", freeze_mapping(self.metadata, "model metadata"))
 
     def to_assistant_message(self) -> Message:
         """Project the complete response into durable conversation history."""
 
-        return Message.assistant(self.parts, tool_calls=self.tool_calls)
+        return Message.assistant(self.output)
+
+    def runtime_tool_calls(self) -> tuple[ToolCall, ...]:
+        """Return calls that the JHarness runtime must execute."""
+
+        return tuple(item for item in self.output if isinstance(item, ToolCall))
+
+    def provider_tool_calls(self) -> tuple[ProviderToolCall, ...]:
+        """Return calls already owned by the remote provider."""
+
+        return tuple(item for item in self.output if isinstance(item, ProviderToolCall))
+
+    def visible_parts(self) -> tuple[ContentPart, ...]:
+        """Project final user-visible content while preserving output order."""
+
+        return self.to_assistant_message().visible_parts()
 
 
 @dataclass(frozen=True, slots=True)
 class ModelContentDelta:
     """Incremental content for one zero-based response-part position."""
 
-    index: int
+    output_index: int
     text_delta: str
     part_type: str = "text"
+    content_index: int = 0
     data: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
     def __post_init__(self) -> None:
-        expect_nonnegative_int(self.index, "content delta index")
+        expect_nonnegative_int(self.output_index, "content delta output_index")
+        expect_nonnegative_int(self.content_index, "content delta content_index")
         expect_str(self.text_delta, "content delta text")
         expect_non_empty_str(self.part_type, "content delta part_type")
         object.__setattr__(self, "data", freeze_mapping(self.data, "content delta data"))
@@ -290,13 +431,13 @@ class ModelContentDelta:
 class ModelToolCallDelta:
     """Incremental JSON arguments and identity for one ordered tool call."""
 
-    index: int
+    output_index: int
     arguments_delta: str
     id: str | None = None
     name: str | None = None
 
     def __post_init__(self) -> None:
-        expect_nonnegative_int(self.index, "tool call delta index")
+        expect_nonnegative_int(self.output_index, "tool call delta output_index")
         expect_str(self.arguments_delta, "tool call arguments_delta")
         if self.id is not None:
             expect_str(self.id, "tool call delta id")
@@ -310,12 +451,36 @@ class ModelToolCallDelta:
 class ModelReasoningDelta:
     """Incremental reasoning text for one zero-based response position."""
 
-    index: int
+    output_index: int
     text_delta: str
+    content_index: int = 0
 
     def __post_init__(self) -> None:
-        expect_nonnegative_int(self.index, "reasoning delta index")
+        expect_nonnegative_int(self.output_index, "reasoning delta output_index")
+        expect_nonnegative_int(self.content_index, "reasoning delta content_index")
         expect_str(self.text_delta, "reasoning delta text")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelProviderToolCallDelta:
+    """Live-only progress from one provider-executed tool call."""
+
+    output_index: int
+    id: str
+    tool: ProviderToolId
+    status: ProviderToolStatus | None = None
+    event: str | None = None
+    data: Mapping[str, Any] = field(default_factory=dict[str, Any])
+
+    def __post_init__(self) -> None:
+        expect_nonnegative_int(self.output_index, "provider tool delta output_index")
+        expect_non_empty_str(self.id, "provider tool delta id")
+        expect_instance(self.tool, ProviderToolId, "provider tool delta tool")
+        if self.status is not None:
+            expect_instance(self.status, ProviderToolStatus, "provider tool delta status")
+        if self.event is not None:
+            expect_non_empty_str(self.event, "provider tool delta event")
+        object.__setattr__(self, "data", freeze_mapping(self.data, "provider tool delta data"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,7 +494,11 @@ class ModelUsageDelta:
 
 
 ModelDelta: TypeAlias = (
-    ModelContentDelta | ModelToolCallDelta | ModelReasoningDelta | ModelUsageDelta
+    ModelContentDelta
+    | ModelToolCallDelta
+    | ModelReasoningDelta
+    | ModelProviderToolCallDelta
+    | ModelUsageDelta
 )
 
 

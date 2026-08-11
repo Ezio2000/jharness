@@ -10,35 +10,55 @@
           {
             "role": "system",
             "parts": [
-              { "type": "text", "text": "system", "metadata": {} }
+              {
+                "type": "text",
+                "text": "system",
+                "metadata": {}
+              }
             ],
             "metadata": {}
           },
           {
             "role": "user",
             "parts": [
-              { "type": "text", "text": "old user", "metadata": {} }
+              {
+                "type": "text",
+                "text": "old user",
+                "metadata": {}
+              }
             ],
             "metadata": {}
           },
           {
             "role": "external",
             "parts": [
-              { "type": "text", "text": "old external", "metadata": {} }
+              {
+                "type": "text",
+                "text": "old external",
+                "metadata": {}
+              }
             ],
             "metadata": {}
           },
           {
             "role": "user",
             "parts": [
-              { "type": "text", "text": "recent user", "metadata": {} }
+              {
+                "type": "text",
+                "text": "recent user",
+                "metadata": {}
+              }
             ],
             "metadata": {}
           },
           {
             "role": "external",
             "parts": [
-              { "type": "text", "text": "recent external", "metadata": {} }
+              {
+                "type": "text",
+                "text": "recent external",
+                "metadata": {}
+              }
             ],
             "metadata": {}
           }
@@ -49,10 +69,16 @@
           "outcome": {
             "kind": "response",
             "response": {
-              "parts": [
-                { "type": "text", "text": "done", "metadata": {} }
+              "output": [
+                {
+                  "kind": "content",
+                  "content": {
+                    "type": "text",
+                    "text": "done",
+                    "metadata": {}
+                  }
+                }
               ],
-              "tool_calls": [],
               "finish_reason": "end_turn",
               "usage": null,
               "model_id": "fixture-model",
@@ -69,9 +95,18 @@
         "tool_calls": 0,
         "final_text": "done",
         "model_request_roles": [
-          ["system", "user", "external", "user", "external"]
+          [
+            "system",
+            "user",
+            "external",
+            "user",
+            "external"
+          ]
         ],
-        "fact_kinds": ["started", "model_turn"],
+        "fact_kinds": [
+          "started",
+          "model_turn"
+        ],
         "message_roles": [
           "system",
           "user",

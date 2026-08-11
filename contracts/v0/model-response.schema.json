@@ -3,15 +3,13 @@
   "$id": "https://jharness.invalid/spec/v0/model-response.schema.json",
   "title": "Kernel v0 Model Response",
   "type": "object",
-  "required": ["parts", "tool_calls", "finish_reason", "usage", "model_id", "response_id", "metadata"],
+  "required": ["output", "finish_reason", "usage", "model_id", "response_id", "metadata"],
   "properties": {
-    "parts": {
+    "output": {
       "type": "array",
-      "items": { "$ref": "messages.schema.json#/$defs/content_part" }
-    },
-    "tool_calls": {
-      "type": "array",
-      "items": { "$ref": "messages.schema.json#/$defs/tool_call" }
+      "minItems": 1,
+      "$comment": "Items preserve provider response order; runtime and provider tool call ids must be unique across the output.",
+      "items": { "$ref": "messages.schema.json#/$defs/model_output_item" }
     },
     "finish_reason": { "type": ["string", "null"] },
     "usage": {
@@ -39,9 +37,5 @@
       "additionalProperties": false
     }
   },
-  "anyOf": [
-    { "properties": { "parts": { "minItems": 1 } } },
-    { "properties": { "tool_calls": { "minItems": 1 } } }
-  ],
   "additionalProperties": false
 }

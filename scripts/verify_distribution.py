@@ -30,6 +30,7 @@ REQUIRED_COMPONENT_FILES: dict[str, set[str]] = {
         "decorators.py",
         "deepseek/__init__.py",
         "openai/__init__.py",
+        "openai/responses_api/__init__.py",
     },
 }
 DEPENDENCIES: dict[str, set[str]] = {

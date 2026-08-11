@@ -33,11 +33,15 @@ from jharness.models.anthropic.messages_api.stream import AnthropicStreamDecoder
 
 def request() -> ModelRequest:
     return ModelRequest(
-        (Message.system("policy"), Message.user("hello")),
-        (ToolSpec("search", "search", {"type": "object"}),),
-        ModelOptions(max_output_tokens=50),
-        ToolChoice("named", "search", False),
-        ResponseFormat(
+        messages=(Message.system("policy"), Message.user("hello")),
+        runtime_tools=(ToolSpec("search", "search", {"type": "object"}),),
+        options=ModelOptions(max_output_tokens=50),
+        tool_choice=ToolChoice(
+            type="runtime",
+            name="search",
+            allow_parallel_tool_calls=False,
+        ),
+        response_format=ResponseFormat(
             "json_schema",
             {
                 "type": "object",
@@ -97,8 +101,8 @@ def test_anthropic_codec_encodes_tools_and_decodes_blocks() -> None:
             "usage": {"input_tokens": 2, "output_tokens": 3},
         }
     )
-    assert response.parts[0].text == "checking"
-    assert response.tool_calls == (ToolCall("call-1", "search", {"q": "x"}),)
+    assert response.visible_parts()[0].text == "checking"
+    assert response.runtime_tool_calls() == (ToolCall("call-1", "search", {"q": "x"}),)
     assert response.usage is not None and response.usage.total_tokens == 5
 
 
@@ -139,7 +143,7 @@ def test_anthropic_stream_decoder_builds_complete_response() -> None:
     completed = decoder.completed_response()
 
     assert done is True
-    assert completed.parts[0].text == "hi"
+    assert completed.visible_parts()[0].text == "hi"
     assert completed.usage is not None and completed.usage.total_tokens == 5
 
 
@@ -196,7 +200,7 @@ def test_anthropic_thinking_deltas_stay_incremental_and_finalize_once() -> None:
     )
     decoder.apply_event("message_stop", {"type": "message_stop"})
 
-    part = decoder.completed_response().parts[0]
+    part = decoder.completed_response().visible_parts()[0]
     assert part.text == "x" * 4096
     assert part.data == {
         "anthropic": {
@@ -250,7 +254,9 @@ def test_anthropic_stream_decoder_accumulates_tool_input() -> None:
     )
     decoder.apply_event("message_stop", {"type": "message_stop"})
 
-    assert decoder.completed_response().tool_calls == (ToolCall("call-1", "search", {"q": "x"}),)
+    assert decoder.completed_response().runtime_tool_calls() == (
+        ToolCall("call-1", "search", {"q": "x"}),
+    )
 
 
 async def test_anthropic_client_uses_http_transport_and_maps_errors() -> None:
@@ -275,12 +281,12 @@ async def test_anthropic_client_uses_http_transport_and_maps_errors() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(success_handler)) as client:
         model = http_model(client)
         result = await model.invoke(
-            ModelRequest((Message.user("hello"),)),
+            ModelRequest(messages=(Message.user("hello"),)),
             RunContext("run-1", 1.0),
             stream=False,
             emit_delta=None,
         )
-    assert result.parts[0].text == "done"
+    assert result.visible_parts()[0].text == "done"
     assert captured["api_key"] == "secret"
     assert isinstance(model, Model)
     assert not hasattr(model, "complete")
@@ -297,7 +303,7 @@ async def test_anthropic_client_uses_http_transport_and_maps_errors() -> None:
         model = http_model(client)
         with pytest.raises(ModelError) as caught:
             await model.invoke(
-                ModelRequest((Message.user("hello"),)),
+                ModelRequest(messages=(Message.user("hello"),)),
                 RunContext("run-1", 1.0),
                 stream=False,
                 emit_delta=None,
@@ -319,7 +325,7 @@ async def test_anthropic_stream_overload_keeps_semantic_status_and_retryability(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ModelError) as caught:
             await http_model(client).invoke(
-                ModelRequest((Message.user("hello"),)),
+                ModelRequest(messages=(Message.user("hello"),)),
                 RunContext("run-1", 1.0),
                 stream=True,
                 emit_delta=None,
@@ -371,13 +377,13 @@ async def test_anthropic_client_decodes_named_sse_stream() -> None:
             deltas.append(delta)
 
         result = await model.invoke(
-            ModelRequest((Message.user("hello"),)),
+            ModelRequest(messages=(Message.user("hello"),)),
             RunContext("run-1", 1.0),
             stream=True,
             emit_delta=emit_delta,
         )
         unobserved = await model.invoke(
-            ModelRequest((Message.user("hello"),)),
+            ModelRequest(messages=(Message.user("hello"),)),
             RunContext("run-2", 1.0),
             stream=True,
             emit_delta=None,
@@ -385,7 +391,7 @@ async def test_anthropic_client_decodes_named_sse_stream() -> None:
 
     assert any(isinstance(delta, ModelContentDelta) for delta in deltas)
     assert any(isinstance(delta, ModelUsageDelta) for delta in deltas)
-    assert result.parts[0].text == "hello"
+    assert result.visible_parts()[0].text == "hello"
     assert result.usage is not None
     assert result.usage.total_tokens == 5
-    assert unobserved.parts[0].text == "hello"
+    assert unobserved.visible_parts()[0].text == "hello"

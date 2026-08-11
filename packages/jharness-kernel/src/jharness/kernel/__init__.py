@@ -49,7 +49,18 @@ from jharness.kernel.json_values import (
     thaw_json_value,
 )
 from jharness.kernel.limits import LimitReason, RunLimits
-from jharness.kernel.messages import ArtifactRef, ContentPart, ErrorInfo, Message, TaskRef, ToolCall
+from jharness.kernel.messages import (
+    ArtifactRef,
+    ContentPart,
+    ErrorInfo,
+    Message,
+    ModelOutputItem,
+    ProviderToolCall,
+    ProviderToolId,
+    ProviderToolStatus,
+    TaskRef,
+    ToolCall,
+)
 from jharness.kernel.models import (
     DeltaSink,
     Model,
@@ -57,12 +68,14 @@ from jharness.kernel.models import (
     ModelContentDelta,
     ModelDelta,
     ModelOptions,
+    ModelProviderToolCallDelta,
     ModelReasoningDelta,
     ModelRequest,
     ModelResponse,
     ModelToolCallDelta,
     ModelUsage,
     ModelUsageDelta,
+    ProviderToolSpec,
     ResponseFormat,
     ToolChoice,
 )
@@ -163,6 +176,8 @@ __all__ = [
     "ModelError",
     "ModelErrorInfo",
     "ModelOptions",
+    "ModelOutputItem",
+    "ModelProviderToolCallDelta",
     "ModelReasoningDelta",
     "ModelRequest",
     "ModelResponse",
@@ -174,6 +189,10 @@ __all__ = [
     "PendingToolCalls",
     "Planning",
     "ProtocolError",
+    "ProviderToolCall",
+    "ProviderToolId",
+    "ProviderToolSpec",
+    "ProviderToolStatus",
     "RepositoryError",
     "RequestError",
     "ResponseFormat",

@@ -64,7 +64,7 @@ class OpenAIChatCompletionsCodec:
         self.profile = profile or OpenAIChatCompletionsProfile()
 
     def encode_request(self, request: ModelRequest, *, stream: bool = False) -> JsonObject:
-        tools = encode_tools(request.tools, self.profile)
+        tools = encode_tools(request.runtime_tools, self.profile)
         payload: JsonObject = {
             "model": request.options.model or self.model,
             "messages": [
@@ -88,7 +88,7 @@ class OpenAIChatCompletionsCodec:
         if request.options.stop:
             payload["stop"] = list(request.options.stop)
         if request.options.seed is not None:
-            if not self.profile.supports_seed:
+            if not self.profile.capabilities.seed:
                 raise OpenAIChatCompletionsError(f"{self.profile.name} does not support seed")
             payload["seed"] = request.options.seed
 
@@ -102,7 +102,7 @@ class OpenAIChatCompletionsCodec:
             payload["tools"] = tools
         tool_choice = encode_tool_choice(
             request.tool_choice,
-            tool_names={tool.name for tool in request.tools},
+            tool_names={tool.name for tool in request.runtime_tools},
             profile=self.profile,
         )
         if tool_choice is not None:
@@ -110,7 +110,7 @@ class OpenAIChatCompletionsCodec:
         if (
             tools
             and request.tool_choice.type != "none"
-            and self.profile.supports_parallel_tool_call_control
+            and self.profile.capabilities.parallel_tool_call_control
         ):
             payload["parallel_tool_calls"] = request.tool_choice.allow_parallel_tool_calls
 
@@ -120,10 +120,10 @@ class OpenAIChatCompletionsCodec:
 
     def _add_stream_options(self, payload: JsonObject, *, stream: bool) -> None:
         if stream:
-            if not self.profile.supports_streaming:
+            if not self.profile.capabilities.streaming:
                 raise OpenAIChatCompletionsError(f"{self.profile.name} does not support streaming")
             payload["stream"] = True
-            if self.profile.stream_include_usage:
+            if self.profile.stream_usage_mode == "include":
                 payload["stream_options"] = {"include_usage": True}
 
     def _add_extra_request_body(self, payload: JsonObject) -> None:
@@ -145,8 +145,7 @@ class OpenAIChatCompletionsCodec:
             "chat completion finish_reason",
         )
         return ModelResponse(
-            parts=tuple(parts),
-            tool_calls=tuple(tool_calls),
+            output=tuple([*parts, *tool_calls]),
             finish_reason=self.profile.finish_reason(finish_reason),
             usage=decode_usage(value.get("usage")),
             model_id=OPENAI_JSON.optional_string(value.get("model")),
@@ -158,13 +157,13 @@ class OpenAIChatCompletionsCodec:
         if response_format.type == "text":
             return {"type": "text"}
         if response_format.type == "json_object":
-            if not self.profile.supports_json_object:
+            if not self.profile.capabilities.json_mode:
                 raise OpenAIChatCompletionsError(
                     f"{self.profile.name} does not support JSON object mode"
                 )
             return {"type": "json_object"}
         if response_format.type == "json_schema":
-            if not self.profile.supports_json_schema:
+            if not self.profile.capabilities.structured_output:
                 raise OpenAIChatCompletionsError(
                     f"{self.profile.name} does not support JSON schema output"
                 )

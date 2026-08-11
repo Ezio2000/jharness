@@ -136,9 +136,7 @@ class _WaitingAgentModel(Model):
         self.requests.append(request)
         completion = _completion_payload(request)
         if completion is None:
-            return ModelResponse(
-                tool_calls=(ToolCall("agent-call", self.tool_name, self.arguments),)
-            )
+            return ModelResponse((ToolCall("agent-call", self.tool_name, self.arguments),))
         self.observed_completion = completion
         return ModelResponse(
             (ContentPart.text_part(f"Observed {completion['status']}"),),
@@ -166,7 +164,7 @@ class _BackgroundAgentModel(Model):
         tool_messages = [message for message in request.messages if message.role == "tool"]
         if not tool_messages:
             return ModelResponse(
-                tool_calls=(
+                (
                     ToolCall(
                         "agent-background",
                         "Agent",
@@ -207,16 +205,14 @@ class _ManagementModel(Model):
         del context, stream, emit_delta
         tool_messages = [message for message in request.messages if message.role == "tool"]
         if not tool_messages:
-            return ModelResponse(
-                tool_calls=(ToolCall("get-agent", "AgentGet", {"agent_id": self.agent_id}),)
-            )
+            return ModelResponse((ToolCall("get-agent", "AgentGet", {"agent_id": self.agent_id}),))
         latest = tool_messages[-1].outcome
         assert isinstance(latest, ToolSuccess)
         payload = cast(dict[str, Any], latest.structured_content)
         if len(tool_messages) == 1:
             self.observed.append(payload)
             return ModelResponse(
-                tool_calls=(ToolCall("cancel-agent", "AgentCancel", {"agent_id": self.agent_id}),)
+                (ToolCall("cancel-agent", "AgentCancel", {"agent_id": self.agent_id}),)
             )
         self.observed.append(payload)
         return ModelResponse(
@@ -241,7 +237,7 @@ class _MultipleAgentCallsModel(Model):
         del request, context, stream, emit_delta
         arguments = {"description": "One", "prompt": "Do one task."}
         return ModelResponse(
-            tool_calls=(
+            (
                 ToolCall("agent-one", "Agent", arguments),
                 ToolCall("agent-two", "Agent", arguments),
             )
@@ -372,7 +368,7 @@ def test_runtime_disallowed_multiple_foreground_agents_fail_before_start() -> No
     state = checkpoint.snapshot.state
     assert isinstance(state, Failed)
     assert state.error.code == "model_protocol_error"
-    assert "disallowed parallel tool calls" in state.error.message
+    assert "disallowed parallel runtime tool calls" in state.error.message
     assert not backend.start_calls
     kinds = [event.kind for event in events]
     assert EventKind.TOOL_STARTED not in kinds

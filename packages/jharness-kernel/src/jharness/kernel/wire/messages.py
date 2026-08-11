@@ -6,7 +6,18 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from jharness.kernel.errors import ProtocolError
-from jharness.kernel.messages import ArtifactRef, ContentPart, ErrorInfo, Message, TaskRef, ToolCall
+from jharness.kernel.messages import (
+    ArtifactRef,
+    ContentPart,
+    ErrorInfo,
+    Message,
+    ModelOutputItem,
+    ProviderToolCall,
+    ProviderToolId,
+    ProviderToolStatus,
+    TaskRef,
+    ToolCall,
+)
 from jharness.kernel.tools import ToolAccepted, ToolFailure, ToolOutcome, ToolSuccess, ToolWaiting
 from jharness.kernel.wire._helpers import (
     array,
@@ -23,11 +34,13 @@ __all__ = [
     "decode_content_part",
     "decode_error_info",
     "decode_message",
+    "decode_model_output_item_value",
     "decode_tool_call",
     "decode_tool_outcome",
     "encode_content_part",
     "encode_error_info",
     "encode_message",
+    "encode_model_output_item",
     "encode_tool_call",
     "encode_tool_outcome",
 ]
@@ -47,8 +60,7 @@ def encode_message(message: Message) -> dict[str, Any]:
     if message.role == "assistant":
         return {
             "role": "assistant",
-            "parts": [encode_content_part(part) for part in message.parts],
-            "tool_calls": [encode_tool_call(call) for call in message.tool_calls],
+            "output": [encode_model_output_item(item) for item in message.output],
             "metadata": thaw_object(message.metadata),
         }
     if message.outcome is None or message.tool_call_id is None:
@@ -81,19 +93,20 @@ def decode_message_value(value: object) -> Message:
         fields = object_fields(
             mapping,
             "assistant message",
-            {"role", "parts", "tool_calls", "metadata"},
+            {"role", "output", "metadata"},
         )
-        calls = tuple(
-            decode_tool_call_value(item) for item in array(fields["tool_calls"], "tool calls")
+        output = tuple(
+            decode_model_output_item_value(item)
+            for item in array(fields["output"], "assistant output")
         )
+        calls = tuple(item for item in output if isinstance(item, ToolCall | ProviderToolCall))
         if len({call.id for call in calls}) != len(calls):
             raise ProtocolError(
                 "assistant tool call ids must be unique",
                 code="duplicate_tool_call_id",
             )
         return Message.assistant(
-            _decode_parts(fields["parts"], "assistant parts"),
-            tool_calls=calls,
+            output,
             metadata=json_object(fields["metadata"], "message metadata"),
         )
     if role == "tool":
@@ -265,6 +278,86 @@ def decode_tool_call_value(value: object) -> ToolCall:
         id=string(fields["id"], "tool call id", non_empty=True),
         name=string(fields["name"], "tool call name", non_empty=True),
         arguments=json_object(fields["arguments"], "tool call arguments"),
+    )
+
+
+def encode_model_output_item(item: ModelOutputItem) -> dict[str, Any]:
+    """Encode one ordered model output item with an explicit discriminator."""
+
+    if isinstance(item, ContentPart):
+        return {"kind": "content", "content": encode_content_part(item)}
+    if isinstance(item, ToolCall):
+        return {"kind": "runtime_tool_call", **encode_tool_call(item)}
+    return {
+        "kind": "provider_tool_call",
+        "id": item.id,
+        "tool": {
+            "namespace": item.tool.namespace,
+            "type": item.tool.type,
+        },
+        "status": item.status.value,
+        "arguments": thaw_object(item.arguments),
+        "output": [encode_content_part(part) for part in item.output],
+        "error": None if item.error is None else encode_error_info(item.error),
+        "metadata": thaw_object(item.metadata),
+    }
+
+
+def decode_model_output_item_value(value: object) -> ModelOutputItem:
+    mapping = json_object(value, "model output item")
+    kind = string(mapping.get("kind"), "model output item kind")
+    if kind == "content":
+        fields = object_fields(mapping, "content output item", {"kind", "content"})
+        return decode_content_part_value(fields["content"])
+    if kind == "runtime_tool_call":
+        fields = object_fields(
+            mapping,
+            "runtime tool call output item",
+            {"kind", "id", "name", "arguments"},
+        )
+        return ToolCall(
+            id=string(fields["id"], "tool call id", non_empty=True),
+            name=string(fields["name"], "tool call name", non_empty=True),
+            arguments=json_object(fields["arguments"], "tool call arguments"),
+        )
+    if kind != "provider_tool_call":
+        raise ProtocolError(f"model output item kind has unsupported value: {kind}")
+    fields = object_fields(
+        mapping,
+        "provider tool call output item",
+        {
+            "kind",
+            "id",
+            "tool",
+            "status",
+            "arguments",
+            "output",
+            "error",
+            "metadata",
+        },
+    )
+    tool_fields = object_fields(
+        fields["tool"],
+        "provider tool identity",
+        {"namespace", "type"},
+    )
+    raw_status = string(fields["status"], "provider tool status")
+    try:
+        status = ProviderToolStatus(raw_status)
+    except ValueError as exc:
+        raise ProtocolError(f"provider tool status has unsupported value: {raw_status}") from exc
+    raw_error = fields["error"]
+    return ProviderToolCall(
+        id=string(fields["id"], "provider tool call id", non_empty=True),
+        tool=ProviderToolId(
+            string(tool_fields["namespace"], "provider tool namespace", non_empty=True),
+            string(tool_fields["type"], "provider tool type", non_empty=True),
+        ),
+        status=status,
+        arguments=json_object(fields["arguments"], "provider tool arguments"),
+        output=_decode_parts(fields["output"], "provider tool output"),
+        error=None if raw_error is None else decode_error_info_value(raw_error),
+        metadata=json_object(fields["metadata"], "provider tool metadata"),
     )
 
 

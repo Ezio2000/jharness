@@ -40,7 +40,7 @@ _POLICY = ModelErrorPolicy(
 
 
 def _decoded_response(_value: Mapping[str, object]) -> ModelResponse:
-    return ModelResponse(parts=(ContentPart.text_part("ok"),))
+    return ModelResponse(output=(ContentPart.text_part("ok"),))
 
 
 async def _invoke_json(handler: Callable[[httpx.Request], httpx.Response]) -> ModelResponse:
@@ -394,7 +394,13 @@ async def test_delta_sink_failure_propagates_unchanged_and_closes_response() -> 
                 headers=lambda _body: {},
                 decode_frame=lambda _event, _data: (
                     True,
-                    (ModelContentDelta(0, "chunk"),),
+                    (
+                        ModelContentDelta(
+                            output_index=0,
+                            text_delta="chunk",
+                            content_index=0,
+                        ),
+                    ),
                 ),
                 completed_response=lambda: _decoded_response({}),
                 emit_delta=emit_delta,

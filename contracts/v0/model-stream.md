@@ -7,13 +7,54 @@ operation:
 Model.invoke(request, context, *, stream, emit_delta) -> ModelResponse
 ```
 
+## Complete Request and Response
+
+Every `ModelRequest` carries the complete durable message history plus two
+disjoint tool declarations:
+
+- `runtime_tools` are functions that the JHarness runtime may bind, approve,
+  schedule, and execute;
+- `provider_tools` are namespaced provider capabilities that the remote model
+  service executes. Each declaration contains a `ProviderToolId(namespace,
+  type)` and provider-owned configuration.
+
+`tool_choice.type` is `auto`, `none`, `required`, `runtime`, or `provider`.
+`runtime` targets one declared runtime tool by name; `provider` targets one
+declared provider tool by `ProviderToolId`. `required` accepts either ownership
+class. `allow_parallel_tool_calls` constrains runtime-owned calls returned for
+host scheduling; the count and order of provider-owned items do not prove how
+the remote provider executed them.
+
+Every complete `ModelResponse` contains one non-empty ordered `output`. Its
+items are exactly:
+
+- `content`, carrying one `ContentPart`;
+- `runtime_tool_call`, carrying id, name, and JSON arguments;
+- `provider_tool_call`, carrying id, namespaced tool identity, status,
+  arguments, provider-produced content, optional failure, and metadata.
+
+The adapter preserves the provider's semantically observable item order.
+Runtime and provider tool-call ids are unique across one output. Provider tool
+status is `in_progress`, `completed`, `incomplete`, or `failed`; a failed call
+has an error, and an in-progress call has no final output. Provider-specific wire payloads
+and versioned tool names are adapter concerns, not portable message shapes.
+
+An assistant message persists that same ordered output without splitting
+content from calls. Only `runtime_tool_call` creates `ToolsPending` work.
+Provider-tool output is projected into visible content in its output position.
+That projection may be empty when the complete response consists only of
+provider-tool facts; the ordered assistant output remains the durable result.
+
+## Live Deltas
+
 When `stream=false`, the model returns a complete response and does not call the
-sink. When `stream=true`, `emit_delta` may receive only four provider-neutral
+sink. When `stream=true`, `emit_delta` may receive only five provider-neutral
 delta variants:
 
 - `content`
 - `tool_call`
 - `reasoning`
+- `provider_tool_call`
 - `usage`
 
 There are no started or completed stream items. `model_started` and
@@ -21,9 +62,17 @@ There are no started or completed stream items. `model_started` and
 they are not values in the model stream.
 
 The provider adapter owns stream assembly and always returns one complete
-`ModelResponse`. Tool-call deltas accumulate id, name, and JSON arguments by
-zero-based call index. Usage deltas merge field by field; an omitted value does
-not clear a value already reported. There is no tool invocation mode.
+`ModelResponse`. Every non-usage delta carries a zero-based `output_index` into
+the ordered provider response. Content and reasoning deltas additionally carry
+`content_index`; runtime tool-call deltas accumulate id, name, and JSON
+arguments at their output position. Provider-tool deltas carry id,
+`ProviderToolId`, optional normalized status, optional provider event name, and
+opaque event data. Usage deltas merge field by field; an omitted value does not
+clear a value already reported. There is no tool invocation mode.
+
+Provider-tool progress, including partial image data, is live-only. The adapter
+materializes the final provider call and its content in the returned output;
+partial event data never becomes durable history.
 
 Only the returned response can produce a `model_turn` checkpoint. Partial text,
 reasoning, calls, and usage never enter snapshot history or metrics. Kernel does

@@ -13,6 +13,8 @@ def _load_required_types() -> tuple[object, ...]:
     from jharness.models.openai import (
         OpenAIChatCompletionsModel,
         OpenAIChatCompletionsProfile,
+        OpenAIResponsesModel,
+        OpenAIResponsesProfile,
     )
     from jharness.repository import (
         MemoryRunRepository,
@@ -31,6 +33,8 @@ def _load_required_types() -> tuple[object, ...]:
         AnthropicProfile,
         OpenAIChatCompletionsModel,
         OpenAIChatCompletionsProfile,
+        OpenAIResponsesModel,
+        OpenAIResponsesProfile,
         MemoryRunRepository,
         MySQLRunRepository,
         RedisRunRepository,
@@ -41,21 +45,25 @@ def _load_required_types() -> tuple[object, ...]:
     )
 
 
-def _load_deepseek_profiles() -> tuple[object, object]:
+def _load_deepseek_profiles() -> tuple[object, object, object]:
     from jharness.models.anthropic import AnthropicProfile
     from jharness.models.deepseek import (
         deepseek_anthropic_profile,
         deepseek_openai_chat_profile,
+        deepseek_openai_responses_profile,
     )
-    from jharness.models.openai import OpenAIChatCompletionsProfile
+    from jharness.models.openai import OpenAIChatCompletionsProfile, OpenAIResponsesProfile
 
     openai_profile = deepseek_openai_chat_profile(thinking=False)
     anthropic_profile = deepseek_anthropic_profile(thinking=False)
+    responses_profile = deepseek_openai_responses_profile(effort="none")
     if not isinstance(cast(object, openai_profile), OpenAIChatCompletionsProfile):
         raise TypeError("DeepSeek OpenAI profile factory returned the wrong type")
     if not isinstance(cast(object, anthropic_profile), AnthropicProfile):
         raise TypeError("DeepSeek Anthropic profile factory returned the wrong type")
-    return openai_profile, anthropic_profile
+    if not isinstance(cast(object, responses_profile), OpenAIResponsesProfile):
+        raise TypeError("DeepSeek Responses profile factory returned the wrong type")
+    return openai_profile, anthropic_profile, responses_profile
 
 
 def main() -> None:

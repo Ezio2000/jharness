@@ -246,7 +246,7 @@ class Suspended:
 
 @dataclass(frozen=True, slots=True)
 class Completed:
-    """Successful final output."""
+    """Successful terminal result with its visible-content projection."""
 
     parts: tuple[ContentPart, ...]
 
@@ -254,8 +254,6 @@ class Completed:
 
     def __post_init__(self) -> None:
         parts = expect_instance_tuple(self.parts, ContentPart, "completed parts")
-        if not parts:
-            raise ValueError("completed state requires at least one content part")
         object.__setattr__(self, "parts", parts)
 
 

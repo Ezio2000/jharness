@@ -17,7 +17,7 @@ JsonObject = dict[str, JsonValue]
 def encode_tools(tools: Sequence[ToolSpec], profile: AnthropicProfile) -> list[JsonObject]:
     if not tools:
         return []
-    if not profile.supports_tools:
+    if not profile.capabilities.runtime_tools:
         raise AnthropicError(f"{profile.name} does not support tools")
     return [
         {
@@ -35,15 +35,17 @@ def encode_tool_choice(
     tool_names: Collection[str],
     profile: AnthropicProfile,
 ) -> JsonObject | None:
+    if choice.type not in profile.capabilities.tool_choice_types:
+        raise AnthropicError(f"{profile.name} does not support tool_choice={choice.type!r}")
     if not tool_names:
-        if choice.type in {"required", "named"}:
+        if choice.type in {"required", "runtime", "provider"}:
             raise AnthropicError(f"tool_choice={choice.type!r} requires at least one tool")
         return None
-    if not profile.supports_tool_choice:
-        if choice.type == "auto":
-            return None
-        raise AnthropicError(f"{profile.name} does not support tool_choice")
-    if choice.type == "named":
+    if choice.type == "auto" and profile.automatic_tool_choice_mode == "implicit":
+        return None
+    if choice.type == "provider":
+        raise AnthropicError("this Anthropic profile does not support provider tool choice")
+    if choice.type == "runtime":
         if choice.name is None or choice.name not in tool_names:
             raise AnthropicError(f"tool_choice names an unavailable tool: {choice.name}")
         value: JsonObject = {"type": "tool", "name": choice.name}
@@ -55,7 +57,7 @@ def encode_tool_choice(
                 "required": "any",
             }[choice.type]
         }
-    if choice.type != "none" and profile.supports_parallel_tool_call_control:
+    if choice.type != "none" and profile.capabilities.parallel_tool_call_control:
         value["disable_parallel_tool_use"] = not choice.allow_parallel_tool_calls
     return value
 

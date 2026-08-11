@@ -25,14 +25,16 @@
           "deltas": [
             {
               "kind": "content",
-              "index": 0,
+              "output_index": 0,
+              "content_index": 0,
               "text_delta": "partial",
               "part_type": "text",
               "data": {}
             },
             {
               "kind": "content",
-              "index": 0,
+              "output_index": 0,
+              "content_index": 0,
               "text_delta": "invalid",
               "part_type": "refusal",
               "data": {}

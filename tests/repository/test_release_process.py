@@ -39,6 +39,7 @@ _REQUIRED_MODEL_FILES = {
     "decorators.py",
     "deepseek/__init__.py",
     "openai/__init__.py",
+    "openai/responses_api/__init__.py",
 }
 
 
@@ -387,6 +388,8 @@ def test_testpypi_smoke_project_pins_all_distributions() -> None:
         assert module in installed_api
     assert "verify_installed_api.py" in script
     assert "from jharness.models.decorators import FallbackModel, RetryingModel" in installed_api
+    assert "OpenAIResponsesModel" in installed_api
+    assert "deepseek_openai_responses_profile" in installed_api
     for namespace in ("jharness.models.anthropic", "jharness.models.deepseek"):
         assert namespace in installed_api
     assert script.count('{{ index = "testpypi" }}') == 5

@@ -171,13 +171,13 @@ class _TranscriptQuestionModel(Model):
     ) -> ModelResponse:
         del context, stream, emit_delta
         self.requests.append(request)
-        assert [spec.name for spec in request.tools] == ["AskQuestion"]
+        assert [spec.name for spec in request.runtime_tools] == ["AskQuestion"]
         assert request.tool_choice.allow_parallel_tool_calls is False
 
         response = _external_payload(request)
         if response is None:
             return ModelResponse(
-                tool_calls=(
+                (
                     ToolCall(
                         "ask-real",
                         "AskQuestion",
@@ -226,7 +226,7 @@ class _MultipleQuestionCallsModel(Model):
             "prompt": "Continue?",
         }
         return ModelResponse(
-            tool_calls=(
+            (
                 ToolCall("ask-first", "AskQuestion", {"questions": [question]}),
                 ToolCall("ask-second", "AskQuestion", {"questions": [question]}),
             )
@@ -281,7 +281,9 @@ def test_runtime_question_checkpoint_json_roundtrip_and_fresh_runtime_resume() -
     )
 
     assert resumed.snapshot.status == "completed"
-    assert resumed.snapshot.history[-1].parts[0].text == "Selected postgres with 3 retries"
+    assert resumed.snapshot.history[-1].visible_parts()[0].text == (
+        "Selected postgres with 3 retries"
+    )
     assert len(resumed_model.requests) == 1
     assert resumed_model.observed_response == {
         "answers": _answers(),
@@ -324,7 +326,7 @@ def test_runtime_cancelled_question_is_visible_to_fresh_model() -> None:
     completed = asyncio.run(resume_question(_runtime(resumed_model), restored, response).result())
 
     assert completed.snapshot.status == "completed"
-    assert completed.snapshot.history[-1].parts[0].text == (
+    assert completed.snapshot.history[-1].visible_parts()[0].text == (
         "Question was cancelled: user chose not to decide"
     )
     assert resumed_model.observed_response == {
@@ -375,7 +377,7 @@ def test_runtime_disallowed_multiple_question_calls_fail_before_tools_start() ->
     state = checkpoint.snapshot.state
     assert isinstance(state, Failed)
     assert state.error.code == "model_protocol_error"
-    assert "disallowed parallel tool calls" in state.error.message
+    assert "disallowed parallel runtime tool calls" in state.error.message
     kinds = [event.kind for event in events]
     assert EventKind.MODEL_STARTED in kinds
     assert EventKind.TOOL_STARTED not in kinds

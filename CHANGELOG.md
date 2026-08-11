@@ -6,6 +6,28 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Added an OpenAI Responses adapter with complete and SSE transports, runtime
+  functions, provider-hosted image generation and web search, and a strict stateless
+  `deepseek-v4-flash` Responses profile.
+
+### Changed
+
+- Replaced split model content/tool-call results with one ordered output sequence and
+  separated exact model modalities, host-executed `ToolCall` values, and remote
+  `ProviderToolCall` values at the kernel boundary.
+- Replaced provider-profile capability booleans with one immutable
+  `ModelCapabilities` declaration, including exact tool-choice types, parallel-control
+  and seed support. Rewrote the OpenAI, Anthropic, and DeepSeek defaults and moved
+  supplier-specific Responses reasoning and hosted-tool configuration into profile
+  wire policy.
+
+### Fixed
+
+- Updated release validation to Twine 7 for Core Metadata 2.5 and expanded isolated
+  distribution smoke checks to cover the Responses public API and DeepSeek profile.
+
 ## [0.5.0] - 2026-08-10
 
 ### Added

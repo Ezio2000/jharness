@@ -19,9 +19,9 @@
       },
       {
         "role": "assistant",
-        "parts": [],
-        "tool_calls": [
+        "output": [
           {
+            "kind": "runtime_tool_call",
             "id": "call-1",
             "name": "lookup",
             "arguments": {}

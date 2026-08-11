@@ -162,8 +162,8 @@ class ModelTurnFact:
 
     def _validate_result(self, part_count: int, call_ids: tuple[str, ...]) -> None:
         if self.result is ModelTurnResult.COMPLETED:
-            if part_count < 1 or call_ids or self.limit_reason is not None:
-                raise ValueError("completed model turn requires parts and no calls or limit")
+            if call_ids or self.limit_reason is not None:
+                raise ValueError("completed model turn requires no runtime calls or limit")
         elif self.result is ModelTurnResult.TOOLS_PENDING:
             if not call_ids or self.limit_reason is not None:
                 raise ValueError("tools_pending model turn requires calls and no limit")
@@ -404,15 +404,16 @@ def _validate_history_boundary(
 def _validate_model_boundary(snapshot: RunSnapshot, fact: ModelTurnFact) -> None:
     assistant = _validate_model_message(snapshot, fact)
     if fact.result is ModelTurnResult.COMPLETED:
-        _validate_completed_model(snapshot, fact, assistant.parts)
+        _validate_completed_model(snapshot, fact, assistant.visible_parts())
     elif fact.result is ModelTurnResult.TOOLS_PENDING:
         if not isinstance(snapshot.state, ToolsPending):
             raise ValueError("tools_pending model fact must match ToolsPending state")
-        if len(snapshot.state.pending) != len(assistant.tool_calls) or any(
+        calls = assistant.runtime_tool_calls()
+        if len(snapshot.state.pending) != len(calls) or any(
             pending != call
             for pending, call in zip(
                 snapshot.state.pending,
-                assistant.tool_calls,
+                calls,
                 strict=True,
             )
         ):
@@ -425,9 +426,9 @@ def _validate_model_message(snapshot: RunSnapshot, fact: ModelTurnFact) -> Messa
     assistant = snapshot.history[-1]
     if assistant.role != "assistant":
         raise ValueError("model turn fact requires a trailing assistant message")
-    if len(assistant.parts) != fact.part_count:
+    if len(assistant.visible_parts()) != fact.part_count:
         raise ValueError("model turn part_count must match the assistant message")
-    if tuple(call.id for call in assistant.tool_calls) != fact.tool_call_ids:
+    if tuple(call.id for call in assistant.runtime_tool_calls()) != fact.tool_call_ids:
         raise ValueError("model turn call ids must match the assistant message")
     return assistant
 

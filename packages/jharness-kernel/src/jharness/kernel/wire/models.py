@@ -15,10 +15,8 @@ from jharness.kernel.wire._helpers import (
     thaw_object,
 )
 from jharness.kernel.wire.messages import (
-    decode_content_part_value,
-    decode_tool_call_value,
-    encode_content_part,
-    encode_tool_call,
+    decode_model_output_item_value,
+    encode_model_output_item,
 )
 
 __all__ = [
@@ -85,8 +83,7 @@ def encode_model_response(response: ModelResponse) -> dict[str, Any]:
     """Encode the sole complete provider-neutral model result."""
 
     return {
-        "parts": [encode_content_part(part) for part in response.parts],
-        "tool_calls": [encode_tool_call(call) for call in response.tool_calls],
+        "output": [encode_model_output_item(item) for item in response.output],
         "finish_reason": response.finish_reason,
         "usage": None if response.usage is None else encode_model_usage(response.usage),
         "model_id": response.model_id,
@@ -106,8 +103,7 @@ def decode_model_response_value(value: object) -> ModelResponse:
         value,
         "model response",
         {
-            "parts",
-            "tool_calls",
+            "output",
             "finish_reason",
             "usage",
             "model_id",
@@ -117,12 +113,9 @@ def decode_model_response_value(value: object) -> ModelResponse:
     )
     raw_usage = fields["usage"]
     return ModelResponse(
-        parts=tuple(
-            decode_content_part_value(item) for item in array(fields["parts"], "response parts")
-        ),
-        tool_calls=tuple(
-            decode_tool_call_value(item)
-            for item in array(fields["tool_calls"], "response tool_calls")
+        output=tuple(
+            decode_model_output_item_value(item)
+            for item in array(fields["output"], "response output")
         ),
         finish_reason=optional_string(fields["finish_reason"], "finish_reason"),
         usage=None if raw_usage is None else decode_model_usage_value(raw_usage),
