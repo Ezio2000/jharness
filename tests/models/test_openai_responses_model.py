@@ -48,6 +48,7 @@ from jharness.models.openai import (
     ResponsesImageGenerationTool,
     ResponsesProviderToolCodec,
     ResponsesProviderToolRegistry,
+    ResponsesWebSearchTool,
 )
 from jharness.models.openai.responses_api.stream import OpenAIResponsesStreamDecoder
 
@@ -963,12 +964,23 @@ def test_deepseek_reasoning_sse_tracks_open_part_and_uses_terminal_response() ->
     assert reasoning.text == "分析"
 
 
-def test_web_search_stream_rejects_conflicting_terminal_statuses() -> None:
+@pytest.mark.parametrize("lifecycle_status", ["completed", "incomplete", "failed"])
+def test_deepseek_web_search_keeps_lifecycle_status_provisional_until_output_item(
+    lifecycle_status: str,
+) -> None:
     profile = deepseek_openai_responses_profile(effort="none")
     decoder = OpenAIResponsesStreamDecoder(
         OpenAIResponsesCodec(model="deepseek-v4-flash", profile=profile),
         profile,
     )
+    action = {"type": "search", "query": "JHarness"}
+    final_item = {
+        "id": "ws-1",
+        "type": "web_search_call",
+        "status": "failed",
+        "action": action,
+        "error": {"code": "search_failed", "message": "failed"},
+    }
     _stream_event(
         decoder,
         "response.created",
@@ -986,7 +998,79 @@ def test_web_search_stream_rejects_conflicting_terminal_statuses() -> None:
             "status": "searching",
         },
     )
-    _, completed = _stream_event(
+    _, lifecycle = _stream_event(
+        decoder,
+        f"response.web_search_call.{lifecycle_status}",
+        2,
+        item_id="ws-1",
+        output_index=0,
+        action=action,
+    )
+    _, failed = _stream_event(
+        decoder,
+        "response.output_item.done",
+        3,
+        output_index=0,
+        item=final_item,
+    )
+    terminal, _ = _stream_event(
+        decoder,
+        "response.completed",
+        4,
+        response=_terminal_response([final_item], model="deepseek-v4-flash"),
+    )
+
+    deltas = [added[0], lifecycle[0], failed[0]]
+    assert all(isinstance(delta, ModelProviderToolCallDelta) for delta in deltas)
+    assert [cast(ModelProviderToolCallDelta, delta).status for delta in deltas] == [
+        ProviderToolStatus.IN_PROGRESS,
+        ProviderToolStatus.IN_PROGRESS,
+        ProviderToolStatus.FAILED,
+    ]
+    assert cast(ModelProviderToolCallDelta, lifecycle[0]).event == (
+        f"response.web_search_call.{lifecycle_status}"
+    )
+    assert cast(ModelProviderToolCallDelta, lifecycle[0]).data == {"action": action}
+    assert terminal is True
+    completed_call = decoder.completed_response().output[0]
+    assert isinstance(completed_call, ProviderToolCall)
+    assert completed_call.status is ProviderToolStatus.FAILED
+
+
+def _generic_web_search_stream_decoder() -> OpenAIResponsesStreamDecoder:
+    web_search = ProviderToolId("test.responses", "web_search")
+    default = OpenAIResponsesProfile()
+    profile = OpenAIResponsesProfile(
+        capabilities=replace(
+            default.capabilities,
+            provider_tools=frozenset({web_search}),
+        ),
+        provider_tool_registry=ResponsesProviderToolRegistry(
+            (ResponsesWebSearchTool(tool=web_search),)
+        ),
+    )
+    return OpenAIResponsesStreamDecoder(
+        OpenAIResponsesCodec(model="gpt-test", profile=profile),
+        profile,
+    )
+
+
+def test_provider_lifecycle_rejects_conflicting_terminal_statuses() -> None:
+    decoder = _generic_web_search_stream_decoder()
+    _stream_event(
+        decoder,
+        "response.created",
+        0,
+        response={"id": "resp-1", "object": "response", "status": "in_progress"},
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.added",
+        1,
+        output_index=0,
+        item={"id": "ws-1", "type": "web_search_call", "status": "searching"},
+    )
+    _stream_event(
         decoder,
         "response.web_search_call.completed",
         2,
@@ -1015,12 +1099,123 @@ def test_web_search_stream_rejects_conflicting_terminal_statuses() -> None:
             },
         )
 
-    deltas = [added[0], completed[0]]
-    assert all(isinstance(delta, ModelProviderToolCallDelta) for delta in deltas)
-    assert [cast(ModelProviderToolCallDelta, delta).status for delta in deltas] == [
-        ProviderToolStatus.IN_PROGRESS,
-        ProviderToolStatus.COMPLETED,
-    ]
+
+def test_provider_output_item_done_requires_a_terminal_status() -> None:
+    decoder = _generic_web_search_stream_decoder()
+    _stream_event(
+        decoder,
+        "response.created",
+        0,
+        response={"id": "resp-1", "object": "response", "status": "in_progress"},
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.added",
+        1,
+        output_index=0,
+        item={"id": "ws-1", "type": "web_search_call", "status": "searching"},
+    )
+
+    with pytest.raises(OpenAIResponsesError, match="requires a terminal status"):
+        _stream_event(
+            decoder,
+            "response.output_item.done",
+            2,
+            output_index=0,
+            item={"id": "ws-1", "type": "web_search_call", "status": "searching"},
+        )
+
+
+@pytest.mark.parametrize("status", ["completed", "incomplete", "failed"])
+def test_terminal_response_accepts_provider_status_matching_output_item_done(
+    status: str,
+) -> None:
+    decoder = _generic_web_search_stream_decoder()
+    final_item = {
+        "id": "ws-1",
+        "type": "web_search_call",
+        "status": status,
+        "action": {"type": "search", "query": "JHarness"},
+        "error": {"code": "search_failed", "message": "failed"},
+    }
+    _stream_event(
+        decoder,
+        "response.created",
+        0,
+        response={"id": "resp-1", "object": "response", "status": "in_progress"},
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.added",
+        1,
+        output_index=0,
+        item={"id": "ws-1", "type": "web_search_call", "status": "searching"},
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.done",
+        2,
+        output_index=0,
+        item=final_item,
+    )
+    terminal, _ = _stream_event(
+        decoder,
+        "response.completed",
+        3,
+        response=_terminal_response([final_item], model="gpt-test"),
+    )
+
+    assert terminal is True
+    call = decoder.completed_response().output[0]
+    assert isinstance(call, ProviderToolCall)
+    assert call.status is ProviderToolStatus(status)
+
+
+@pytest.mark.parametrize(
+    ("done_status", "terminal_status"),
+    [("failed", "completed"), ("completed", "failed")],
+)
+def test_terminal_response_rejects_provider_status_mismatching_output_item_done(
+    done_status: str,
+    terminal_status: str,
+) -> None:
+    decoder = _generic_web_search_stream_decoder()
+    done_item = {
+        "id": "ws-1",
+        "type": "web_search_call",
+        "status": done_status,
+        "action": {"type": "search", "query": "JHarness"},
+        "error": {"code": "search_failed", "message": "failed"},
+    }
+    terminal_item = {**done_item, "status": terminal_status}
+    _stream_event(
+        decoder,
+        "response.created",
+        0,
+        response={"id": "resp-1", "object": "response", "status": "in_progress"},
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.added",
+        1,
+        output_index=0,
+        item={"id": "ws-1", "type": "web_search_call", "status": "searching"},
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.done",
+        2,
+        output_index=0,
+        item=done_item,
+    )
+
+    with pytest.raises(OpenAIResponsesError, match=r"does not match output_item\.done"):
+        _stream_event(
+            decoder,
+            "response.completed",
+            3,
+            response=_terminal_response([terminal_item], model="gpt-test"),
+        )
 
 
 def test_output_text_annotation_event_validates_the_open_message_part() -> None:

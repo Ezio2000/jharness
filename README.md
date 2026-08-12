@@ -78,7 +78,9 @@ executed by the provider and recorded as `ProviderToolCall` values. Exact input/
 modalities are advertised independently by each model profile.
 
 Provider setup is covered in [model adapters](docs/model-adapters.md); additional
-runnable examples live in [`examples`](examples/).
+runnable examples live in [`examples`](examples/), and the
+[DeepSeek Responses protocol demo](demos/deepseek_responses_protocol/) exercises the
+full response contract, multi-turn history, and provider-hosted web search.
 
 ## Durability
 

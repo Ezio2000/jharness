@@ -341,6 +341,14 @@ never uses a response ID as a continuation handle. See the
 [DeepSeek Responses API guide](https://api-docs.deepseek.com/guides/responses_api/)
 for the upstream endpoint behavior.
 
+DeepSeek can emit `response.web_search_call.completed` after an individual search
+action has finished even when the later `response.output_item.done` item reports that
+action as failed. The DeepSeek profile therefore exposes that lifecycle event as an
+advisory provider-tool delta while keeping the portable call status `in_progress`.
+The `response.output_item.done` item finalizes the live `completed`, `incomplete`, or
+`failed` status. The terminal full response remains the authoritative durable value
+and must report the same provider-tool status.
+
 ## Retry and Fallback
 
 Retry and fallback wrap any kernel `Model`:
