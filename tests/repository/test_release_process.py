@@ -265,7 +265,7 @@ def test_release_workflow_builds_and_publishes_five_distributions() -> None:
 
     test_publish = _step(jobs["publish-testpypi"], "Publish with trusted publishing")
     pypi_publish = _step(jobs["publish-pypi"], "Publish with trusted publishing")
-    expected_action = "pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b"
+    expected_action = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
     assert test_publish["uses"] == expected_action
     assert pypi_publish["uses"] == expected_action
     test_options = _mapping(test_publish.get("with"), "TestPyPI publish options")
