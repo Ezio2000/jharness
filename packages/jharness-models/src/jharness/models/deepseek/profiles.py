@@ -26,16 +26,14 @@ from jharness.models.openai.responses_api.provider_tools import (
 DeepSeekThinkingEffort = Literal["high", "max"]
 DeepSeekResponsesEffort = Literal[
     "none",
-    "minimal",
     "low",
-    "medium",
     "high",
     "xhigh",
     "max",
 ]
 
 _THINKING_EFFORTS = frozenset({"high", "max"})
-_RESPONSES_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+_RESPONSES_EFFORTS = frozenset({"none", "low", "high", "xhigh", "max"})
 _RUNTIME_TOOL_CHOICES = frozenset({"auto", "none", "required", "runtime"})
 _ALL_TOOL_CHOICES = frozenset({"auto", "none", "required", "runtime", "provider"})
 
@@ -153,6 +151,7 @@ def deepseek_openai_responses_profile(
             )
         ),
         freeform_runtime_tool_names=frozenset({"apply_patch"}),
+        exact_runtime_tool_choice_kinds=frozenset({RuntimeToolKind.STRUCTURED}),
         emit_freeform_runtime_tool_description=False,
         allowed_models=frozenset({"deepseek-v4-flash"}),
         extra_request_body=extra_request_body,

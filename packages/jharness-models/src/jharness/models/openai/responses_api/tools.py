@@ -60,17 +60,27 @@ def encode_tool_choice(
     if choice.type in {"auto", "none", "required"}:
         return choice.type
     if choice.type == "runtime":
-        return _encode_runtime_tool_choice(choice, runtime_tools)
+        return _encode_runtime_tool_choice(choice, runtime_tools, profile)
     return _encode_provider_tool_choice(choice, provider_tools, profile)
 
 
 def _encode_runtime_tool_choice(
     choice: ToolChoice,
     runtime_tools: Sequence[RuntimeToolSpec],
+    profile: OpenAIResponsesProfile,
 ) -> JsonObject:
     selected = next((tool for tool in runtime_tools if tool.name == choice.name), None)
     if selected is None:
         raise OpenAIResponsesError(f"tool_choice names an unavailable runtime tool: {choice.name}")
+    kind = (
+        RuntimeToolKind.STRUCTURED
+        if isinstance(selected, StructuredToolSpec)
+        else RuntimeToolKind.FREEFORM
+    )
+    if kind not in profile.exact_runtime_tool_choice_kinds:
+        raise OpenAIResponsesError(
+            f"{profile.name} does not support exact {kind.value} runtime tool choice"
+        )
     return {
         "type": "function" if isinstance(selected, StructuredToolSpec) else "custom",
         "name": selected.name,

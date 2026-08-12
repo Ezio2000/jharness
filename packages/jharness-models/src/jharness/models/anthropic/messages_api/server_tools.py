@@ -34,6 +34,9 @@ class AnthropicServerToolCodec:
     call_names: frozenset[str]
     result_block_types: frozenset[str]
     configuration_fields: frozenset[str] = field(default_factory=frozenset[str])
+    variant_configuration_fields: Mapping[str, frozenset[str]] = field(
+        default_factory=lambda: dict[str, frozenset[str]]()
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(cast(object, self.tool), ProviderToolId):
@@ -63,6 +66,14 @@ class AnthropicServerToolCodec:
         object.__setattr__(self, "call_names", call_names)
         object.__setattr__(self, "result_block_types", result_types)
         object.__setattr__(self, "configuration_fields", configuration_fields)
+        variant_fields = {
+            variant: _string_set(fields, f"{variant} configuration fields", allow_empty=True)
+            for variant, fields in self.variant_configuration_fields.items()
+        }
+        unknown_variants = set(variant_fields).difference(declaration_types)
+        if unknown_variants:
+            raise ValueError("variant configuration fields require a registered declaration type")
+        object.__setattr__(self, "variant_configuration_fields", MappingProxyType(variant_fields))
 
     def encode_declaration(self, spec: ProviderToolSpec) -> JsonObject:
         """Validate and encode one provider-tool declaration."""
@@ -77,6 +88,14 @@ class AnthropicServerToolCodec:
         if not isinstance(variant, str) or variant not in self.declaration_types:
             expected = ", ".join(sorted(self.declaration_types))
             raise AnthropicError(f"{self.tool.type} variant must be one of: {expected}")
+        allowed_for_variant = self.variant_configuration_fields.get(variant)
+        if allowed_for_variant is not None:
+            unsupported = set(configuration).difference(allowed_for_variant)
+            if unsupported:
+                key = min(unsupported)
+                raise AnthropicError(
+                    f"unsupported {variant} configuration field: {key}"
+                )
         return {
             "type": variant,
             "name": self.declaration_name,
@@ -355,6 +374,9 @@ def anthropic_web_search_codec(
 ) -> AnthropicServerToolCodec:
     """Build the complete Anthropic web-search server-tool codec."""
 
+    common_fields = frozenset(
+        {"allowed_callers", "allowed_domains", "blocked_domains", "max_uses", "user_location"}
+    )
     return AnthropicServerToolCodec(
         tool=tool,
         declaration_types=variants,
@@ -373,6 +395,15 @@ def anthropic_web_search_codec(
                 "variant",
             }
         ),
+        variant_configuration_fields={
+            variant: common_fields
+            | (
+                frozenset({"response_inclusion"})
+                if variant >= "web_search_20260318"
+                else frozenset[str]()
+            )
+            for variant in variants
+        },
     )
 
 

@@ -842,6 +842,25 @@ def test_fallback_capabilities_intersect_runtime_tool_kinds() -> None:
     assert capabilities.runtime_tool_kinds == frozenset({RuntimeToolKind.STRUCTURED})
 
 
+def test_fallback_removes_runtime_choice_without_common_runtime_tool_kind() -> None:
+    primary = ModelCapabilities(
+        runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED}),
+        tool_choice_types=frozenset({"auto", "runtime"}),
+    )
+    backup = ModelCapabilities(
+        runtime_tool_kinds=frozenset({RuntimeToolKind.FREEFORM}),
+        tool_choice_types=frozenset({"auto", "runtime"}),
+    )
+
+    capabilities = FallbackModel(
+        _ScriptModel((_response("unused"),), capabilities=primary),
+        _ScriptModel((_response("unused"),), capabilities=backup),
+    ).capabilities
+
+    assert capabilities.runtime_tool_kinds == frozenset()
+    assert capabilities.tool_choice_types == frozenset({"auto"})
+
+
 def test_fallback_capabilities_intersect_exact_tool_choice_types() -> None:
     primary = ModelCapabilities(
         tool_choice_types=frozenset({"auto", "none", "required", "runtime"})

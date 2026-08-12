@@ -9,7 +9,11 @@ import pytest
 from jharness.kernel import ModelCapabilities, RuntimeToolKind
 from jharness.models._http import model_client_config
 from jharness.models.anthropic import AnthropicModel, AnthropicProfile
-from jharness.models.deepseek import deepseek_anthropic_profile, deepseek_openai_chat_profile
+from jharness.models.deepseek import (
+    deepseek_anthropic_profile,
+    deepseek_openai_chat_profile,
+    deepseek_openai_responses_profile,
+)
 from jharness.models.openai import (
     OpenAIChatCompletionsModel,
     OpenAIChatCompletionsProfile,
@@ -235,6 +239,12 @@ def test_deepseek_profiles_validate_thinking_and_effort_combinations() -> None:
     for factory in (deepseek_openai_chat_profile, deepseek_anthropic_profile):
         with pytest.raises(ValueError, match="only valid"):
             factory(thinking=False, effort="high")
+
+
+@pytest.mark.parametrize("effort", ["minimal", "medium"])
+def test_deepseek_responses_rejects_unsupported_effort(effort: str) -> None:
+    with pytest.raises(ValueError, match="effort must be one of"):
+        deepseek_openai_responses_profile(effort=cast(Any, effort))
 
 
 def test_profiles_expose_only_the_new_capability_contract() -> None:

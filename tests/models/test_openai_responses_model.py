@@ -706,6 +706,39 @@ def test_responses_parallel_control_applies_only_when_runtime_calls_can_be_paral
         ).encode_request(request)
 
 
+def test_responses_encodes_non_native_assistant_history_as_easy_input() -> None:
+    payload = OpenAIResponsesCodec(model="gpt-test").encode_request(
+        ModelRequest(
+            messages=(
+                Message.user("question"),
+                Message.assistant((ContentPart.text_part("answer"),)),
+            ),
+        )
+    )
+
+    assert cast(list[dict[str, Any]], payload["input"])[1] == {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "input_text", "text": "answer"}],
+    }
+
+
+def test_deepseek_responses_rejects_exact_custom_tool_choice() -> None:
+    codec = OpenAIResponsesCodec(
+        model="deepseek-v4-flash",
+        profile=deepseek_openai_responses_profile(effort="none"),
+    )
+
+    with pytest.raises(OpenAIResponsesError, match="exact freeform runtime tool choice"):
+        codec.encode_request(
+            ModelRequest(
+                messages=(Message.user("patch"),),
+                runtime_tools=(FreeformToolSpec("apply_patch", "apply a patch"),),
+                tool_choice=ToolChoice(type="runtime", name="apply_patch"),
+            )
+        )
+
+
 async def test_deepseek_nonstream_client_preserves_interleaved_output_order() -> None:
     captured: dict[str, object] = {}
     wire_response = _terminal_response(
