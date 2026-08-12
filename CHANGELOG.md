@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-13
+
 ### Added
 
 - Added explicit official hosted-tool presets for OpenAI Responses and Anthropic
@@ -256,7 +258,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Sixty-six deterministic conformance cases and a standard tool catalog.
 - Provider-neutral lifecycle, model, tool, event, wire, and trace contracts.
 
-[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Ezio2000/jharness/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Ezio2000/jharness/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/Ezio2000/jharness/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Ezio2000/jharness/compare/v0.5.0...v0.6.0

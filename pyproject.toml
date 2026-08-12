@@ -4,11 +4,11 @@ version = "0"
 description = "Development workspace for the coordinated JHarness distributions"
 requires-python = ">=3.11"
 dependencies = [
-  "jharness-kernel==0.7.0",
-  "jharness-models==0.7.0",
-  "jharness-repository==0.7.0",
-  "jharness-toolkit==0.7.0",
-  "jharness-tools==0.7.0",
+  "jharness-kernel==0.8.0",
+  "jharness-models==0.8.0",
+  "jharness-repository==0.8.0",
+  "jharness-toolkit==0.8.0",
+  "jharness-tools==0.8.0",
 ]
 
 [tool.uv]
