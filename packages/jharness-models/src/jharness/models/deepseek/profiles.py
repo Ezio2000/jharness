@@ -18,10 +18,9 @@ from jharness.models.openai.profiles import (
     OpenAIChatCompletionsProfile,
     OpenAIResponsesProfile,
 )
-from jharness.models.openai.responses_api.provider_tools import (
-    ResponsesProviderToolRegistry,
-    ResponsesWebSearchTool,
-)
+from jharness.models.openai.responses_api.provider_tools import ResponsesProviderToolRegistry
+
+from . import _responses
 
 DeepSeekThinkingEffort = Literal["high", "max"]
 DeepSeekResponsesEffort = Literal[
@@ -142,13 +141,7 @@ def deepseek_openai_responses_profile(
         store=None,
         include=frozenset(),
         provider_tool_registry=ResponsesProviderToolRegistry(
-            (
-                ResponsesWebSearchTool(
-                    tool=web_search,
-                    allowed_variants=frozenset({"web_search", "web_search_2025_08_26"}),
-                    configuration_fields=frozenset({"variant"}),
-                ),
-            )
+            (_responses.deepseek_responses_web_search_codec(web_search),)
         ),
         freeform_runtime_tool_names=frozenset({"apply_patch"}),
         exact_runtime_tool_choice_kinds=frozenset({RuntimeToolKind.STRUCTURED}),

@@ -265,17 +265,23 @@ class OpenAIResponsesStreamDecoder:
             for (index, _), part in self._summary_parts.items()
         ):
             raise OpenAIResponsesError("Responses output item completed with open content parts")
-        state.closed = True
         if state.provider_codec is None:
+            state.closed = True
             return []
         update = state.provider_codec.stream_item_update(item)
-        return self._changed_provider_status(
+        if not is_terminal_provider_status(update.status):
+            raise OpenAIResponsesError(
+                "Responses provider output_item.done requires a terminal status"
+            )
+        deltas = self._changed_provider_status(
             output_index,
             state,
             update.status,
             "response.output_item.done",
             data=update.data,
         )
+        state.closed = True
+        return deltas
 
     def _content_part_event(
         self,
@@ -676,6 +682,12 @@ class OpenAIResponsesStreamDecoder:
                 raise OpenAIResponsesError("Responses terminal output index was not streamed")
             item = OPENAI_RESPONSES_JSON.mapping(raw_item, "Responses terminal output item")
             self._validate_item_identity(state, item)
+            if state.provider_codec is not None:
+                terminal_status = state.provider_codec.stream_item_update(item).status
+                if terminal_status is not state.status:
+                    raise OpenAIResponsesError(
+                        "Responses terminal provider tool status does not match output_item.done"
+                    )
 
     @staticmethod
     def _validate_item_identity(state: _ItemState, item: Mapping[str, Any]) -> None:

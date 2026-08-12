@@ -6,6 +6,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Fixed
+
+- Treated DeepSeek Responses web-search terminal lifecycle events as advisory until
+  `response.output_item.done` finalizes the live status, allowing failed `open_page`
+  and `find_in_page` actions to coexist with successful search actions in one strict
+  SSE stream. Responses streaming now also rejects nonterminal
+  `output_item.done` statuses and terminal provider-tool statuses that contradict the
+  closed item.
+
 ## [0.6.0] - 2026-08-12
 
 ### Added

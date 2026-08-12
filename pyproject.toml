@@ -81,6 +81,6 @@ show_missing = true
 skip_covered = true
 
 [tool.pyright]
-include = ["packages", "conformance", "benchmarks", "examples", "scripts", "tests"]
+include = ["packages", "conformance", "benchmarks", "examples", "demos", "scripts", "tests"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
