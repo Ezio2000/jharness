@@ -54,6 +54,12 @@ def string_set(value: object, label: str) -> frozenset[str]:
     return cast(frozenset[str], result)
 
 
+def validate_literal(value: object, label: str, allowed: set[str]) -> None:
+    if not isinstance(value, str) or value not in allowed:
+        expected = ", ".join(sorted(allowed))
+        raise ValueError(f"{label} must be one of: {expected}")
+
+
 def validate_capabilities(
     value: object,
     *,

@@ -31,11 +31,11 @@ import asyncio
 import os
 
 from jharness.kernel import Completed, Message, Runtime
-from jharness.models.openai import OpenAIChatCompletionsModel
+from jharness.models.openai import OpenAIChatModel
 
 
 async def main() -> None:
-    model = OpenAIChatCompletionsModel(
+    model = OpenAIChatModel(
         base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         api_key=os.environ["OPENAI_API_KEY"],
         model=os.environ["OPENAI_MODEL"],

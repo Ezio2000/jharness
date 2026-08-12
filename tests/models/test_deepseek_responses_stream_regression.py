@@ -15,7 +15,7 @@ from jharness.kernel import (
     RunContext,
 )
 from jharness.models.deepseek import (
-    deepseek_openai_responses_profile,
+    deepseek_responses_profile,
     deepseek_responses_web_search,
 )
 from jharness.models.openai import OpenAIResponsesModel
@@ -43,7 +43,7 @@ def _terminal_response(output: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-async def test_deepseek_raw_sse_preserves_mixed_web_search_actions_in_order() -> None:
+async def test_deepseek_responses_raw_sse_preserves_mixed_web_search_actions_in_order() -> None:
     actions = [
         {"type": "search", "query": "JHarness Responses protocol"},
         {"type": "open_page", "url": "https://example.invalid/jharness"},
@@ -141,7 +141,7 @@ async def test_deepseek_raw_sse_preserves_mixed_web_search_actions_in_order() ->
             base_url="https://api.deepseek.invalid",
             api_key="test-only",
             model="deepseek-v4-flash",
-            profile=deepseek_openai_responses_profile(effort="none"),
+            profile=deepseek_responses_profile(effort="none"),
             client=client,
         ).invoke(
             ModelRequest(

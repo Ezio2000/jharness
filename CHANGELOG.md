@@ -6,6 +6,45 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed the public model APIs without compatibility aliases:
+  `OpenAIChatCompletions{Model,Profile,Codec,Error}` is now
+  `OpenAIChat{Model,Profile,Codec,Error}`, and
+  `Anthropic{Model,Profile,Codec,Error}` is now
+  `AnthropicMessages{Model,Profile,Codec,Error}`. Anthropic server-tool
+  types and `anthropic_web_search_codec` likewise use the `AnthropicMessages*` and
+  `anthropic_messages_web_search_codec` names.
+- Prefixed every public OpenAI Responses helper consistently:
+  `ProviderStreamUpdate` is now `OpenAIResponsesProviderToolStreamUpdate`, and the
+  `ResponsesArtifactStore`,
+  `ResponsesImageGenerationTool`, `ResponsesProviderToolCodec`,
+  `ResponsesProviderToolRegistry`, and `ResponsesWebSearchTool` types now use their
+  corresponding `OpenAIResponses*` names.
+- Renamed the DeepSeek factories to `deepseek_chat_profile`,
+  `deepseek_messages_profile`, and `deepseek_responses_profile`. DeepSeek Messages
+  hosted search is now `DEEPSEEK_MESSAGES_WEB_SEARCH` with
+  `deepseek_messages_web_search`, replacing the corresponding `ANTHROPIC` names. The
+  Chat and Messages factories now default to non-thinking profiles; pass
+  `thinking=True` to select their thinking variants.
+- Made all three protocol implementation packages private with empty `__all__`
+  declarations. Public adapter imports come from the provider roots
+  `jharness.models.openai`, `jharness.models.anthropic`, and
+  `jharness.models.deepseek`; the old `openai.responses_api` package exports were
+  removed rather than mirrored under `openai.responses`.
+- Changed the default profile identifiers—and therefore the default
+  `ModelResponse.metadata["provider"]` and `ModelErrorInfo.provider` values—from
+  `openai-chat-completions`,
+  `anthropic`, `deepseek-openai-chat-{nonthinking,thinking}`,
+  `deepseek-anthropic-{nonthinking,thinking}`, and `deepseek-openai-responses` to
+  `openai-chat`, `anthropic-messages`, `deepseek-chat[-thinking]`,
+  `deepseek-messages[-thinking]`, and `deepseek-responses`. `openai-responses` is
+  unchanged, and persisted metadata is not rewritten.
+- Renamed the DeepSeek Messages hosted-search `ProviderToolId` namespace from
+  `deepseek.anthropic` to `deepseek.messages`. Existing wire history remains
+  decodable, but a new DeepSeek Messages profile cannot replay the old hosted-tool
+  identity; start a new run or explicitly convert that history.
+
 ## [0.6.1] - 2026-08-12
 
 ### Fixed

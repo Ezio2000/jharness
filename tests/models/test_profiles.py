@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, cast
 
@@ -8,20 +9,20 @@ import pytest
 
 from jharness.kernel import ModelCapabilities, RuntimeToolKind
 from jharness.models._http import model_client_config
-from jharness.models.anthropic import AnthropicModel, AnthropicProfile
+from jharness.models.anthropic import AnthropicMessagesModel, AnthropicMessagesProfile
 from jharness.models.deepseek import (
-    deepseek_anthropic_profile,
-    deepseek_openai_chat_profile,
-    deepseek_openai_responses_profile,
+    deepseek_chat_profile,
+    deepseek_messages_profile,
+    deepseek_responses_profile,
 )
 from jharness.models.openai import (
-    OpenAIChatCompletionsModel,
-    OpenAIChatCompletionsProfile,
+    OpenAIChatModel,
+    OpenAIChatProfile,
     OpenAIResponsesProfile,
 )
 
 
-@pytest.mark.parametrize("model_type", [OpenAIChatCompletionsModel, AnthropicModel])
+@pytest.mark.parametrize("model_type", [OpenAIChatModel, AnthropicMessagesModel])
 def test_model_clients_share_constructor_validation(model_type: type[object]) -> None:
     constructor = cast(Any, model_type)
     for keywords, pattern in (
@@ -89,16 +90,56 @@ def test_shared_transport_config_repr_redacts_api_key() -> None:
     assert "repr-secret" not in repr(config)
 
 
+@pytest.mark.parametrize(
+    ("factory", "expected_name"),
+    (
+        pytest.param(OpenAIChatProfile, "openai-chat", id="openai-chat"),
+        pytest.param(OpenAIResponsesProfile, "openai-responses", id="openai-responses"),
+        pytest.param(
+            AnthropicMessagesProfile,
+            "anthropic-messages",
+            id="anthropic-messages",
+        ),
+        pytest.param(deepseek_chat_profile, "deepseek-chat", id="deepseek-chat"),
+        pytest.param(
+            lambda: deepseek_chat_profile(thinking=True),
+            "deepseek-chat-thinking",
+            id="deepseek-chat-thinking",
+        ),
+        pytest.param(
+            deepseek_messages_profile,
+            "deepseek-messages",
+            id="deepseek-messages",
+        ),
+        pytest.param(
+            lambda: deepseek_messages_profile(thinking=True),
+            "deepseek-messages-thinking",
+            id="deepseek-messages-thinking",
+        ),
+        pytest.param(
+            deepseek_responses_profile,
+            "deepseek-responses",
+            id="deepseek-responses",
+        ),
+    ),
+)
+def test_profile_names_are_short_and_protocol_consistent(
+    factory: Callable[[], Any],
+    expected_name: str,
+) -> None:
+    assert factory().name == expected_name
+
+
 def test_deepseek_profiles_drive_capabilities_without_runtime_special_cases() -> None:
-    thinking_profile = deepseek_openai_chat_profile(thinking=True, effort="high")
-    plain_profile = deepseek_anthropic_profile(thinking=False)
-    openai_model = OpenAIChatCompletionsModel(
+    thinking_profile = deepseek_chat_profile(thinking=True, effort="high")
+    plain_profile = deepseek_messages_profile()
+    chat_model = OpenAIChatModel(
         base_url="https://provider.test",
         api_key="secret",
         model="deepseek",
         profile=thinking_profile,
     )
-    anthropic_model = AnthropicModel(
+    messages_model = AnthropicMessagesModel(
         base_url="https://provider.test",
         api_key="secret",
         model="deepseek",
@@ -109,18 +150,18 @@ def test_deepseek_profiles_drive_capabilities_without_runtime_special_cases() ->
     assert thinking_profile.extra_request_body["reasoning_effort"] == "high"
     assert thinking_profile.reasoning_content_mode == "required_with_tools"
     assert thinking_profile.capabilities.seed is False
-    assert openai_model.capabilities is thinking_profile.capabilities
-    assert openai_model.capabilities.tool_choice_types == frozenset({"auto"})
-    assert openai_model.capabilities.input_modalities == frozenset({"text"})
-    assert openai_model.capabilities.output_modalities == frozenset({"text"})
+    assert chat_model.capabilities is thinking_profile.capabilities
+    assert chat_model.capabilities.tool_choice_types == frozenset({"auto"})
+    assert chat_model.capabilities.input_modalities == frozenset({"text"})
+    assert chat_model.capabilities.output_modalities == frozenset({"text"})
     assert plain_profile.redacted_thinking_mode == "reject"
-    assert anthropic_model.capabilities is plain_profile.capabilities
-    assert anthropic_model.capabilities.input_modalities == frozenset({"text"})
-    assert anthropic_model.capabilities.output_modalities == frozenset({"text"})
+    assert messages_model.capabilities is plain_profile.capabilities
+    assert messages_model.capabilities.input_modalities == frozenset({"text"})
+    assert messages_model.capabilities.output_modalities == frozenset({"text"})
 
 
-def test_openai_profile_validates_every_configuration_family() -> None:
-    profile = OpenAIChatCompletionsProfile(finish_reason_map={"stop": "end_turn"})
+def test_openai_chat_profile_validates_every_configuration_family() -> None:
+    profile = OpenAIChatProfile(finish_reason_map={"stop": "end_turn"})
     assert profile.finish_reason(None) is None
     assert profile.finish_reason("stop") == "end_turn"
     assert profile.finish_reason("length") == "length"
@@ -132,7 +173,7 @@ def test_openai_profile_validates_every_configuration_family() -> None:
         (
             {
                 "capabilities": replace(
-                    OpenAIChatCompletionsProfile().capabilities,
+                    OpenAIChatProfile().capabilities,
                     tool_choice_types=frozenset({"auto", "none"}),
                 ),
                 "automatic_tool_choice_mode": "implicit",
@@ -154,19 +195,19 @@ def test_openai_profile_validates_every_configuration_family() -> None:
     )
     for keywords, error, pattern in invalid:
         with pytest.raises(error, match=pattern):
-            OpenAIChatCompletionsProfile(**cast(Any, keywords))
+            OpenAIChatProfile(**cast(Any, keywords))
 
     for finish_reason_map, message in (
         ({"": "stop"}, "finish_reason_map keys must be non-empty strings"),
         ({"stop": ""}, "finish_reason_map values must be non-empty strings"),
     ):
         with pytest.raises(ValueError) as caught:
-            OpenAIChatCompletionsProfile(finish_reason_map=finish_reason_map)
+            OpenAIChatProfile(finish_reason_map=finish_reason_map)
         assert str(caught.value) == message
 
 
-def test_anthropic_profile_validates_every_configuration_family() -> None:
-    profile = AnthropicProfile(finish_reason_map={"end_turn": "stop"})
+def test_anthropic_messages_profile_validates_every_configuration_family() -> None:
+    profile = AnthropicMessagesProfile(finish_reason_map={"end_turn": "stop"})
     assert profile.finish_reason(None) is None
     assert profile.finish_reason("end_turn") == "stop"
     assert profile.finish_reason("max_tokens") == "max_tokens"
@@ -186,7 +227,7 @@ def test_anthropic_profile_validates_every_configuration_family() -> None:
         ({"seed_field": ""}, ValueError, "seed_field"),
         (
             {
-                "capabilities": replace(AnthropicProfile().capabilities, seed=True),
+                "capabilities": replace(AnthropicMessagesProfile().capabilities, seed=True),
             },
             ValueError,
             "capabilities.seed",
@@ -203,14 +244,14 @@ def test_anthropic_profile_validates_every_configuration_family() -> None:
     )
     for keywords, error, pattern in invalid:
         with pytest.raises(error, match=pattern):
-            AnthropicProfile(**cast(Any, keywords))
+            AnthropicMessagesProfile(**cast(Any, keywords))
 
 
 def test_deepseek_profiles_validate_thinking_and_effort_combinations() -> None:
-    plain = deepseek_openai_chat_profile(thinking=False)
-    openai_thinking = deepseek_openai_chat_profile(thinking=True, effort="high")
-    thinking = deepseek_anthropic_profile(thinking=True, effort="max")
-    assert plain.name.endswith("nonthinking")
+    plain = deepseek_chat_profile()
+    openai_thinking = deepseek_chat_profile(thinking=True, effort="high")
+    thinking = deepseek_messages_profile(thinking=True, effort="max")
+    assert plain.name == "deepseek-chat"
     assert plain.extra_request_body["thinking"] == {"type": "disabled"}
     assert plain.reasoning_content_mode == "live_only"
     assert plain.capabilities.seed is False
@@ -228,15 +269,15 @@ def test_deepseek_profiles_validate_thinking_and_effort_combinations() -> None:
     assert openai_thinking.capabilities.parallel_runtime_tool_call_control is False
     assert openai_thinking.assistant_tool_call_content_mode == "required"
     assert openai_thinking.automatic_tool_choice_mode == "implicit"
-    assert thinking.name.endswith("thinking")
+    assert thinking.name == "deepseek-messages-thinking"
     assert thinking.extra_request_body == {"thinking": {"type": "enabled"}}
     assert thinking.extra_output_config == {"effort": "max"}
     assert thinking.redacted_thinking_mode == "reject"
     with pytest.raises(ValueError, match="thinking must be a bool"):
-        deepseek_openai_chat_profile(thinking=cast(Any, 1))
+        deepseek_chat_profile(thinking=cast(Any, 1))
     with pytest.raises(ValueError, match="effort must be one of"):
-        deepseek_openai_chat_profile(thinking=True, effort=cast(Any, "low"))
-    for factory in (deepseek_openai_chat_profile, deepseek_anthropic_profile):
+        deepseek_chat_profile(thinking=True, effort=cast(Any, "low"))
+    for factory in (deepseek_chat_profile, deepseek_messages_profile):
         with pytest.raises(ValueError, match="only valid"):
             factory(thinking=False, effort="high")
 
@@ -244,7 +285,7 @@ def test_deepseek_profiles_validate_thinking_and_effort_combinations() -> None:
 @pytest.mark.parametrize("effort", ["minimal", "medium"])
 def test_deepseek_responses_rejects_unsupported_effort(effort: str) -> None:
     with pytest.raises(ValueError, match="effort must be one of"):
-        deepseek_openai_responses_profile(effort=cast(Any, effort))
+        deepseek_responses_profile(effort=cast(Any, effort))
 
 
 def test_profiles_expose_only_the_new_capability_contract() -> None:
@@ -256,9 +297,9 @@ def test_profiles_expose_only_the_new_capability_contract() -> None:
     assert responses.include == frozenset({"reasoning.encrypted_content"})
 
     profiles = (
-        OpenAIChatCompletionsProfile(),
+        OpenAIChatProfile(),
         responses,
-        AnthropicProfile(),
+        AnthropicMessagesProfile(),
     )
     removed_fields = (
         "supports_tools",

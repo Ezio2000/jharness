@@ -1,21 +1,21 @@
 """Anthropic Messages model provider adapters."""
 
-from jharness.models.anthropic.errors import AnthropicError
-from jharness.models.anthropic.messages_api.client import AnthropicModel
-from jharness.models.anthropic.messages_api.codec import AnthropicCodec
-from jharness.models.anthropic.messages_api.server_tools import (
-    AnthropicServerToolCodec,
-    AnthropicServerToolRegistry,
-    anthropic_web_search_codec,
+from jharness.models.anthropic.messages.client import AnthropicMessagesModel
+from jharness.models.anthropic.messages.codec import AnthropicMessagesCodec
+from jharness.models.anthropic.messages.errors import AnthropicMessagesError
+from jharness.models.anthropic.messages.profile import AnthropicMessagesProfile
+from jharness.models.anthropic.messages.server_tools import (
+    AnthropicMessagesServerToolCodec,
+    AnthropicMessagesServerToolRegistry,
+    anthropic_messages_web_search_codec,
 )
-from jharness.models.anthropic.profiles import AnthropicProfile
 
 __all__ = [
-    "AnthropicCodec",
-    "AnthropicError",
-    "AnthropicModel",
-    "AnthropicProfile",
-    "AnthropicServerToolCodec",
-    "AnthropicServerToolRegistry",
-    "anthropic_web_search_codec",
+    "AnthropicMessagesCodec",
+    "AnthropicMessagesError",
+    "AnthropicMessagesModel",
+    "AnthropicMessagesProfile",
+    "AnthropicMessagesServerToolCodec",
+    "AnthropicMessagesServerToolRegistry",
+    "anthropic_messages_web_search_codec",
 ]

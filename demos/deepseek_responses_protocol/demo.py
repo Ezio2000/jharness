@@ -60,7 +60,7 @@ from jharness.kernel.wire import (
 from jharness.models.deepseek import (
     DEEPSEEK_RESPONSES_WEB_SEARCH,
     DeepSeekResponsesEffort,
-    deepseek_openai_responses_profile,
+    deepseek_responses_profile,
     deepseek_responses_web_search,
 )
 from jharness.models.openai import OpenAIResponsesModel
@@ -260,7 +260,7 @@ def _model(config: LiveConfig, effort: DeepSeekResponsesEffort | None) -> OpenAI
         base_url=config.base_url,
         api_key=config.api_key,
         model=_MODEL,
-        profile=deepseek_openai_responses_profile(effort=effort),
+        profile=deepseek_responses_profile(effort=effort),
         timeout=config.timeout,
     )
 

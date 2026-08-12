@@ -27,10 +27,23 @@ COMPONENTS = {
 REQUIRED_COMPONENT_FILES: dict[str, set[str]] = {
     "jharness-models": {
         "anthropic/__init__.py",
+        "anthropic/messages/__init__.py",
         "decorators.py",
         "deepseek/__init__.py",
         "openai/__init__.py",
-        "openai/responses_api/__init__.py",
+        "openai/chat/__init__.py",
+        "openai/responses/__init__.py",
+    },
+}
+FORBIDDEN_COMPONENT_PREFIXES: dict[str, set[str]] = {
+    "jharness-models": {
+        "anthropic/errors.py",
+        "anthropic/messages_api/",
+        "anthropic/profiles.py",
+        "openai/chat_completions/",
+        "openai/errors.py",
+        "openai/profiles.py",
+        "openai/responses_api/",
     },
 }
 DEPENDENCIES: dict[str, set[str]] = {
@@ -66,6 +79,15 @@ def _safe_archive_path(name: str) -> PurePosixPath:
     if path.is_absolute() or ".." in path.parts or not path.parts:
         raise ValueError(f"unsafe archive path: {name!r}")
     return path
+
+
+def _reject_forbidden_files(
+    distribution: str,
+    artifact: str,
+    present: set[str],
+) -> None:
+    if present:
+        raise ValueError(f"{distribution} {artifact} contains forbidden files: {sorted(present)}")
 
 
 def _metadata(archive: zipfile.ZipFile) -> Message:
@@ -177,6 +199,15 @@ def _verify_wheel(path: Path) -> Wheel:
         )
         if missing := sorted(required - names):
             raise ValueError(f"{distribution} wheel is missing files: {missing}")
+        forbidden_prefixes = tuple(
+            f"jharness/{component}/{prefix}"
+            for prefix in FORBIDDEN_COMPONENT_PREFIXES.get(distribution, set())
+        )
+        _reject_forbidden_files(
+            distribution,
+            "wheel",
+            {name for name in names if name.startswith(forbidden_prefixes)},
+        )
         if "jharness/__init__.py" in names:
             raise ValueError(f"{distribution} must not own jharness/__init__.py")
         if archive.read(f"{info}/licenses/LICENSE") != ROOT_LICENSE:
@@ -218,6 +249,15 @@ def _verify_sdist(path: Path, *, distribution: str, version: str) -> None:
         )
         if missing := sorted(str(name) for name in required - names):
             raise ValueError(f"{distribution} sdist is missing files: {missing}")
+        forbidden_prefixes = tuple(
+            f"{expected_root}/src/jharness/{component}/{prefix}"
+            for prefix in FORBIDDEN_COMPONENT_PREFIXES.get(distribution, set())
+        )
+        _reject_forbidden_files(
+            distribution,
+            "sdist",
+            {str(name) for name in names if str(name).startswith(forbidden_prefixes)},
+        )
         license_file = archive.extractfile(f"{expected_root}/LICENSE")
         if license_file is None or license_file.read() != ROOT_LICENSE:
             raise ValueError(f"{distribution} sdist LICENSE differs from the repository")

@@ -36,10 +36,21 @@ _MYSQL_IMAGE = (
 _REDIS_IMAGE = "redis:8.4.4@sha256:c44528447fa07ed62bdb0c1944cba54f8cad6a4e4a49ada9d4843b5b07d03227"
 _REQUIRED_MODEL_FILES = {
     "anthropic/__init__.py",
+    "anthropic/messages/__init__.py",
     "decorators.py",
     "deepseek/__init__.py",
     "openai/__init__.py",
-    "openai/responses_api/__init__.py",
+    "openai/chat/__init__.py",
+    "openai/responses/__init__.py",
+}
+_FORBIDDEN_MODEL_FILES = {
+    "anthropic/errors.py",
+    "anthropic/messages_api/client.py",
+    "anthropic/profiles.py",
+    "openai/chat_completions/codec.py",
+    "openai/errors.py",
+    "openai/profiles.py",
+    "openai/responses_api/profile.py",
 }
 
 
@@ -151,7 +162,12 @@ def test_distribution_verifier_rejects_inexact_repository_extras(
         )
 
 
-def _write_models_wheel(path: Path, *, missing_file: str | None = None) -> None:
+def _write_models_wheel(
+    path: Path,
+    *,
+    missing_file: str | None = None,
+    extra_file: str | None = None,
+) -> None:
     info = "jharness_models-0.3.1.dist-info"
     entries: dict[str, str | bytes] = {
         "jharness/models/__init__.py": "",
@@ -170,6 +186,8 @@ def _write_models_wheel(path: Path, *, missing_file: str | None = None) -> None:
     for required_file in _REQUIRED_MODEL_FILES:
         if required_file != missing_file:
             entries[f"jharness/models/{required_file}"] = ""
+    if extra_file is not None:
+        entries[f"jharness/models/{extra_file}"] = ""
     path.parent.mkdir()
     with zipfile.ZipFile(path, mode="w") as archive:
         for name, content in entries.items():
@@ -198,6 +216,21 @@ def test_distribution_verifier_requires_every_public_models_namespace(
         verify_distribution._verify_wheel(  # pyright: ignore[reportPrivateUsage]
             missing
         )
+
+
+@pytest.mark.parametrize("forbidden_file", sorted(_FORBIDDEN_MODEL_FILES))
+def test_distribution_verifier_rejects_legacy_model_namespace_files(
+    tmp_path: Path,
+    forbidden_file: str,
+) -> None:
+    path = tmp_path / "legacy" / "jharness_models-0.3.1-py3-none-any.whl"
+    _write_models_wheel(path, extra_file=forbidden_file)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"jharness-models wheel contains forbidden files: .*{re.escape(forbidden_file)}",
+    ):
+        verify_distribution._verify_wheel(path)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_release_workflow_builds_and_publishes_five_distributions() -> None:
@@ -392,7 +425,7 @@ def test_testpypi_smoke_project_pins_all_distributions() -> None:
     assert "verify_installed_api.py" in script
     assert "from jharness.models.decorators import FallbackModel, RetryingModel" in installed_api
     assert "OpenAIResponsesModel" in installed_api
-    assert "deepseek_openai_responses_profile" in installed_api
+    assert "deepseek_responses_profile" in installed_api
     for namespace in ("jharness.models.anthropic", "jharness.models.deepseek"):
         assert namespace in installed_api
     assert script.count('{{ index = "testpypi" }}') == 5

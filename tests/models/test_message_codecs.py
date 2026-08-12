@@ -15,36 +15,36 @@ from jharness.kernel import (
     ToolFailure,
     ToolSuccess,
 )
-from jharness.models.anthropic import AnthropicError, AnthropicProfile
-from jharness.models.anthropic.messages_api.messages import (
+from jharness.models.anthropic import AnthropicMessagesError, AnthropicMessagesProfile
+from jharness.models.anthropic.messages.messages import (
     decode_content_blocks,
     encode_message,
     encode_messages,
     encode_user_content_part,
 )
-from jharness.models.anthropic.messages_api.tools import (
+from jharness.models.anthropic.messages.tools import (
     decode_tool_uses,
 )
-from jharness.models.anthropic.messages_api.tools import (
+from jharness.models.anthropic.messages.tools import (
     encode_tool_choice as encode_anthropic_choice,
 )
-from jharness.models.anthropic.messages_api.tools import (
+from jharness.models.anthropic.messages.tools import (
     encode_tools as encode_anthropic_tools,
 )
-from jharness.models.openai import OpenAIChatCompletionsError, OpenAIChatCompletionsProfile
-from jharness.models.openai.chat_completions.messages import (
+from jharness.models.openai import OpenAIChatError, OpenAIChatProfile
+from jharness.models.openai.chat.messages import (
     decode_message_content,
     decode_message_refusal,
     encode_chat_message,
     encode_content_part,
 )
-from jharness.models.openai.chat_completions.tools import (
+from jharness.models.openai.chat.tools import (
     decode_tool_calls,
 )
-from jharness.models.openai.chat_completions.tools import (
+from jharness.models.openai.chat.tools import (
     encode_tool_choice as encode_openai_choice,
 )
-from jharness.models.openai.chat_completions.tools import (
+from jharness.models.openai.chat.tools import (
     encode_tools as encode_openai_tools,
 )
 
@@ -59,9 +59,9 @@ def tool_message(call_id: str, *, failure: bool = False) -> Message:
     return Message.tool(call_id, outcome)
 
 
-def test_openai_message_codec_covers_roles_multimodal_and_native_parts() -> None:
-    default = OpenAIChatCompletionsProfile()
-    profile = OpenAIChatCompletionsProfile(
+def test_openai_chat_message_codec_covers_roles_multimodal_and_native_parts() -> None:
+    default = OpenAIChatProfile()
+    profile = OpenAIChatProfile(
         capabilities=replace(
             default.capabilities,
             input_modalities=frozenset({"text", "image", "video", "file"}),
@@ -121,9 +121,9 @@ def test_openai_message_codec_covers_roles_multimodal_and_native_parts() -> None
     assert decode_message_refusal("blocked")[0].type == "refusal"
 
 
-def test_openai_tool_codec_validates_choices_and_arguments() -> None:
+def test_openai_chat_tool_codec_validates_choices_and_arguments() -> None:
     spec = StructuredToolSpec("search", "search", {"type": "object"})
-    profile = OpenAIChatCompletionsProfile()
+    profile = OpenAIChatProfile()
 
     assert encode_openai_tools((spec,), profile)[0]["function"]["name"] == "search"
     assert encode_openai_choice(ToolChoice(), tool_names={"search"}, profile=profile) == "auto"
@@ -150,38 +150,38 @@ def test_openai_tool_codec_validates_choices_and_arguments() -> None:
         StructuredToolCall("call-2", "search", {}),
     ]
 
-    with pytest.raises(OpenAIChatCompletionsError, match="requires at least one"):
+    with pytest.raises(OpenAIChatError, match="requires at least one"):
         encode_openai_choice(ToolChoice("required"), tool_names=set(), profile=profile)
-    with pytest.raises(OpenAIChatCompletionsError, match="unavailable"):
+    with pytest.raises(OpenAIChatError, match="unavailable"):
         encode_openai_choice(
             ToolChoice(type="runtime", name="other"),
             tool_names={"search"},
             profile=profile,
         )
-    with pytest.raises(OpenAIChatCompletionsError, match="invalid JSON"):
+    with pytest.raises(OpenAIChatError, match="invalid JSON"):
         decode_tool_calls([{"id": "call", "function": {"name": "search", "arguments": "{"}}])
 
 
-def test_openai_message_codec_rejects_unsupported_content() -> None:
-    default = OpenAIChatCompletionsProfile()
-    profile = OpenAIChatCompletionsProfile(
+def test_openai_chat_message_codec_rejects_unsupported_content() -> None:
+    default = OpenAIChatProfile()
+    profile = OpenAIChatProfile(
         capabilities=replace(
             default.capabilities,
             input_modalities=frozenset({"text"}),
         ),
     )
-    with pytest.raises(OpenAIChatCompletionsError, match="image input"):
+    with pytest.raises(OpenAIChatError, match="image input"):
         encode_content_part(ContentPart("image", uri="https://x/image"), profile)
-    with pytest.raises(OpenAIChatCompletionsError, match="unsupported content"):
+    with pytest.raises(OpenAIChatError, match="unsupported content"):
         encode_content_part(ContentPart("audio", uri="https://x/audio"), profile)
-    with pytest.raises(OpenAIChatCompletionsError, match="string, array, or null"):
+    with pytest.raises(OpenAIChatError, match="string, array, or null"):
         decode_message_content(3)
-    with pytest.raises(OpenAIChatCompletionsError, match="non-empty"):
+    with pytest.raises(OpenAIChatError, match="non-empty"):
         decode_message_refusal("")
 
 
-def test_anthropic_message_codec_covers_system_tools_and_native_parts() -> None:
-    profile = AnthropicProfile(system_content_mode="blocks")
+def test_anthropic_messages_message_codec_covers_system_tools_and_native_parts() -> None:
+    profile = AnthropicMessagesProfile(system_content_mode="blocks")
     call = StructuredToolCall("call-1", "search", {"q": "x"})
     thinking = ContentPart(
         type="thinking",
@@ -229,8 +229,8 @@ def test_anthropic_message_codec_covers_system_tools_and_native_parts() -> None:
     assert encode_message(Message.external("callback"), profile)["role"] == "user"
 
 
-def test_anthropic_message_codec_guards_redacted_thinking_replay() -> None:
-    default_profile = AnthropicProfile()
+def test_anthropic_messages_message_codec_guards_redacted_thinking_replay() -> None:
+    default_profile = AnthropicMessagesProfile()
     metadata_redacted = ContentPart(
         type="redacted_thinking",
         metadata={"anthropic": {"data": "secret"}},
@@ -240,7 +240,7 @@ def test_anthropic_message_codec_guards_redacted_thinking_replay() -> None:
         default_profile,
     )["content"] == [{"type": "redacted_thinking", "data": "secret"}]
 
-    profile = AnthropicProfile(
+    profile = AnthropicMessagesProfile(
         name="anthropic-without-redacted-thinking",
         redacted_thinking_mode="reject",
     )
@@ -250,7 +250,7 @@ def test_anthropic_message_codec_guards_redacted_thinking_replay() -> None:
         data={"anthropic": {"type": "redacted_thinking", "data": "secret"}},
     )
     for part in (metadata_redacted, native_redacted):
-        with pytest.raises(AnthropicError, match=expected_error):
+        with pytest.raises(AnthropicMessagesError, match=expected_error):
             encode_message(Message.assistant((part,)), profile)
 
     thinking = ContentPart(
@@ -263,8 +263,8 @@ def test_anthropic_message_codec_guards_redacted_thinking_replay() -> None:
     ]
 
 
-def test_anthropic_media_and_tool_choice_codec() -> None:
-    profile = AnthropicProfile()
+def test_anthropic_messages_media_and_tool_choice_codec() -> None:
+    profile = AnthropicMessagesProfile()
     image = ContentPart(
         "image",
         uri="data:image/png;base64,aGVsbG8=",
@@ -306,24 +306,24 @@ def test_anthropic_media_and_tool_choice_codec() -> None:
     ) == {"type": "any", "disable_parallel_tool_use": True}
 
 
-def test_anthropic_codec_rejects_invalid_roles_media_and_blocks() -> None:
-    default = AnthropicProfile()
-    profile = AnthropicProfile(
+def test_anthropic_messages_codec_rejects_invalid_roles_media_and_blocks() -> None:
+    default = AnthropicMessagesProfile()
+    profile = AnthropicMessagesProfile(
         capabilities=replace(
             default.capabilities,
             input_modalities=frozenset({"text"}),
         )
     )
-    with pytest.raises(AnthropicError, match="mid-conversation"):
+    with pytest.raises(AnthropicMessagesError, match="mid-conversation"):
         encode_messages(
             (Message.user("hello"), Message.system("late")),
             profile,
         )
-    with pytest.raises(AnthropicError, match="image input"):
+    with pytest.raises(AnthropicMessagesError, match="image input"):
         encode_user_content_part(ContentPart("image", uri="https://x/image"), profile)
-    with pytest.raises(AnthropicError, match="video input"):
+    with pytest.raises(AnthropicMessagesError, match="video input"):
         encode_user_content_part(ContentPart("video", uri="https://x/video"), profile)
-    with pytest.raises(AnthropicError, match="non-empty text"):
+    with pytest.raises(AnthropicMessagesError, match="non-empty text"):
         decode_content_blocks([{"type": "text", "text": ""}], profile)
-    with pytest.raises(AnthropicError, match="invalid JSON"):
+    with pytest.raises(AnthropicMessagesError, match="invalid JSON"):
         decode_tool_uses([{"id": "call", "name": "tool", "input": "{"}])

@@ -29,7 +29,7 @@ from jharness.kernel import (
 )
 from jharness.models.deepseek import (
     DEEPSEEK_RESPONSES_WEB_SEARCH,
-    deepseek_openai_responses_profile,
+    deepseek_responses_profile,
     deepseek_responses_web_search,
 )
 from jharness.models.openai import OpenAIResponsesCodec, OpenAIResponsesError
@@ -128,7 +128,7 @@ def run_offline_contract() -> OfflineContractReport:
 
 
 def _check_requests(recorder: _Recorder) -> None:
-    profile = deepseek_openai_responses_profile(effort="none")
+    profile = deepseek_responses_profile(effort="none")
     codec = OpenAIResponsesCodec(model=MODEL, profile=profile)
     web_search = deepseek_responses_web_search()
     payload = codec.encode_request(
@@ -262,7 +262,7 @@ def _check_requests(recorder: _Recorder) -> None:
 def _check_responses(recorder: _Recorder) -> None:
     codec = OpenAIResponsesCodec(
         model=MODEL,
-        profile=deepseek_openai_responses_profile(effort="none"),
+        profile=deepseek_responses_profile(effort="none"),
     )
     response = codec.decode_response(_wire_response(_rich_output()))
     recorder.equal(
@@ -365,7 +365,7 @@ def _check_responses(recorder: _Recorder) -> None:
         ),
         (
             "synthetic_failure",
-            "deepseek-openai-responses",
+            "deepseek-responses",
             False,
             {"response_id": "response-contract", "status": "failed"},
         ),
@@ -373,11 +373,11 @@ def _check_responses(recorder: _Recorder) -> None:
 
 
 def _check_rejections(recorder: _Recorder) -> None:
-    profile = deepseek_openai_responses_profile(effort="none")
+    profile = deepseek_responses_profile(effort="none")
     codec = OpenAIResponsesCodec(model=MODEL, profile=profile)
     thinking_codec = OpenAIResponsesCodec(
         model=MODEL,
-        profile=deepseek_openai_responses_profile(effort="high"),
+        profile=deepseek_responses_profile(effort="high"),
     )
     cases: tuple[tuple[str, type[Exception], str, Callable[[], object]], ...] = (
         (
