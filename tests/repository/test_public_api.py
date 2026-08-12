@@ -106,6 +106,8 @@ def test_only_documented_model_namespaces_are_public() -> None:
     assert set(decorators.__all__) == {"FallbackModel", "RetryingModel"}
     expected_exports = {
         "jharness.models.openai": {
+            "OPENAI_RESPONSES_IMAGE_GENERATION",
+            "OPENAI_RESPONSES_WEB_SEARCH",
             "OpenAIChatCodec",
             "OpenAIChatError",
             "OpenAIChatModel",
@@ -120,14 +122,20 @@ def test_only_documented_model_namespaces_are_public() -> None:
             "OpenAIResponsesProviderToolCodec",
             "OpenAIResponsesProviderToolRegistry",
             "OpenAIResponsesWebSearchTool",
+            "openai_responses_image_generation",
+            "openai_responses_profile",
+            "openai_responses_web_search",
         },
         "jharness.models.anthropic": {
+            "ANTHROPIC_MESSAGES_WEB_SEARCH",
             "AnthropicMessagesCodec",
             "AnthropicMessagesError",
             "AnthropicMessagesModel",
             "AnthropicMessagesProfile",
             "AnthropicMessagesServerToolCodec",
             "AnthropicMessagesServerToolRegistry",
+            "anthropic_messages_profile",
+            "anthropic_messages_web_search",
             "anthropic_messages_web_search_codec",
         },
         "jharness.models.deepseek": {

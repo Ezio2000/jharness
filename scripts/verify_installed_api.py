@@ -80,6 +80,8 @@ def _verify_model_namespaces() -> None:
     _require_exports(
         openai,
         {
+            "OPENAI_RESPONSES_IMAGE_GENERATION",
+            "OPENAI_RESPONSES_WEB_SEARCH",
             "OpenAIChatCodec",
             "OpenAIChatError",
             "OpenAIChatModel",
@@ -94,6 +96,9 @@ def _verify_model_namespaces() -> None:
             "OpenAIResponsesProviderToolCodec",
             "OpenAIResponsesProviderToolRegistry",
             "OpenAIResponsesWebSearchTool",
+            "openai_responses_image_generation",
+            "openai_responses_profile",
+            "openai_responses_web_search",
         },
         {
             "ProviderStreamUpdate",
@@ -111,12 +116,15 @@ def _verify_model_namespaces() -> None:
     _require_exports(
         anthropic,
         {
+            "ANTHROPIC_MESSAGES_WEB_SEARCH",
             "AnthropicMessagesCodec",
             "AnthropicMessagesError",
             "AnthropicMessagesModel",
             "AnthropicMessagesProfile",
             "AnthropicMessagesServerToolCodec",
             "AnthropicMessagesServerToolRegistry",
+            "anthropic_messages_profile",
+            "anthropic_messages_web_search",
             "anthropic_messages_web_search_codec",
         },
         {
@@ -172,18 +180,27 @@ def _verify_model_namespaces() -> None:
 
 
 def _load_profiles() -> tuple[object, ...]:
-    from jharness.models.anthropic import AnthropicMessagesProfile
+    from jharness.models.anthropic import (
+        AnthropicMessagesProfile,
+        anthropic_messages_profile,
+    )
     from jharness.models.deepseek import (
         deepseek_chat_profile,
         deepseek_messages_profile,
         deepseek_responses_profile,
     )
-    from jharness.models.openai import OpenAIChatProfile, OpenAIResponsesProfile
+    from jharness.models.openai import (
+        OpenAIChatProfile,
+        OpenAIResponsesProfile,
+        openai_responses_profile,
+    )
 
     profiles = (
         OpenAIChatProfile(),
         OpenAIResponsesProfile(),
+        openai_responses_profile(),
         AnthropicMessagesProfile(),
+        anthropic_messages_profile(),
         deepseek_chat_profile(),
         deepseek_chat_profile(thinking=True),
         deepseek_messages_profile(),
@@ -193,6 +210,8 @@ def _load_profiles() -> tuple[object, ...]:
     expected_types = (
         OpenAIChatProfile,
         OpenAIResponsesProfile,
+        OpenAIResponsesProfile,
+        AnthropicMessagesProfile,
         AnthropicMessagesProfile,
         OpenAIChatProfile,
         OpenAIChatProfile,
@@ -209,6 +228,8 @@ def _load_profiles() -> tuple[object, ...]:
     expected_names = (
         "openai-chat",
         "openai-responses",
+        "openai-responses",
+        "anthropic-messages",
         "anthropic-messages",
         "deepseek-chat",
         "deepseek-chat-thinking",
@@ -219,6 +240,52 @@ def _load_profiles() -> tuple[object, ...]:
     if names != expected_names:
         raise TypeError(f"profile names differ: {names!r}")
     return profiles
+
+
+def _verify_provider_tool_presets() -> tuple[object, ...]:
+    from jharness.models.anthropic import (
+        ANTHROPIC_MESSAGES_WEB_SEARCH,
+        AnthropicMessagesProfile,
+        anthropic_messages_profile,
+        anthropic_messages_web_search,
+    )
+    from jharness.models.openai import (
+        OPENAI_RESPONSES_IMAGE_GENERATION,
+        OPENAI_RESPONSES_WEB_SEARCH,
+        OpenAIResponsesProfile,
+        openai_responses_image_generation,
+        openai_responses_profile,
+        openai_responses_web_search,
+    )
+
+    openai_profile = openai_responses_profile()
+    anthropic_profile = anthropic_messages_profile()
+    openai_tools = frozenset({OPENAI_RESPONSES_WEB_SEARCH, OPENAI_RESPONSES_IMAGE_GENERATION})
+    if OpenAIResponsesProfile().capabilities.provider_tools:
+        raise TypeError("generic OpenAI Responses profile unexpectedly enables provider tools")
+    if AnthropicMessagesProfile().capabilities.provider_tools:
+        raise TypeError("generic Anthropic Messages profile unexpectedly enables provider tools")
+    if openai_profile.capabilities.provider_tools != openai_tools:
+        raise TypeError("OpenAI Responses hosted-tool preset identities differ")
+    if openai_profile.provider_tool_registry.tools != openai_tools:
+        raise TypeError("OpenAI Responses hosted-tool preset registry differs")
+    if anthropic_profile.capabilities.provider_tools != frozenset({ANTHROPIC_MESSAGES_WEB_SEARCH}):
+        raise TypeError("Anthropic Messages hosted-tool preset identities differ")
+    if anthropic_profile.server_tools.tools != frozenset({ANTHROPIC_MESSAGES_WEB_SEARCH}):
+        raise TypeError("Anthropic Messages hosted-tool preset registry differs")
+    specs = (
+        openai_responses_web_search(),
+        openai_responses_image_generation(),
+        anthropic_messages_web_search(),
+    )
+    expected = (
+        OPENAI_RESPONSES_WEB_SEARCH,
+        OPENAI_RESPONSES_IMAGE_GENERATION,
+        ANTHROPIC_MESSAGES_WEB_SEARCH,
+    )
+    if tuple(spec.tool for spec in specs) != expected:
+        raise TypeError("hosted-tool preset specs differ")
+    return specs
 
 
 def main() -> None:
@@ -232,7 +299,11 @@ def main() -> None:
     if not all(isinstance(value, type) for value in public_types):
         raise TypeError("public API smoke targets must all be types")
     profiles = _load_profiles()
-    print(f"installed API ok: types={len(public_types)} profiles={len(profiles)}")
+    presets = _verify_provider_tool_presets()
+    print(
+        "installed API ok: "
+        f"types={len(public_types)} profiles={len(profiles)} presets={len(presets)}"
+    )
 
 
 if __name__ == "__main__":

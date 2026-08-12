@@ -8,6 +8,13 @@ from jharness.models.openai.responses.artifacts import OpenAIResponsesArtifactSt
 from jharness.models.openai.responses.client import OpenAIResponsesModel
 from jharness.models.openai.responses.codec import OpenAIResponsesCodec
 from jharness.models.openai.responses.errors import OpenAIResponsesError
+from jharness.models.openai.responses.presets import (
+    OPENAI_RESPONSES_IMAGE_GENERATION,
+    OPENAI_RESPONSES_WEB_SEARCH,
+    openai_responses_image_generation,
+    openai_responses_profile,
+    openai_responses_web_search,
+)
 from jharness.models.openai.responses.profile import OpenAIResponsesProfile
 from jharness.models.openai.responses.provider_tools import (
     OpenAIResponsesImageGenerationTool,
@@ -18,6 +25,8 @@ from jharness.models.openai.responses.provider_tools import (
 )
 
 __all__ = [
+    "OPENAI_RESPONSES_IMAGE_GENERATION",
+    "OPENAI_RESPONSES_WEB_SEARCH",
     "OpenAIChatCodec",
     "OpenAIChatError",
     "OpenAIChatModel",
@@ -32,4 +41,7 @@ __all__ = [
     "OpenAIResponsesProviderToolRegistry",
     "OpenAIResponsesProviderToolStreamUpdate",
     "OpenAIResponsesWebSearchTool",
+    "openai_responses_image_generation",
+    "openai_responses_profile",
+    "openai_responses_web_search",
 ]

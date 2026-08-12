@@ -12,7 +12,7 @@ Install only what the application uses:
 | --- | --- | --- | --- |
 | `jharness-kernel` | `uv add jharness-kernel` | `jharness.kernel` | Runtime, state, ports, checkpoints, and wire codecs |
 | `jharness-toolkit` | `uv add jharness-toolkit` | `jharness.toolkit` | Tool registry, function adapters, validation, and policies |
-| `jharness-models` | `uv add jharness-models` | `jharness.models` | OpenAI Chat/Responses and Anthropic Messages adapters, DeepSeek profiles, retry, and fallback |
+| `jharness-models` | `uv add jharness-models` | `jharness.models` | OpenAI Chat/Responses and Anthropic Messages adapters, official hosted-tool presets, DeepSeek profiles, retry, and fallback |
 | `jharness-repository` | `uv add jharness-repository` | `jharness.repository` | Memory, SQLite, MySQL, and Redis persistence |
 | `jharness-tools` | `uv add jharness-tools` | `jharness.tools` | Filesystem, shell, interaction, and child-agent tools |
 

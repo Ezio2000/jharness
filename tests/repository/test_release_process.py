@@ -37,11 +37,13 @@ _REDIS_IMAGE = "redis:8.4.4@sha256:c44528447fa07ed62bdb0c1944cba54f8cad6a4e4a49a
 _REQUIRED_MODEL_FILES = {
     "anthropic/__init__.py",
     "anthropic/messages/__init__.py",
+    "anthropic/messages/presets.py",
     "decorators.py",
     "deepseek/__init__.py",
     "openai/__init__.py",
     "openai/chat/__init__.py",
     "openai/responses/__init__.py",
+    "openai/responses/presets.py",
 }
 _FORBIDDEN_MODEL_FILES = {
     "anthropic/errors.py",
@@ -425,6 +427,11 @@ def test_testpypi_smoke_project_pins_all_distributions() -> None:
     assert "verify_installed_api.py" in script
     assert "from jharness.models.decorators import FallbackModel, RetryingModel" in installed_api
     assert "OpenAIResponsesModel" in installed_api
+    assert "openai_responses_profile" in installed_api
+    assert "openai_responses_web_search" in installed_api
+    assert "openai_responses_image_generation" in installed_api
+    assert "anthropic_messages_profile" in installed_api
+    assert "anthropic_messages_web_search" in installed_api
     assert "deepseek_responses_profile" in installed_api
     for namespace in ("jharness.models.anthropic", "jharness.models.deepseek"):
         assert namespace in installed_api
