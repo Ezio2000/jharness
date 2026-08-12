@@ -206,11 +206,18 @@ def _encode_assistant_output(
     def flush_message() -> None:
         nonlocal message_header
         if message_parts:
+            if message_header is None:
+                content = [
+                    {"type": "input_text", "text": part.get("text", part.get("refusal", ""))}
+                    for part in message_parts
+                ]
+            else:
+                content = list(message_parts)
             message = {} if message_header is None else message_header
             message.update(
                 type="message",
                 role="assistant",
-                content=list(message_parts),
+                content=content,
             )
             encoded.append(message)
             message_parts.clear()

@@ -176,6 +176,9 @@ class OpenAIResponsesProfile:
         default_factory=_empty_provider_tool_registry
     )
     freeform_runtime_tool_names: frozenset[str] = field(default_factory=lambda: frozenset[str]())
+    exact_runtime_tool_choice_kinds: frozenset[RuntimeToolKind] = field(
+        default_factory=lambda: frozenset(RuntimeToolKind)
+    )
     emit_freeform_runtime_tool_description: bool = True
     allowed_models: frozenset[str] = field(default_factory=lambda: frozenset[str]())
     extra_request_body: Mapping[str, Any] = field(default_factory=dict[str, Any])
@@ -230,6 +233,12 @@ class OpenAIResponsesProfile:
                 "freeform_runtime_tool_names",
             ),
         )
+        exact_choice_kinds = frozenset(self.exact_runtime_tool_choice_kinds)
+        if not exact_choice_kinds.issubset(capabilities.runtime_tool_kinds):
+            raise ValueError(
+                "exact_runtime_tool_choice_kinds must be a subset of runtime_tool_kinds"
+            )
+        object.__setattr__(self, "exact_runtime_tool_choice_kinds", exact_choice_kinds)
         raw_description_policy = cast(object, self.emit_freeform_runtime_tool_description)
         if not isinstance(raw_description_policy, bool):
             raise TypeError("emit_freeform_runtime_tool_description must be a bool")

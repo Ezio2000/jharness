@@ -107,12 +107,15 @@ class FallbackModel:
         primary = self.primary.capabilities
         backup = self.backup.capabilities
         provider_tools = primary.provider_tools & backup.provider_tools
+        runtime_tool_kinds = primary.runtime_tool_kinds & backup.runtime_tool_kinds
         tool_choice_types = primary.tool_choice_types & backup.tool_choice_types
         if not provider_tools:
             tool_choice_types = tool_choice_types.difference({"provider"})
+        if not runtime_tool_kinds:
+            tool_choice_types = tool_choice_types.difference({"runtime"})
         return ModelCapabilities(
             streaming=primary.streaming and backup.streaming,
-            runtime_tool_kinds=(primary.runtime_tool_kinds & backup.runtime_tool_kinds),
+            runtime_tool_kinds=runtime_tool_kinds,
             tool_choice_types=tool_choice_types,
             parallel_runtime_tool_calls=(
                 primary.parallel_runtime_tool_calls and backup.parallel_runtime_tool_calls

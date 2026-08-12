@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
+
 from jharness.kernel import (
     ContentPart,
     Message,
@@ -15,6 +17,8 @@ from jharness.kernel import (
     ToolChoice,
 )
 from jharness.models.anthropic import AnthropicCodec, AnthropicProfile
+from jharness.models.anthropic.errors import AnthropicError
+from jharness.models.anthropic.messages_api.server_tools import anthropic_web_search_codec
 from jharness.models.anthropic.messages_api.stream import AnthropicStreamDecoder
 from jharness.models.deepseek import deepseek_anthropic_profile
 
@@ -95,6 +99,26 @@ def test_deepseek_anthropic_encodes_web_search_and_exact_provider_choice() -> No
         }
     ]
     assert payload["tool_choice"] == {"type": "tool", "name": "web_search"}
+
+
+def test_anthropic_web_search_limits_response_inclusion_by_variant() -> None:
+    codec = anthropic_web_search_codec(
+        _WEB_SEARCH,
+        variants=frozenset({"web_search_20250305", "web_search_20260318"}),
+    )
+
+    with pytest.raises(AnthropicError, match="unsupported web_search_20250305"):
+        codec.encode_declaration(
+            ProviderToolSpec(_WEB_SEARCH, {"response_inclusion": "all"})
+        )
+
+    declaration = codec.encode_declaration(
+        ProviderToolSpec(
+            _WEB_SEARCH,
+            {"variant": "web_search_20260318", "response_inclusion": "all"},
+        )
+    )
+    assert declaration["response_inclusion"] == "all"
 
 
 def test_anthropic_server_tool_pair_is_terminal_and_provider_only_stop_is_not_pending() -> None:
