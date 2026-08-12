@@ -17,12 +17,12 @@ from jharness.kernel import (
     ModelResponse,
     RunContext,
     Runtime,
+    StructuredToolCall,
+    StructuredToolSpec,
     Suspension,
     SuspensionSelector,
-    ToolCall,
     ToolContext,
     ToolResult,
-    ToolSpec,
     ToolWaiting,
     WaitingResult,
 )
@@ -32,7 +32,7 @@ from jharness.toolkit import ToolRegistry
 
 
 class ExternalWaitTool:
-    spec = ToolSpec(
+    spec = StructuredToolSpec(
         "external_wait",
         "Suspend until a host callback arrives.",
         {
@@ -43,7 +43,7 @@ class ExternalWaitTool:
         },
     )
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         del context
         wait_id = str(call.arguments["wait_id"])
         return WaitingResult(
@@ -68,7 +68,7 @@ class DemoModel:
         del context, stream, emit_delta
         if not any(message.role == "tool" for message in request.messages):
             return ModelResponse(
-                (ToolCall("call-1", "external_wait", {"wait_id": "job-1"}),),
+                (StructuredToolCall("call-1", "external_wait", {"wait_id": "job-1"}),),
                 finish_reason="tool_calls",
             )
         return ModelResponse(

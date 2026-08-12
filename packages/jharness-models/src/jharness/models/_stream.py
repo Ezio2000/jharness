@@ -9,15 +9,18 @@ from typing import Any, NoReturn, cast
 
 from jharness.kernel import (
     ContentPart,
+    FreeformToolCall,
     ModelContentDelta,
     ModelDelta,
     ModelProviderToolCallDelta,
     ModelReasoningDelta,
     ModelResponse,
-    ModelToolCallDelta,
+    ModelRuntimeToolCallDelta,
     ModelUsage,
     ModelUsageDelta,
-    ToolCall,
+    RuntimeToolCall,
+    RuntimeToolKind,
+    StructuredToolCall,
 )
 
 
@@ -30,9 +33,10 @@ class _ContentBuffer:
 
 @dataclass(slots=True)
 class _ToolCallBuffer:
+    input_kind: RuntimeToolKind
     id: str | None = None
     name: str | None = None
-    argument_chunks: list[str] = field(default_factory=list[str])
+    input_chunks: list[str] = field(default_factory=list[str])
 
 
 class DeltaAccumulator:
@@ -48,7 +52,7 @@ class DeltaAccumulator:
     def apply(self, delta: ModelDelta) -> None:
         if isinstance(delta, ModelContentDelta):
             self._apply_content(delta)
-        elif isinstance(delta, ModelToolCallDelta):
+        elif isinstance(delta, ModelRuntimeToolCallDelta):
             self._apply_tool_call(delta)
         elif isinstance(delta, ModelUsageDelta):
             self._usage = (
@@ -106,15 +110,17 @@ class DeltaAccumulator:
         current.text_chunks.append(delta.text_delta)
         current.data.update(delta.data)
 
-    def _apply_tool_call(self, delta: ModelToolCallDelta) -> None:
+    def _apply_tool_call(self, delta: ModelRuntimeToolCallDelta) -> None:
         key = (delta.output_index, -1)
         self._reject_output_kind_conflict(delta.output_index, _ToolCallBuffer)
-        current = self._items.setdefault(key, _ToolCallBuffer())
+        current = self._items.setdefault(key, _ToolCallBuffer(delta.input_kind))
         if not isinstance(current, _ToolCallBuffer):
             self._raise("stream output index changed item kind")
         current.id = self._consistent_value(current.id, delta.id, "id")
         current.name = self._consistent_value(current.name, delta.name, "name")
-        current.argument_chunks.append(delta.arguments_delta)
+        if current.input_kind is not delta.input_kind:
+            self._raise("tool call delta input_kind changed for one index")
+        current.input_chunks.append(delta.input_delta)
 
     def _reject_output_kind_conflict(
         self,
@@ -125,16 +131,23 @@ class DeltaAccumulator:
             if existing_index == output_index and not isinstance(buffer, expected):
                 self._raise("stream output index changed item kind")
 
-    def _build_tool_call(self, buffer: _ToolCallBuffer) -> ToolCall:
+    def _build_tool_call(self, buffer: _ToolCallBuffer) -> RuntimeToolCall:
         if buffer.id is None or buffer.name is None:
             self._raise("streamed tool call requires id and name")
+        raw_input = "".join(buffer.input_chunks)
+        if buffer.input_kind is RuntimeToolKind.FREEFORM:
+            return FreeformToolCall(buffer.id, buffer.name, raw_input)
         try:
-            arguments: object = json.loads("".join(buffer.argument_chunks) or "{}")
+            arguments: object = json.loads(raw_input or "{}")
         except json.JSONDecodeError as exc:
             self._raise("streamed tool arguments must be valid JSON", cause=exc)
         if not isinstance(arguments, Mapping):
             self._raise("streamed tool arguments must be a JSON object")
-        return ToolCall(buffer.id, buffer.name, cast(Mapping[str, Any], arguments))
+        return StructuredToolCall(
+            buffer.id,
+            buffer.name,
+            cast(Mapping[str, Any], arguments),
+        )
 
     def _consistent_value(
         self,

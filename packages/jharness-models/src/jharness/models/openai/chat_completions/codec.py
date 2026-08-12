@@ -11,7 +11,7 @@ from jharness.kernel import (
     ModelResponse,
     ModelUsage,
     ResponseFormat,
-    ToolCall,
+    StructuredToolCall,
     thaw_json_value,
 )
 from jharness.models.openai.chat_completions.messages import (
@@ -64,6 +64,10 @@ class OpenAIChatCompletionsCodec:
         self.profile = profile or OpenAIChatCompletionsProfile()
 
     def encode_request(self, request: ModelRequest, *, stream: bool = False) -> JsonObject:
+        if request.provider_tools:
+            raise OpenAIChatCompletionsError(
+                "Chat Completions does not support provider tool declarations"
+            )
         tools = encode_tools(request.runtime_tools, self.profile)
         payload: JsonObject = {
             "model": request.options.model or self.model,
@@ -110,9 +114,10 @@ class OpenAIChatCompletionsCodec:
         if (
             tools
             and request.tool_choice.type != "none"
-            and self.profile.capabilities.parallel_tool_call_control
+            and request.may_return_runtime_tool_calls
+            and self.profile.capabilities.parallel_runtime_tool_call_control
         ):
-            payload["parallel_tool_calls"] = request.tool_choice.allow_parallel_tool_calls
+            payload["parallel_tool_calls"] = request.tool_choice.allow_parallel_runtime_tool_calls
 
     def _add_response_format(self, payload: JsonObject, request: ModelRequest) -> None:
         if request.response_format is not None:
@@ -127,12 +132,13 @@ class OpenAIChatCompletionsCodec:
                 payload["stream_options"] = {"include_usage": True}
 
     def _add_extra_request_body(self, payload: JsonObject) -> None:
-        for key, value in self.profile.extra_request_body.items():
-            if key in _RESERVED_REQUEST_FIELDS:
-                raise OpenAIChatCompletionsError(
-                    f"extra_request_body cannot set reserved request field: {key}"
-                )
-            payload[key] = value
+        collision = _RESERVED_REQUEST_FIELDS.intersection(self.profile.extra_request_body)
+        if collision:
+            key = min(collision)
+            raise OpenAIChatCompletionsError(
+                f"extra_request_body cannot set reserved request field: {key}"
+            )
+        payload.update(cast(JsonObject, thaw_json_value(self.profile.extra_request_body)))
 
     def decode_response(
         self,
@@ -207,7 +213,7 @@ def _decode_assistant_choice(
 def _decode_assistant_payload(
     message: Mapping[str, Any],
     profile: OpenAIChatCompletionsProfile,
-) -> tuple[list[ContentPart], list[ToolCall]]:
+) -> tuple[list[ContentPart], list[StructuredToolCall]]:
     reasoning_parts = _decode_message_reasoning(
         message.get("reasoning_content"),
         profile,

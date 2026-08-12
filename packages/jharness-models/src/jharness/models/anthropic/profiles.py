@@ -6,13 +6,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
-from jharness.kernel import ModelCapabilities
+from jharness.kernel import ModelCapabilities, RuntimeToolKind
 from jharness.models._profiles import (
     immutable_json_mapping,
     immutable_string_mapping,
     required_string,
     validate_capabilities,
 )
+from jharness.models.anthropic.messages_api.server_tools import AnthropicServerToolRegistry
 
 AnthropicAuthScheme = Literal["x-api-key", "bearer"]
 SystemContentMode = Literal["string", "blocks"]
@@ -21,7 +22,8 @@ MidConversationSystemMode = Literal["encode", "reject"]
 StreamUsageMode = Literal["include", "omit"]
 AutomaticToolChoiceMode = Literal["explicit", "implicit"]
 
-_ANTHROPIC_TOOL_CHOICE_TYPES = frozenset({"auto", "none", "required", "runtime"})
+_ANTHROPIC_TOOL_CHOICE_TYPES = frozenset({"auto", "none", "required", "runtime", "provider"})
+_ANTHROPIC_DEFAULT_TOOL_CHOICE_TYPES = frozenset({"auto", "none", "required", "runtime"})
 _ANTHROPIC_INPUT_MODALITIES = frozenset({"text", "image", "file"})
 _TEXT_OUTPUT_MODALITIES = frozenset({"text"})
 
@@ -29,10 +31,10 @@ _TEXT_OUTPUT_MODALITIES = frozenset({"text"})
 def _anthropic_capabilities() -> ModelCapabilities:
     return ModelCapabilities(
         streaming=True,
-        runtime_tools=True,
-        tool_choice_types=_ANTHROPIC_TOOL_CHOICE_TYPES,
-        parallel_tool_calls=True,
-        parallel_tool_call_control=True,
+        runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED}),
+        tool_choice_types=_ANTHROPIC_DEFAULT_TOOL_CHOICE_TYPES,
+        parallel_runtime_tool_calls=True,
+        parallel_runtime_tool_call_control=True,
         input_modalities=_ANTHROPIC_INPUT_MODALITIES,
         output_modalities=_TEXT_OUTPUT_MODALITIES,
         structured_output=True,
@@ -48,6 +50,7 @@ class AnthropicProfile:
 
     name: str = "anthropic"
     capabilities: ModelCapabilities = field(default_factory=_anthropic_capabilities)
+    server_tools: AnthropicServerToolRegistry = field(default_factory=AnthropicServerToolRegistry)
     anthropic_version: str = "2023-06-01"
     auth_scheme: AnthropicAuthScheme = "x-api-key"
     automatic_tool_choice_mode: AutomaticToolChoiceMode = "explicit"
@@ -73,8 +76,12 @@ class AnthropicProfile:
             input_modalities=_ANTHROPIC_INPUT_MODALITIES,
             output_modalities=_TEXT_OUTPUT_MODALITIES,
         )
-        if capabilities.provider_tools:
-            raise ValueError("Anthropic Messages profiles cannot declare provider tools")
+        if not isinstance(cast(object, self.server_tools), AnthropicServerToolRegistry):
+            raise TypeError("server_tools must be an AnthropicServerToolRegistry")
+        if capabilities.provider_tools != self.server_tools.tools:
+            raise ValueError(
+                "Anthropic capabilities.provider_tools must exactly match the server tool registry"
+            )
         unsupported_choices = capabilities.tool_choice_types.difference(
             _ANTHROPIC_TOOL_CHOICE_TYPES
         )

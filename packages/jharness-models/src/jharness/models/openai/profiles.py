@@ -4,17 +4,21 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from jharness.kernel import ModelCapabilities, ProviderToolId
+from jharness.kernel import ModelCapabilities, RuntimeToolKind
 from jharness.models._profiles import (
     immutable_json_mapping,
     immutable_string_mapping,
-    immutable_string_set_mapping,
     required_string,
     string_set,
     validate_capabilities,
 )
+
+if TYPE_CHECKING:
+    from jharness.models.openai.responses_api.provider_tools import (
+        ResponsesProviderToolRegistry,
+    )
 
 MaxTokensField = Literal["max_tokens", "max_completion_tokens"]
 ReasoningContentMode = Literal["live_only", "round_trip", "required_with_tools"]
@@ -28,34 +32,17 @@ _CHAT_TOOL_CHOICE_TYPES = frozenset({"auto", "none", "required", "runtime"})
 _CHAT_INPUT_MODALITIES = frozenset({"text", "image", "video", "file"})
 _TEXT_OUTPUT_MODALITIES = frozenset({"text"})
 _RESPONSES_TOOL_CHOICE_TYPES = frozenset({"auto", "none", "required", "runtime", "provider"})
+_RESPONSES_DEFAULT_TOOL_CHOICE_TYPES = frozenset({"auto", "none", "required", "runtime"})
 _RESPONSES_INPUT_MODALITIES = frozenset({"text", "image", "file"})
-_RESPONSES_PROVIDER_TOOL_TYPES = frozenset({"image_generation", "web_search"})
-_IMAGE_GENERATION_CONFIGURATION_FIELDS = frozenset(
-    {
-        "action",
-        "background",
-        "input_fidelity",
-        "input_image_mask",
-        "moderation",
-        "output_compression",
-        "output_format",
-        "partial_images",
-        "quality",
-        "size",
-    }
-)
-_WEB_SEARCH_CONFIGURATION_FIELDS = frozenset(
-    {"filters", "search_context_size", "user_location", "variant"}
-)
 
 
 def _openai_chat_capabilities() -> ModelCapabilities:
     return ModelCapabilities(
         streaming=True,
-        runtime_tools=True,
+        runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED}),
         tool_choice_types=_CHAT_TOOL_CHOICE_TYPES,
-        parallel_tool_calls=True,
-        parallel_tool_call_control=True,
+        parallel_runtime_tool_calls=True,
+        parallel_runtime_tool_call_control=True,
         input_modalities=frozenset({"text", "image"}),
         output_modalities=_TEXT_OUTPUT_MODALITIES,
         structured_output=False,
@@ -68,30 +55,29 @@ def _openai_chat_capabilities() -> ModelCapabilities:
 def _openai_responses_capabilities() -> ModelCapabilities:
     return ModelCapabilities(
         streaming=True,
-        runtime_tools=True,
-        tool_choice_types=_RESPONSES_TOOL_CHOICE_TYPES,
-        parallel_tool_calls=True,
-        parallel_tool_call_control=True,
-        input_modalities=frozenset({"text", "image", "file"}),
+        runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED, RuntimeToolKind.FREEFORM}),
+        tool_choice_types=_RESPONSES_DEFAULT_TOOL_CHOICE_TYPES,
+        parallel_runtime_tool_calls=True,
+        parallel_runtime_tool_call_control=True,
+        input_modalities=frozenset({"text"}),
         output_modalities=_TEXT_OUTPUT_MODALITIES,
-        provider_tools=frozenset(
-            {
-                ProviderToolId("openai.responses", "image_generation"),
-                ProviderToolId("openai.responses", "web_search"),
-            }
-        ),
-        structured_output=True,
-        json_mode=True,
+        structured_output=False,
+        json_mode=False,
         seed=False,
         usage_reporting=True,
     )
 
 
-def _openai_responses_tool_configuration() -> Mapping[str, frozenset[str]]:
-    return {
-        "image_generation": _IMAGE_GENERATION_CONFIGURATION_FIELDS,
-        "web_search": _WEB_SEARCH_CONFIGURATION_FIELDS,
-    }
+def _stateless_responses_include() -> frozenset[str]:
+    return frozenset({"reasoning.encrypted_content"})
+
+
+def _empty_provider_tool_registry() -> ResponsesProviderToolRegistry:
+    from jharness.models.openai.responses_api.provider_tools import (
+        ResponsesProviderToolRegistry,
+    )
+
+    return ResponsesProviderToolRegistry()
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,9 +170,13 @@ class OpenAIResponsesProfile:
     name: str = "openai-responses"
     capabilities: ModelCapabilities = field(default_factory=_openai_responses_capabilities)
     reasoning_history_mode: ResponsesReasoningHistoryMode = "summary"
-    provider_tool_configuration_fields: Mapping[str, frozenset[str]] = field(
-        default_factory=_openai_responses_tool_configuration
+    store: bool | None = False
+    include: frozenset[str] = field(default_factory=_stateless_responses_include)
+    provider_tool_registry: ResponsesProviderToolRegistry = field(
+        default_factory=_empty_provider_tool_registry
     )
+    freeform_runtime_tool_names: frozenset[str] = field(default_factory=lambda: frozenset[str]())
+    emit_freeform_runtime_tool_description: bool = True
     allowed_models: frozenset[str] = field(default_factory=lambda: frozenset[str]())
     extra_request_body: Mapping[str, Any] = field(default_factory=dict[str, Any])
     finish_reason_map: Mapping[str, str] = field(
@@ -200,7 +190,6 @@ class OpenAIResponsesProfile:
             profile="Responses",
             input_modalities=_RESPONSES_INPUT_MODALITIES,
             output_modalities=_TEXT_OUTPUT_MODALITIES,
-            allowed_provider_tools=_RESPONSES_PROVIDER_TOOL_TYPES,
         )
         unsupported_choices = capabilities.tool_choice_types.difference(
             _RESPONSES_TOOL_CHOICE_TYPES
@@ -213,30 +202,37 @@ class OpenAIResponsesProfile:
             "reasoning_history_mode",
             {"summary", "content"},
         )
-        configuration_fields = immutable_string_set_mapping(
-            self.provider_tool_configuration_fields,
-            "provider_tool_configuration_fields",
-        )
-        declared_types = {tool.type for tool in capabilities.provider_tools}
-        if set(configuration_fields) != declared_types:
+        raw_store = cast(object, self.store)
+        if raw_store is not None and not isinstance(raw_store, bool):
+            raise TypeError("store must be a bool or None")
+        include = string_set(self.include, "include")
+        if self.store is False and "reasoning.encrypted_content" not in include:
             raise ValueError(
-                "provider_tool_configuration_fields must exactly match declared provider tools"
+                "store=False requires reasoning.encrypted_content for stateless reasoning history"
             )
-        for tool_type, fields in configuration_fields.items():
-            allowed = (
-                _IMAGE_GENERATION_CONFIGURATION_FIELDS
-                if tool_type == "image_generation"
-                else _WEB_SEARCH_CONFIGURATION_FIELDS
+        object.__setattr__(self, "include", include)
+        from jharness.models.openai.responses_api.provider_tools import (
+            ResponsesProviderToolRegistry,
+        )
+
+        raw_registry = cast(object, self.provider_tool_registry)
+        if not isinstance(raw_registry, ResponsesProviderToolRegistry):
+            raise TypeError("provider_tool_registry must be a ResponsesProviderToolRegistry")
+        if self.provider_tool_registry.tools != capabilities.provider_tools:
+            raise ValueError(
+                "provider_tool_registry must exactly match declared provider tool identities"
             )
-            unsupported_fields = fields.difference(allowed)
-            if unsupported_fields:
-                field_name = min(unsupported_fields)
-                raise ValueError(f"unsupported {tool_type} configuration field: {field_name}")
         object.__setattr__(
             self,
-            "provider_tool_configuration_fields",
-            configuration_fields,
+            "freeform_runtime_tool_names",
+            string_set(
+                self.freeform_runtime_tool_names,
+                "freeform_runtime_tool_names",
+            ),
         )
+        raw_description_policy = cast(object, self.emit_freeform_runtime_tool_description)
+        if not isinstance(raw_description_policy, bool):
+            raise TypeError("emit_freeform_runtime_tool_description must be a bool")
         object.__setattr__(
             self,
             "allowed_models",
@@ -261,13 +257,10 @@ class OpenAIResponsesProfile:
             allowed = ", ".join(sorted(self.allowed_models))
             raise ValueError(f"{self.name} only supports models: {allowed}")
 
-    def provider_tool(self, tool_type: str) -> ProviderToolId:
-        """Resolve one Responses wire tool type to its declared provider identity."""
+    def allows_freeform_runtime_tool(self, name: str) -> bool:
+        """Return whether the Responses dialect accepts this custom-tool name."""
 
-        matches = tuple(tool for tool in self.capabilities.provider_tools if tool.type == tool_type)
-        if not matches:
-            raise ValueError(f"{self.name} does not declare provider tool: {tool_type}")
-        return matches[0]
+        return not self.freeform_runtime_tool_names or name in self.freeform_runtime_tool_names
 
     def finish_reason(self, raw: str | None) -> str | None:
         if raw is None:

@@ -28,6 +28,7 @@
               "output": [
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "call-1",
                   "name": "progress",
                   "arguments": {
@@ -45,6 +46,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": null,
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }
@@ -67,6 +69,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": null,
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }

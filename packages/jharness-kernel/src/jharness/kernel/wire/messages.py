@@ -10,13 +10,15 @@ from jharness.kernel.messages import (
     ArtifactRef,
     ContentPart,
     ErrorInfo,
+    FreeformToolCall,
     Message,
     ModelOutputItem,
     ProviderToolCall,
     ProviderToolId,
     ProviderToolStatus,
+    RuntimeToolCall,
+    StructuredToolCall,
     TaskRef,
-    ToolCall,
 )
 from jharness.kernel.tools import ToolAccepted, ToolFailure, ToolOutcome, ToolSuccess, ToolWaiting
 from jharness.kernel.wire._helpers import (
@@ -35,13 +37,13 @@ __all__ = [
     "decode_error_info",
     "decode_message",
     "decode_model_output_item_value",
-    "decode_tool_call",
+    "decode_runtime_tool_call",
     "decode_tool_outcome",
     "encode_content_part",
     "encode_error_info",
     "encode_message",
     "encode_model_output_item",
-    "encode_tool_call",
+    "encode_runtime_tool_call",
     "encode_tool_outcome",
 ]
 
@@ -99,7 +101,9 @@ def decode_message_value(value: object) -> Message:
             decode_model_output_item_value(item)
             for item in array(fields["output"], "assistant output")
         )
-        calls = tuple(item for item in output if isinstance(item, ToolCall | ProviderToolCall))
+        calls = tuple(
+            item for item in output if isinstance(item, RuntimeToolCall | ProviderToolCall)
+        )
         if len({call.id for call in calls}) != len(calls):
             raise ProtocolError(
                 "assistant tool call ids must be unique",
@@ -256,29 +260,53 @@ def _decode_artifact(value: object) -> ArtifactRef:
     )
 
 
-def encode_tool_call(call: ToolCall) -> dict[str, Any]:
-    """Encode one model-requested tool call."""
+def encode_runtime_tool_call(call: RuntimeToolCall) -> dict[str, Any]:
+    """Encode one model-requested runtime tool call."""
 
-    return {
+    common: dict[str, Any] = {
+        "input_kind": "structured" if isinstance(call, StructuredToolCall) else "freeform",
         "id": call.id,
         "name": call.name,
-        "arguments": thaw_object(call.arguments),
     }
+    if isinstance(call, StructuredToolCall):
+        common["arguments"] = thaw_object(call.arguments)
+    else:
+        common["input"] = call.input
+    return common
 
 
-def decode_tool_call(value: object) -> ToolCall:
-    """Decode one portable tool call."""
+def decode_runtime_tool_call(value: object) -> RuntimeToolCall:
+    """Decode one portable runtime tool call."""
 
-    return decode_document(value, "tool call", decode_tool_call_value)
+    return decode_document(value, "runtime tool call", decode_runtime_tool_call_value)
 
 
-def decode_tool_call_value(value: object) -> ToolCall:
-    fields = object_fields(value, "tool call", {"id", "name", "arguments"})
-    return ToolCall(
-        id=string(fields["id"], "tool call id", non_empty=True),
-        name=string(fields["name"], "tool call name", non_empty=True),
-        arguments=json_object(fields["arguments"], "tool call arguments"),
-    )
+def decode_runtime_tool_call_value(value: object) -> RuntimeToolCall:
+    mapping = json_object(value, "runtime tool call")
+    input_kind = string(mapping.get("input_kind"), "runtime tool call input_kind")
+    if input_kind == "structured":
+        fields = object_fields(
+            mapping,
+            "structured runtime tool call",
+            {"input_kind", "id", "name", "arguments"},
+        )
+        return StructuredToolCall(
+            id=string(fields["id"], "tool call id", non_empty=True),
+            name=string(fields["name"], "tool call name", non_empty=True),
+            arguments=json_object(fields["arguments"], "tool call arguments"),
+        )
+    if input_kind == "freeform":
+        fields = object_fields(
+            mapping,
+            "freeform runtime tool call",
+            {"input_kind", "id", "name", "input"},
+        )
+        return FreeformToolCall(
+            id=string(fields["id"], "tool call id", non_empty=True),
+            name=string(fields["name"], "tool call name", non_empty=True),
+            input=string(fields["input"], "tool call input"),
+        )
+    raise ProtocolError(f"runtime tool call input_kind has unsupported value: {input_kind}")
 
 
 def encode_model_output_item(item: ModelOutputItem) -> dict[str, Any]:
@@ -286,8 +314,8 @@ def encode_model_output_item(item: ModelOutputItem) -> dict[str, Any]:
 
     if isinstance(item, ContentPart):
         return {"kind": "content", "content": encode_content_part(item)}
-    if isinstance(item, ToolCall):
-        return {"kind": "runtime_tool_call", **encode_tool_call(item)}
+    if isinstance(item, RuntimeToolCall):
+        return {"kind": "runtime_tool_call", **encode_runtime_tool_call(item)}
     return {
         "kind": "provider_tool_call",
         "id": item.id,
@@ -310,16 +338,9 @@ def decode_model_output_item_value(value: object) -> ModelOutputItem:
         fields = object_fields(mapping, "content output item", {"kind", "content"})
         return decode_content_part_value(fields["content"])
     if kind == "runtime_tool_call":
-        fields = object_fields(
-            mapping,
-            "runtime tool call output item",
-            {"kind", "id", "name", "arguments"},
-        )
-        return ToolCall(
-            id=string(fields["id"], "tool call id", non_empty=True),
-            name=string(fields["name"], "tool call name", non_empty=True),
-            arguments=json_object(fields["arguments"], "tool call arguments"),
-        )
+        fields = dict(mapping)
+        fields.pop("kind")
+        return decode_runtime_tool_call_value(fields)
     if kind != "provider_tool_call":
         raise ProtocolError(f"model output item kind has unsupported value: {kind}")
     fields = object_fields(

@@ -13,6 +13,7 @@ from jharness.kernel._digest import (
     prepend_tool_call_digest,
 )
 from jharness.kernel._validation import (
+    expect_bool,
     expect_instance,
     expect_instance_tuple,
     expect_int,
@@ -21,7 +22,7 @@ from jharness.kernel._validation import (
     freeze_mapping,
 )
 from jharness.kernel.limits import LimitReason
-from jharness.kernel.messages import ContentPart, ErrorInfo, ToolCall
+from jharness.kernel.messages import ContentPart, ErrorInfo, RuntimeToolCall
 from jharness.kernel.models import ModelUsage
 
 
@@ -29,20 +30,28 @@ from jharness.kernel.models import ModelUsage
 class Planning:
     """The next durable step is one model invocation."""
 
+    provider_turn_pending: bool = False
+
     kind: ClassVar[str] = "planning"
+
+    def __post_init__(self) -> None:
+        expect_bool(self.provider_turn_pending, "planning provider_turn_pending")
 
 
 @dataclass(frozen=True, slots=True, init=False, repr=False)
-class PendingToolCalls(Sequence[ToolCall]):
+class PendingToolCalls(Sequence[RuntimeToolCall]):
     """Immutable pending-call cursor with constant-time suffix advancement."""
 
-    _calls: tuple[ToolCall, ...]
+    _calls: tuple[RuntimeToolCall, ...]
     _offset: int
     _digests: tuple[bytes, ...]
     _call_id_digests: tuple[bytes, ...]
 
-    def __init__(self, calls: Sequence[ToolCall]) -> None:
-        normalized = expect_instance_tuple(calls, ToolCall, "pending tool calls")
+    def __init__(self, calls: Sequence[RuntimeToolCall]) -> None:
+        raw_calls = cast(tuple[object, ...], cast(object, tuple(calls)))
+        if any(not isinstance(call, RuntimeToolCall) for call in raw_calls):
+            raise TypeError("pending tool calls must contain RuntimeToolCall values")
+        normalized = cast(tuple[RuntimeToolCall, ...], raw_calls)
         if not normalized:
             raise ValueError("pending tool calls require at least one call")
         ids = tuple(call.id for call in normalized)
@@ -64,16 +73,16 @@ class PendingToolCalls(Sequence[ToolCall]):
     def __len__(self) -> int:
         return len(self._calls) - self._offset
 
-    def __iter__(self) -> Iterator[ToolCall]:
+    def __iter__(self) -> Iterator[RuntimeToolCall]:
         return (self._calls[index] for index in range(self._offset, len(self._calls)))
 
     @overload
-    def __getitem__(self, index: int) -> ToolCall: ...
+    def __getitem__(self, index: int) -> RuntimeToolCall: ...
 
     @overload
-    def __getitem__(self, index: slice) -> tuple[ToolCall, ...]: ...
+    def __getitem__(self, index: slice) -> tuple[RuntimeToolCall, ...]: ...
 
-    def __getitem__(self, index: int | slice) -> ToolCall | tuple[ToolCall, ...]:
+    def __getitem__(self, index: int | slice) -> RuntimeToolCall | tuple[RuntimeToolCall, ...]:
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
             if step == 1:
@@ -118,7 +127,7 @@ class PendingToolCalls(Sequence[ToolCall]):
 
         return self._call_id_digests[self._offset]
 
-    def prefix(self, count: int) -> tuple[ToolCall, ...]:
+    def prefix(self, count: int) -> tuple[RuntimeToolCall, ...]:
         """Materialize at most ``count`` leading calls."""
 
         count = expect_int(count, "pending tool call prefix count")
@@ -126,7 +135,7 @@ class PendingToolCalls(Sequence[ToolCall]):
             raise ValueError("pending tool call prefix count must be >= 0")
         return self._calls[self._offset : self._offset + min(count, len(self))]
 
-    def limit(self, count: int) -> Sequence[ToolCall]:
+    def limit(self, count: int) -> Sequence[RuntimeToolCall]:
         """Return an O(1) sequence view bounded to at most ``count`` calls."""
 
         count = expect_int(count, "pending tool call limit")
@@ -154,7 +163,7 @@ class PendingToolCalls(Sequence[ToolCall]):
 
 
 @dataclass(frozen=True, slots=True, init=False, repr=False)
-class _PendingToolCallWindow(Sequence[ToolCall]):
+class _PendingToolCallWindow(Sequence[RuntimeToolCall]):
     _pending: PendingToolCalls
     _count: int
 
@@ -165,18 +174,18 @@ class _PendingToolCallWindow(Sequence[ToolCall]):
     def __len__(self) -> int:
         return self._count
 
-    def __iter__(self) -> Iterator[ToolCall]:
+    def __iter__(self) -> Iterator[RuntimeToolCall]:
         calls = self._pending._calls  # pyright: ignore[reportPrivateUsage]
         offset = self._pending._offset  # pyright: ignore[reportPrivateUsage]
         return (calls[index] for index in range(offset, offset + self._count))
 
     @overload
-    def __getitem__(self, index: int) -> ToolCall: ...
+    def __getitem__(self, index: int) -> RuntimeToolCall: ...
 
     @overload
-    def __getitem__(self, index: slice) -> tuple[ToolCall, ...]: ...
+    def __getitem__(self, index: slice) -> tuple[RuntimeToolCall, ...]: ...
 
-    def __getitem__(self, index: int | slice) -> ToolCall | tuple[ToolCall, ...]:
+    def __getitem__(self, index: int | slice) -> RuntimeToolCall | tuple[RuntimeToolCall, ...]:
         if isinstance(index, slice):
             start, stop, step = index.indices(self._count)
             if step != 1:
@@ -197,11 +206,13 @@ class ToolsPending:
     """A non-empty model-ordered suffix of tool calls remains."""
 
     pending: PendingToolCalls
+    provider_turn_pending: bool = False
 
     kind: ClassVar[str] = "tools_pending"
 
     def __post_init__(self) -> None:
         expect_instance(self.pending, PendingToolCalls, "pending")
+        expect_bool(self.provider_turn_pending, "tools pending provider_turn_pending")
 
 
 ActiveState: TypeAlias = Planning | ToolsPending

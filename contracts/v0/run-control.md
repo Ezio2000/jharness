@@ -27,7 +27,8 @@ work. If the inherited hard deadline has already expired, resume instead commits
 an acknowledgement or start external work. `Completed`, `Failed`, and `Limited`
 reject continue and resume.
 
-Appended resume messages are valid only when `resume_to` is `Planning`.
+Appended resume messages are valid only when `resume_to` is
+`Planning(provider_turn_pending=false)`.
 
 Only one invocation may own a logical run id at a time. Continue is crash
 recovery, not concurrent execution. Deployment workers fence ownership before
@@ -62,9 +63,13 @@ side-effect boundary.
 
 ### Conversation Insert
 
-An insert during planning cancels the in-flight model operation, appends one
-external message, commits a `conversation_insert` checkpoint, and continues
-planning.
+An insert during interruptible planning cancels the in-flight model operation,
+appends one external message, commits a `conversation_insert` checkpoint, and
+continues planning. During a pending provider turn it remains deferred until
+the provider continuation clears, preserving adjacent protocol history. The
+clearing response is committed as `Planning(false)` while deferred inserts
+remain; those inserts are then committed in arrival order before the next
+model turn.
 
 An insert received during tool execution remains queued until `Planning`. It
 never appears between an assistant runtime-tool request and its tool messages.

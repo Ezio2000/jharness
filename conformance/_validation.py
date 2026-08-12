@@ -15,17 +15,17 @@ from jharness.kernel.wire import (
     decode_message,
     decode_model_response,
     decode_run_request,
+    decode_runtime_tool_spec,
     decode_snapshot,
     decode_state,
     decode_tool_result,
-    decode_tool_spec,
     decode_trace,
 )
 
 _SCHEMAS = {
     "message": "messages.schema.json",
     "model_response": "model-response.schema.json",
-    "tool_spec": "tools.schema.json",
+    "runtime_tool_spec": "tools.schema.json",
     "tool_result": "tool-result.schema.json",
     "state": "state.schema.json",
     "snapshot": "run-snapshot.schema.json",
@@ -61,7 +61,7 @@ def _semantic_validator(target: str) -> Callable[[object], object]:
     return {
         "message": decode_message,
         "model_response": decode_model_response,
-        "tool_spec": decode_tool_spec,
+        "runtime_tool_spec": decode_runtime_tool_spec,
         "tool_result": decode_tool_result,
         "state": decode_state,
         "snapshot": decode_snapshot,

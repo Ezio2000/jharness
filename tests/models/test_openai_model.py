@@ -18,9 +18,9 @@ from jharness.kernel import (
     ModelRequest,
     ResponseFormat,
     RunContext,
-    ToolCall,
+    StructuredToolCall,
+    StructuredToolSpec,
     ToolChoice,
-    ToolSpec,
 )
 from jharness.models.deepseek import deepseek_openai_chat_profile
 from jharness.models.openai import (
@@ -35,12 +35,12 @@ from jharness.models.openai.chat_completions.stream import OpenAIChatStreamDecod
 def request() -> ModelRequest:
     return ModelRequest(
         messages=(Message.system("policy"), Message.user("hello")),
-        runtime_tools=(ToolSpec("search", "search", {"type": "object"}),),
+        runtime_tools=(StructuredToolSpec("search", "search", {"type": "object"}),),
         options=ModelOptions(temperature=0.2, max_output_tokens=50),
         tool_choice=ToolChoice(
             type="runtime",
             name="search",
-            allow_parallel_tool_calls=False,
+            allow_parallel_runtime_tool_calls=False,
         ),
         response_format=ResponseFormat("json_schema", {"type": "object"}, True),
     )
@@ -110,8 +110,27 @@ def test_openai_codec_encodes_direct_tool_identity_and_decodes_response() -> Non
         }
     )
     assert response.visible_parts()[0].text == "checking"
-    assert response.runtime_tool_calls() == (ToolCall("call-1", "search", {"q": "x"}),)
+    assert response.runtime_tool_calls() == (StructuredToolCall("call-1", "search", {"q": "x"}),)
     assert response.usage is not None and response.usage.total_tokens == 5
+
+
+def test_openai_codec_thaws_nested_profile_json_at_wire_boundary() -> None:
+    deepseek_profile = deepseek_openai_chat_profile(thinking=True)
+    codec = OpenAIChatCompletionsCodec(
+        model="deepseek-v4-pro",
+        profile=deepseek_profile,
+    )
+    model_request = ModelRequest(messages=(Message.user("hello"),))
+
+    payload = codec.encode_request(model_request)
+    assert json.loads(json.dumps(payload))["thinking"] == {"type": "enabled"}
+
+    thinking = cast(dict[str, Any], payload["thinking"])
+    thinking["type"] = "disabled"
+    assert codec.encode_request(model_request)["thinking"] == {"type": "enabled"}
+    assert deepseek_profile.extra_request_body["thinking"] == {"type": "enabled"}
+    with pytest.raises(TypeError, match="extra_request_body is immutable"):
+        cast(dict[str, Any], deepseek_profile.extra_request_body["thinking"])["type"] = "disabled"
 
 
 def test_openai_stream_decoder_builds_complete_response() -> None:
@@ -179,7 +198,7 @@ def test_openai_stream_decoder_accumulates_tool_call_arguments() -> None:
     )
 
     assert decoder.completed_response().runtime_tool_calls() == (
-        ToolCall("call-1", "search", {"q": "x"}),
+        StructuredToolCall("call-1", "search", {"q": "x"}),
     )
 
 
@@ -292,7 +311,7 @@ def test_openai_reasoning_content_round_trips_through_history() -> None:
 
 
 def test_openai_reasoning_content_modes_enforce_tool_round_trip() -> None:
-    call = ToolCall("call-1", "search", {})
+    call = StructuredToolCall("call-1", "search", {})
     required = OpenAIChatCompletionsCodec(
         model="gpt-test",
         profile=OpenAIChatCompletionsProfile(reasoning_content_mode="required_with_tools"),
@@ -359,7 +378,7 @@ def test_deepseek_thinking_tool_replay_omits_tool_choice_and_keeps_content_non_n
         model="deepseek-v4-pro",
         profile=deepseek_openai_chat_profile(thinking=True),
     )
-    call = ToolCall("call-1", "search", {})
+    call = StructuredToolCall("call-1", "search", {})
     payload = codec.encode_request(
         ModelRequest(
             messages=(
@@ -368,7 +387,7 @@ def test_deepseek_thinking_tool_replay_omits_tool_choice_and_keeps_content_non_n
                     (ContentPart(type="reasoning", text="why"), call),
                 ),
             ),
-            runtime_tools=(ToolSpec("search", "search", {"type": "object"}),),
+            runtime_tools=(StructuredToolSpec("search", "search", {"type": "object"}),),
         )
     )
 

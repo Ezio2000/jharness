@@ -20,12 +20,12 @@ from jharness.kernel import (
     Planning,
     RunContext,
     Runtime,
+    StructuredToolCall,
     Suspended,
     Suspension,
     SuspensionView,
     TaskRef,
     ToolBatchFact,
-    ToolCall,
     ToolOutcomeKind,
     ToolsPending,
     ToolSuccess,
@@ -223,7 +223,7 @@ def test_extract_agent_wait_rejects_wrong_type() -> None:
 
 
 def test_current_waiting_outcome_defenses() -> None:
-    call = ToolCall(
+    call = StructuredToolCall(
         "call-1",
         "Agent",
         {"description": "Inspect", "prompt": "Do it"},
@@ -275,7 +275,9 @@ def test_current_waiting_outcome_defenses() -> None:
             "call-1",
             "Agent",
         )
-    wrong_call = Message.assistant((ToolCall("call-1", "AgentWait", {"agent_id": "agent-1"}),))
+    wrong_call = Message.assistant(
+        (StructuredToolCall("call-1", "AgentWait", {"agent_id": "agent-1"}),)
+    )
     with pytest.raises(ValueError, match="wrong identity"):
         agent_response._current_waiting_outcome(
             cast(
@@ -330,7 +332,7 @@ def test_agent_suspension_defenses() -> None:
             cast(Any, SimpleNamespace(snapshot=SimpleNamespace(state=wrong)))
         )
     pending = Suspended(
-        ToolsPending(PendingToolCalls((ToolCall("next", "Read", {}),))),
+        ToolsPending(PendingToolCalls((StructuredToolCall("next", "Read", {}),))),
         Suspension("agent_completion", "Agent", "wait"),
     )
     with pytest.raises(ValueError, match="resume to Planning"):
@@ -399,7 +401,7 @@ def test_suspension_contract_defenses() -> None:
 
 def test_validate_waiting_identity_and_call_defenses() -> None:
     snapshot = _running()
-    agent_call = ToolCall(
+    agent_call = StructuredToolCall(
         "call-1",
         "Agent",
         {"description": "Inspect", "prompt": "Do it"},
@@ -429,7 +431,7 @@ def test_validate_waiting_identity_and_call_defenses() -> None:
         with pytest.raises(ValueError, match=pattern):
             agent_response._validate_waiting_identity(
                 waiting,
-                ToolCall("call-1", "Agent", arguments),
+                StructuredToolCall("call-1", "Agent", arguments),
                 snapshot,
                 "agent-1",
             )
@@ -442,13 +444,13 @@ def test_validate_waiting_identity_and_call_defenses() -> None:
         with pytest.raises(ValueError, match=pattern):
             agent_response._validate_waiting_identity(
                 waiting,
-                ToolCall("call-1", "AgentWait", arguments),
+                StructuredToolCall("call-1", "AgentWait", arguments),
                 snapshot,
                 "agent-1",
             )
     agent_response._validate_waiting_identity(
         waiting,
-        ToolCall("call-1", "AgentWait", {"agent_id": "agent-1"}),
+        StructuredToolCall("call-1", "AgentWait", {"agent_id": "agent-1"}),
         snapshot,
         "agent-1",
     )

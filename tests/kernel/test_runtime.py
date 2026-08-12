@@ -44,12 +44,14 @@ from jharness.kernel import (
     RunRepository,
     RunSnapshot,
     Runtime,
+    RuntimeToolCall,
     SettledResult,
+    StructuredToolCall,
+    StructuredToolSpec,
     Suspended,
     Suspension,
     SuspensionSelector,
     ToolBinding,
-    ToolCall,
     ToolCatalog,
     ToolCatalogProvider,
     ToolChoice,
@@ -57,7 +59,6 @@ from jharness.kernel import (
     ToolExecution,
     ToolFailure,
     ToolResult,
-    ToolSpec,
     ToolSuccess,
     ToolWaiting,
     WaitingResult,
@@ -129,17 +130,19 @@ ToolEffect = Callable[[ToolContext], Awaitable[ToolResult]]
 class Binding:
     __slots__ = ("_call", "_effect", "_spec")
 
-    def __init__(self, call: ToolCall, spec: ToolSpec, effect: ToolEffect) -> None:
+    def __init__(
+        self, call: StructuredToolCall, spec: StructuredToolSpec, effect: ToolEffect
+    ) -> None:
         self._call = call
         self._spec = spec
         self._effect = effect
 
     @property
-    def call(self) -> ToolCall:
+    def call(self) -> StructuredToolCall:
         return self._call
 
     @property
-    def spec(self) -> ToolSpec:
+    def spec(self) -> StructuredToolSpec:
         return self._spec
 
     async def invoke(self, context: ToolContext) -> ToolResult:
@@ -147,17 +150,19 @@ class Binding:
 
 
 class Catalog(ToolCatalog):
-    def __init__(self, effects: Mapping[str, tuple[ToolSpec, ToolEffect]]) -> None:
+    def __init__(self, effects: Mapping[str, tuple[StructuredToolSpec, ToolEffect]]) -> None:
         self.effects = dict(effects)
 
-    def specs(self) -> tuple[ToolSpec, ...]:
+    def specs(self) -> tuple[StructuredToolSpec, ...]:
         return tuple(spec for spec, _ in self.effects.values())
 
-    def spec(self, name: str) -> ToolSpec | None:
+    def spec(self, name: str) -> StructuredToolSpec | None:
         item = self.effects.get(name)
         return None if item is None else item[0]
 
-    def bind(self, call: ToolCall) -> ToolBinding:
+    def bind(self, call: RuntimeToolCall) -> ToolBinding:
+        if not isinstance(call, StructuredToolCall):
+            raise TypeError("test catalog accepts structured calls only")
         spec, effect = self.effects[call.name]
         return Binding(call, spec, effect)
 
@@ -185,7 +190,7 @@ def tool_provider(
     execution: ToolExecution | None = None,
     name: str = "lookup",
 ) -> CatalogProvider:
-    spec = ToolSpec(
+    spec = StructuredToolSpec(
         name,
         "Lookup",
         {"type": "object"},
@@ -202,7 +207,7 @@ async def collect(invocation: Invocation) -> tuple[Checkpoint, list[Event]]:
 
 
 def test_start_rejects_invalid_planning_history_before_creating_invocation() -> None:
-    call = ToolCall("call-1", "lookup")
+    call = StructuredToolCall("call-1", "lookup")
     model = ScriptModel([final()])
 
     with pytest.raises(ValueError, match="unresolved"):
@@ -232,7 +237,7 @@ async def test_final_run_result_and_events_share_one_execution() -> None:
 
 async def test_model_request_receives_complete_history() -> None:
     messages = tuple(Message.user(str(index)) for index in range(256))
-    call = ToolCall("call-complete-history", "lookup")
+    call = StructuredToolCall("call-complete-history", "lookup")
     model = ScriptModel([ModelResponse((call,)), final()])
 
     checkpoint = await Runtime(model=model, tools=tool_provider()).start(messages).result()
@@ -261,22 +266,110 @@ async def test_runtime_rejects_unsupported_exact_tool_choice_before_invocation()
 async def test_runtime_rejects_unsupported_parallel_control_before_invocation() -> None:
     model = ScriptModel(
         [final()],
-        capabilities=ModelCapabilities(parallel_tool_call_control=False),
+        capabilities=ModelCapabilities(parallel_runtime_tool_call_control=False),
     )
 
     checkpoint = (
         await Runtime(
             model=model,
             tools=tool_provider(),
-            tool_choice=ToolChoice(allow_parallel_tool_calls=False),
+            tool_choice=ToolChoice(allow_parallel_runtime_tool_calls=False),
         )
         .start((Message.user("hello"),))
         .result()
     )
 
     assert isinstance(checkpoint.snapshot.state, Failed)
-    assert checkpoint.snapshot.state.error.message == "model cannot disable parallel tool calls"
+    assert (
+        checkpoint.snapshot.state.error.message
+        == "model cannot disable parallel runtime tool calls"
+    )
     assert model.requests == []
+
+
+async def test_runtime_accepts_serial_request_when_model_cannot_call_in_parallel() -> None:
+    model = ScriptModel(
+        [final()],
+        capabilities=ModelCapabilities(
+            parallel_runtime_tool_calls=False,
+            parallel_runtime_tool_call_control=False,
+        ),
+    )
+
+    checkpoint = (
+        await Runtime(
+            model=model,
+            tools=tool_provider(),
+            tool_choice=ToolChoice(allow_parallel_runtime_tool_calls=False),
+        )
+        .start((Message.user("hello"),))
+        .result()
+    )
+
+    assert checkpoint.snapshot.status == "completed"
+    assert len(model.requests) == 1
+
+
+async def test_provider_tool_selection_ignores_runtime_parallel_control() -> None:
+    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    provider_call = ProviderToolCall(
+        "search-1",
+        provider_id,
+        ProviderToolStatus.COMPLETED,
+        {"query": "JHarness"},
+    )
+    model = ScriptModel(
+        [ModelResponse((provider_call,))],
+        capabilities=ModelCapabilities(
+            tool_choice_types=frozenset({"auto", "none", "required", "runtime", "provider"}),
+            parallel_runtime_tool_calls=True,
+            parallel_runtime_tool_call_control=False,
+            provider_tools=frozenset({provider_id}),
+        ),
+    )
+
+    checkpoint = (
+        await Runtime(
+            model=model,
+            tools=tool_provider(),
+            provider_tools=(ProviderToolSpec(provider_id),),
+            tool_choice=ToolChoice(
+                "provider",
+                provider_tool=provider_id,
+                allow_parallel_runtime_tool_calls=False,
+            ),
+        )
+        .start((Message.user("search"),))
+        .result()
+    )
+
+    assert checkpoint.snapshot.status == "completed"
+    assert len(model.requests) == 1
+
+
+async def test_provider_only_request_ignores_runtime_parallel_control() -> None:
+    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    model = ScriptModel(
+        [final()],
+        capabilities=ModelCapabilities(
+            parallel_runtime_tool_calls=True,
+            parallel_runtime_tool_call_control=False,
+            provider_tools=frozenset({provider_id}),
+        ),
+    )
+
+    checkpoint = (
+        await Runtime(
+            model=model,
+            provider_tools=(ProviderToolSpec(provider_id),),
+            tool_choice=ToolChoice(allow_parallel_runtime_tool_calls=False),
+        )
+        .start((Message.user("search"),))
+        .result()
+    )
+
+    assert checkpoint.snapshot.status == "completed"
+    assert len(model.requests) == 1
 
 
 async def test_runtime_rejects_unsupported_seed_before_invocation() -> None:
@@ -342,7 +435,7 @@ async def test_provider_only_output_completes_with_empty_visible_projection() ->
     model = ScriptModel(
         [ModelResponse(calls)],
         capabilities=ModelCapabilities(
-            parallel_tool_calls=False,
+            parallel_runtime_tool_calls=False,
             provider_tools=frozenset({provider_id}),
         ),
     )
@@ -350,7 +443,7 @@ async def test_provider_only_output_completes_with_empty_visible_projection() ->
         Runtime(
             model=model,
             provider_tools=(ProviderToolSpec(provider_id),),
-            tool_choice=ToolChoice(allow_parallel_tool_calls=False),
+            tool_choice=ToolChoice(allow_parallel_runtime_tool_calls=False),
         ).start((Message.user("search only"),))
     )
 
@@ -413,7 +506,7 @@ async def test_mixed_provider_and_runtime_calls_schedule_only_runtime_call() -> 
         provider_id,
         ProviderToolStatus.COMPLETED,
     )
-    runtime_call = ToolCall("runtime-1", "lookup", {"query": "JHarness"})
+    runtime_call = StructuredToolCall("runtime-1", "lookup", {"query": "JHarness"})
     model = ScriptModel(
         [ModelResponse((provider_call, runtime_call)), final()],
         capabilities=ModelCapabilities(provider_tools=frozenset({provider_id})),
@@ -465,11 +558,17 @@ def test_runtime_rejects_invalid_static_provider_configuration() -> None:
         )
 
 
-async def test_terminal_response_rejects_in_progress_provider_call() -> None:
+async def test_pending_provider_turn_continues_with_adjacent_history() -> None:
     provider_id = ProviderToolId("deepseek.responses", "web_search")
     call = ProviderToolCall("search-running", provider_id, ProviderToolStatus.IN_PROGRESS)
     model = ScriptModel(
-        [ModelResponse((call, ContentPart.text_part("premature")))],
+        [
+            ModelResponse(
+                (call, ContentPart.text_part("working")),
+                provider_turn_pending=True,
+            ),
+            final("done"),
+        ],
         capabilities=ModelCapabilities(provider_tools=frozenset({provider_id})),
     )
     checkpoint = (
@@ -481,8 +580,85 @@ async def test_terminal_response_rejects_in_progress_provider_call() -> None:
         .result()
     )
 
-    assert isinstance(checkpoint.snapshot.state, Failed)
-    assert checkpoint.snapshot.state.error.code == "model_protocol_error"
+    assert isinstance(checkpoint.snapshot.state, Completed)
+    assert len(model.requests) == 2
+    assert model.requests[1].messages[-1].provider_tool_calls() == (call,)
+    assert checkpoint.snapshot.metrics.planning_steps == 2
+
+
+async def test_pending_provider_turn_defers_insert_until_continuation_clears() -> None:
+    provider_id = ProviderToolId("fixture.provider", "search")
+    provider_call = ProviderToolCall(
+        "search-running",
+        provider_id,
+        ProviderToolStatus.IN_PROGRESS,
+    )
+
+    class DeferredInsertModel(Model):
+        def __init__(self) -> None:
+            self.requests: list[ModelRequest] = []
+            self.continuation_started = asyncio.Event()
+            self.release_continuation = asyncio.Event()
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities(provider_tools=frozenset({provider_id}))
+
+        async def invoke(
+            self,
+            request: ModelRequest,
+            context: RunContext,
+            *,
+            stream: bool,
+            emit_delta: DeltaSink | None,
+        ) -> ModelResponse:
+            del context, stream, emit_delta
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ModelResponse((provider_call,), provider_turn_pending=True)
+            if len(self.requests) == 2:
+                self.continuation_started.set()
+                await self.release_continuation.wait()
+                return final("provider continuation complete")
+            return final("after deferred insert")
+
+    model = DeferredInsertModel()
+    invocation = Runtime(
+        model=model,
+        provider_tools=(ProviderToolSpec(provider_id),),
+    ).start((Message.user("search"),))
+    collect_task = asyncio.create_task(collect(invocation))
+    await model.continuation_started.wait()
+    invocation.insert(Message.external("live context"))
+    await asyncio.sleep(0)
+    model.release_continuation.set()
+    checkpoint, events = await collect_task
+
+    assert isinstance(checkpoint.snapshot.state, Completed)
+    assert checkpoint.snapshot.metrics.planning_steps == 3
+    assert [message.role for message in checkpoint.snapshot.history] == [
+        "user",
+        "assistant",
+        "assistant",
+        "external",
+        "assistant",
+    ]
+    assert [[message.role for message in request.messages] for request in model.requests] == [
+        ["user"],
+        ["user", "assistant"],
+        ["user", "assistant", "assistant", "external"],
+    ]
+    model_turns = [
+        event.data["fact"]["data"]
+        for event in events
+        if event.kind is EventKind.CHECKPOINT_COMMITTED
+        and event.data["fact"]["kind"] == "model_turn"
+    ]
+    assert [(fact["result"], fact["provider_turn_pending"]) for fact in model_turns] == [
+        ("planning", True),
+        ("planning", False),
+        ("completed", False),
+    ]
 
 
 async def test_result_only_rejects_late_event_subscription() -> None:
@@ -522,7 +698,7 @@ async def test_finished_invocation_discards_all_control_operations() -> None:
 
 
 async def test_tool_result_is_committed_in_model_order() -> None:
-    call = ToolCall("call-1", "lookup", {"q": "x"})
+    call = StructuredToolCall("call-1", "lookup", {"q": "x"})
     model = ScriptModel([ModelResponse((call,)), final()])
     checkpoint, events = await collect(
         Runtime(model=model, tools=tool_provider()).start((Message.user("go"),))
@@ -546,9 +722,9 @@ async def test_tool_result_is_committed_in_model_order() -> None:
 async def test_serial_tool_batches_do_not_materialize_the_remaining_suffix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = tuple(ToolCall(f"call-{index}", "lookup") for index in range(40))
+    calls = tuple(StructuredToolCall(f"call-{index}", "lookup") for index in range(40))
 
-    def fail_prefix(_: PendingToolCalls, _count: int) -> tuple[ToolCall, ...]:
+    def fail_prefix(_: PendingToolCalls, _count: int) -> tuple[StructuredToolCall, ...]:
         raise AssertionError("tool selection materialized the pending suffix")
 
     monkeypatch.setattr(PendingToolCalls, "prefix", fail_prefix)
@@ -576,7 +752,7 @@ async def test_waiting_result_suspends_and_exact_resume_completes() -> None:
         del context
         return WaitingResult(ToolWaiting((ContentPart.text_part("waiting"),)), suspension)
 
-    call = ToolCall("call-1", "lookup")
+    call = StructuredToolCall("call-1", "lookup")
     model = ScriptModel([ModelResponse((call,)), final("resumed")])
     runtime = Runtime(model=model, tools=tool_provider(waiting))
     paused = await runtime.start((Message.user("go"),)).result()
@@ -791,7 +967,7 @@ async def test_approval_deny_is_model_visible_and_suspend_invokes_nothing() -> N
         invoked += 1
         return SettledResult(ToolSuccess((ContentPart.text_part("unexpected"),)))
 
-    call = ToolCall("call-1", "lookup")
+    call = StructuredToolCall("call-1", "lookup")
     denied_model = ScriptModel([ModelResponse((call,)), final()])
     denied = (
         await Runtime(

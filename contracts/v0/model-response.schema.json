@@ -3,7 +3,7 @@
   "$id": "https://jharness.invalid/spec/v0/model-response.schema.json",
   "title": "Kernel v0 Model Response",
   "type": "object",
-  "required": ["output", "finish_reason", "usage", "model_id", "response_id", "metadata"],
+  "required": ["output", "finish_reason", "usage", "model_id", "response_id", "provider_turn_pending", "metadata"],
   "properties": {
     "output": {
       "type": "array",
@@ -20,8 +20,36 @@
     },
     "model_id": { "type": ["string", "null"] },
     "response_id": { "type": ["string", "null"] },
+    "provider_turn_pending": { "type": "boolean" },
     "metadata": { "type": "object" }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "provider_turn_pending": { "const": false } },
+        "required": ["provider_turn_pending"]
+      },
+      "then": {
+        "properties": {
+          "output": {
+            "not": {
+              "contains": {
+                "allOf": [
+                  {
+                    "$ref": "messages.schema.json#/$defs/provider_tool_call_output_item"
+                  },
+                  {
+                    "properties": { "status": { "const": "in_progress" } },
+                    "required": ["status"]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "model_usage": {
       "type": "object",

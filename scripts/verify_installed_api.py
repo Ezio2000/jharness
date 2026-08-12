@@ -15,6 +15,7 @@ def _load_required_types() -> tuple[object, ...]:
         OpenAIChatCompletionsProfile,
         OpenAIResponsesModel,
         OpenAIResponsesProfile,
+        ResponsesArtifactStore,
     )
     from jharness.repository import (
         MemoryRunRepository,
@@ -35,6 +36,7 @@ def _load_required_types() -> tuple[object, ...]:
         OpenAIChatCompletionsProfile,
         OpenAIResponsesModel,
         OpenAIResponsesProfile,
+        ResponsesArtifactStore,
         MemoryRunRepository,
         MySQLRunRepository,
         RedisRunRepository,

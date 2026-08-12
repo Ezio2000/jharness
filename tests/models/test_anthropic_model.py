@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, cast
 
 import httpx
@@ -18,9 +19,9 @@ from jharness.kernel import (
     ModelUsageDelta,
     ResponseFormat,
     RunContext,
-    ToolCall,
+    StructuredToolCall,
+    StructuredToolSpec,
     ToolChoice,
-    ToolSpec,
 )
 from jharness.models.anthropic import (
     AnthropicCodec,
@@ -34,12 +35,12 @@ from jharness.models.anthropic.messages_api.stream import AnthropicStreamDecoder
 def request() -> ModelRequest:
     return ModelRequest(
         messages=(Message.system("policy"), Message.user("hello")),
-        runtime_tools=(ToolSpec("search", "search", {"type": "object"}),),
+        runtime_tools=(StructuredToolSpec("search", "search", {"type": "object"}),),
         options=ModelOptions(max_output_tokens=50),
         tool_choice=ToolChoice(
             type="runtime",
             name="search",
-            allow_parallel_tool_calls=False,
+            allow_parallel_runtime_tool_calls=False,
         ),
         response_format=ResponseFormat(
             "json_schema",
@@ -102,8 +103,62 @@ def test_anthropic_codec_encodes_tools_and_decodes_blocks() -> None:
         }
     )
     assert response.visible_parts()[0].text == "checking"
-    assert response.runtime_tool_calls() == (ToolCall("call-1", "search", {"q": "x"}),)
+    assert response.runtime_tool_calls() == (StructuredToolCall("call-1", "search", {"q": "x"}),)
     assert response.usage is not None and response.usage.total_tokens == 5
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    (None, ResponseFormat("json_object")),
+    ids=("extra-only", "with-json-object"),
+)
+def test_anthropic_codec_thaws_nested_profile_json_at_wire_boundary(
+    response_format: ResponseFormat | None,
+) -> None:
+    default_profile = AnthropicProfile()
+    anthropic_profile = AnthropicProfile(
+        capabilities=replace(default_profile.capabilities, json_mode=True),
+        json_object_schema={
+            "type": "object",
+            "properties": {"values": {"type": "array", "items": {"type": "string"}}},
+        },
+        extra_output_config={"thinking": {"budgets": [1024]}},
+        extra_request_body={"thinking": {"type": "enabled", "modes": ["interleaved"]}},
+    )
+    codec = AnthropicCodec(model="claude-test", profile=anthropic_profile)
+    model_request = ModelRequest(
+        messages=(Message.user("hello"),),
+        response_format=response_format,
+    )
+
+    payload = codec.encode_request(model_request)
+    serialized = json.loads(json.dumps(payload))
+    assert serialized["thinking"] == {
+        "type": "enabled",
+        "modes": ["interleaved"],
+    }
+    assert serialized["output_config"]["thinking"] == {"budgets": [1024]}
+    if response_format is not None:
+        assert serialized["output_config"]["format"]["schema"] == {
+            "type": "object",
+            "properties": {"values": {"type": "array", "items": {"type": "string"}}},
+        }
+
+    cast(list[str], cast(dict[str, Any], payload["thinking"])["modes"]).append("changed")
+    output_config = cast(dict[str, Any], payload["output_config"])
+    cast(list[int], cast(dict[str, Any], output_config["thinking"])["budgets"]).append(2048)
+    fresh_payload = codec.encode_request(model_request)
+    assert fresh_payload["thinking"] == {
+        "type": "enabled",
+        "modes": ["interleaved"],
+    }
+    assert cast(dict[str, Any], fresh_payload["output_config"])["thinking"] == {"budgets": [1024]}
+    assert anthropic_profile.extra_request_body["thinking"] == {
+        "type": "enabled",
+        "modes": ["interleaved"],
+    }
+    with pytest.raises(TypeError, match="extra_output_config is immutable"):
+        cast(list[int], anthropic_profile.extra_output_config["thinking"]["budgets"]).append(2048)
 
 
 def test_anthropic_stream_decoder_builds_complete_response() -> None:
@@ -255,7 +310,7 @@ def test_anthropic_stream_decoder_accumulates_tool_input() -> None:
     decoder.apply_event("message_stop", {"type": "message_stop"})
 
     assert decoder.completed_response().runtime_tool_calls() == (
-        ToolCall("call-1", "search", {"q": "x"}),
+        StructuredToolCall("call-1", "search", {"q": "x"}),
     )
 
 

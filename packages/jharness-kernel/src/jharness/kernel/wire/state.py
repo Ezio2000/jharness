@@ -21,6 +21,7 @@ from jharness.kernel.state import (
 )
 from jharness.kernel.wire._helpers import (
     array,
+    boolean,
     decode_document,
     enum_string,
     integer,
@@ -33,10 +34,10 @@ from jharness.kernel.wire._helpers import (
 from jharness.kernel.wire.messages import (
     decode_content_part_value,
     decode_error_info_value,
-    decode_tool_call_value,
+    decode_runtime_tool_call_value,
     encode_content_part,
     encode_error_info,
-    encode_tool_call,
+    encode_runtime_tool_call,
 )
 from jharness.kernel.wire.models import decode_model_usage_value, encode_model_usage
 
@@ -84,9 +85,16 @@ def decode_suspension_value(value: object) -> Suspension:
 
 def encode_state(value: RunState) -> dict[str, Any]:
     if isinstance(value, Planning):
-        return {"kind": "planning"}
+        return {
+            "kind": "planning",
+            "provider_turn_pending": value.provider_turn_pending,
+        }
     if isinstance(value, ToolsPending):
-        return {"kind": "tools_pending", "pending": [encode_tool_call(x) for x in value.pending]}
+        return {
+            "kind": "tools_pending",
+            "pending": [encode_runtime_tool_call(x) for x in value.pending],
+            "provider_turn_pending": value.provider_turn_pending,
+        }
     if isinstance(value, Suspended):
         return {
             "kind": "suspended",
@@ -110,12 +118,25 @@ def decode_state_value(value: object) -> RunState:
         raise ProtocolError("run state is missing field(s): kind")
     kind = enum_string(raw["kind"], "run state kind", _STATE_KINDS)
     if kind == "planning":
-        object_fields(raw, "planning state", frozenset({"kind"}))
-        return Planning()
+        data = object_fields(
+            raw,
+            "planning state",
+            frozenset({"kind", "provider_turn_pending"}),
+        )
+        return Planning(boolean(data["provider_turn_pending"], "provider_turn_pending"))
     if kind == "tools_pending":
-        data = object_fields(raw, "tools_pending state", frozenset({"kind", "pending"}))
-        pending = tuple(decode_tool_call_value(x) for x in array(data["pending"], "pending calls"))
-        return ToolsPending(PendingToolCalls(pending))
+        data = object_fields(
+            raw,
+            "tools_pending state",
+            frozenset({"kind", "pending", "provider_turn_pending"}),
+        )
+        pending = tuple(
+            decode_runtime_tool_call_value(x) for x in array(data["pending"], "pending calls")
+        )
+        return ToolsPending(
+            PendingToolCalls(pending),
+            boolean(data["provider_turn_pending"], "provider_turn_pending"),
+        )
     if kind == "suspended":
         data = object_fields(
             raw,

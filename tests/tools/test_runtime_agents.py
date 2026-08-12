@@ -22,9 +22,9 @@ from jharness.kernel import (
     ModelResponse,
     RunContext,
     Runtime,
+    StructuredToolCall,
     Suspended,
     ToolAccepted,
-    ToolCall,
     ToolChoice,
     ToolSuccess,
 )
@@ -136,7 +136,9 @@ class _WaitingAgentModel(Model):
         self.requests.append(request)
         completion = _completion_payload(request)
         if completion is None:
-            return ModelResponse((ToolCall("agent-call", self.tool_name, self.arguments),))
+            return ModelResponse(
+                (StructuredToolCall("agent-call", self.tool_name, self.arguments),)
+            )
         self.observed_completion = completion
         return ModelResponse(
             (ContentPart.text_part(f"Observed {completion['status']}"),),
@@ -165,7 +167,7 @@ class _BackgroundAgentModel(Model):
         if not tool_messages:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "agent-background",
                         "Agent",
                         {
@@ -205,14 +207,16 @@ class _ManagementModel(Model):
         del context, stream, emit_delta
         tool_messages = [message for message in request.messages if message.role == "tool"]
         if not tool_messages:
-            return ModelResponse((ToolCall("get-agent", "AgentGet", {"agent_id": self.agent_id}),))
+            return ModelResponse(
+                (StructuredToolCall("get-agent", "AgentGet", {"agent_id": self.agent_id}),)
+            )
         latest = tool_messages[-1].outcome
         assert isinstance(latest, ToolSuccess)
         payload = cast(dict[str, Any], latest.structured_content)
         if len(tool_messages) == 1:
             self.observed.append(payload)
             return ModelResponse(
-                (ToolCall("cancel-agent", "AgentCancel", {"agent_id": self.agent_id}),)
+                (StructuredToolCall("cancel-agent", "AgentCancel", {"agent_id": self.agent_id}),)
             )
         self.observed.append(payload)
         return ModelResponse(
@@ -238,8 +242,8 @@ class _MultipleAgentCallsModel(Model):
         arguments = {"description": "One", "prompt": "Do one task."}
         return ModelResponse(
             (
-                ToolCall("agent-one", "Agent", arguments),
-                ToolCall("agent-two", "Agent", arguments),
+                StructuredToolCall("agent-one", "Agent", arguments),
+                StructuredToolCall("agent-two", "Agent", arguments),
             )
         )
 
@@ -255,7 +259,7 @@ def _runtime(model: Model, *tools: object) -> Runtime:
     return Runtime(
         model=model,
         tools=ToolRegistry(cast(Any, tools)),
-        tool_choice=ToolChoice(allow_parallel_tool_calls=False),
+        tool_choice=ToolChoice(allow_parallel_runtime_tool_calls=False),
     )
 
 

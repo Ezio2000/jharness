@@ -6,27 +6,44 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.6.0] - Unreleased
+
 ### Added
 
 - Added an OpenAI Responses adapter with complete and SSE transports, runtime
-  functions, provider-hosted image generation and web search, and a strict stateless
-  `deepseek-v4-flash` Responses profile.
+  structured/freeform tools, provider-hosted image generation and web search, and a
+  strict stateless `deepseek-v4-flash` Responses profile.
+- Added protocol-owned hosted-tool registries, DeepSeek Responses `apply_patch` and
+  versioned web search, and Anthropic server web-search request/terminal/SSE/history
+  support including provider-owned continuation.
 
 ### Changed
 
 - Replaced split model content/tool-call results with one ordered output sequence and
-  separated exact model modalities, host-executed `ToolCall` values, and remote
+  separated exact model modalities, host-executed `RuntimeToolCall` values, and remote
   `ProviderToolCall` values at the kernel boundary.
 - Replaced provider-profile capability booleans with one immutable
   `ModelCapabilities` declaration, including exact tool-choice types, parallel-control
   and seed support. Rewrote the OpenAI, Anthropic, and DeepSeek defaults and moved
   supplier-specific Responses reasoning and hosted-tool configuration into profile
   wire policy.
+- Made the default OpenAI Responses profile conservative and text-only. Model-specific
+  modalities, structured output, JSON mode, and hosted tools now require explicit
+  profile opt-in.
+- Moved repository backends to the isolated `v3` physical namespace and history-digest
+  domain for ordered assistant output. Obsolete `v1` and `v2` runs are not read or
+  migrated.
 
 ### Fixed
 
 - Updated release validation to Twine 7 for Core Metadata 2.5 and expanded isolated
   distribution smoke checks to cover the Responses public API and DeepSeek profile.
+- Made OpenAI Responses storage explicit: the default sends `store=false` with
+  encrypted reasoning history, while compatible profiles can omit storage fields.
+- Required a durable, integrity-bearing host-owned `ResponsesArtifactStore` for hosted
+  image generation, rejected unexpected inline results without one, and kept durable
+  history free of image base64.
+- Aligned the visible-content contract with terminal incomplete provider-tool output.
 
 ## [0.5.0] - 2026-08-10
 
@@ -177,7 +194,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Sixty-six deterministic conformance cases and a standard tool catalog.
 - Provider-neutral lifecycle, model, tool, event, wire, and trace contracts.
 
-[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Ezio2000/jharness/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/Ezio2000/jharness/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Ezio2000/jharness/compare/v0.3.4...v0.4.0
 [0.3.4]: https://github.com/Ezio2000/jharness/compare/v0.3.3...v0.3.4

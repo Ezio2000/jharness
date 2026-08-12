@@ -64,6 +64,7 @@ def fact_data(fact: Fact) -> dict[str, Any]:
             "result": fact.result.value,
             "part_count": fact.part_count,
             "tool_call_ids": list(fact.tool_call_ids),
+            "provider_turn_pending": fact.provider_turn_pending,
             "finish_reason": fact.finish_reason,
             "usage": None if fact.usage is None else usage_data(fact.usage),
             "limit_reason": None if fact.limit_reason is None else fact.limit_reason.value,
@@ -120,12 +121,16 @@ def run_view(snapshot: RunSnapshot) -> dict[str, Any]:
 
 def state_view(state: object) -> dict[str, Any]:
     if isinstance(state, Planning):
-        return {"kind": "planning"}
+        return {
+            "kind": "planning",
+            "provider_turn_pending": state.provider_turn_pending,
+        }
     if isinstance(state, ToolsPending):
         return {
             "kind": "tools_pending",
             "pending_count": state.pending.pending_count,
             "call_id_digest": state.pending.call_id_digest.hex(),
+            "provider_turn_pending": state.provider_turn_pending,
         }
     if isinstance(state, Suspended):
         suspension = state.suspension
@@ -203,7 +208,7 @@ def _started(data: Mapping[str, Any]) -> dict[str, Any]:
             "tool_calls": 0,
             "usage": {name: None for name in _USAGE_FIELDS},
         },
-        "state": {"kind": "planning"},
+        "state": {"kind": "planning", "provider_turn_pending": False},
     }
 
 
@@ -242,7 +247,13 @@ def _model_turn(result: dict[str, Any], before: Mapping[str, Any], data: Mapping
         cast(Mapping[str, Any] | None, data["usage"]),
     )
     outcome = data["result"]
-    if outcome == "completed":
+    provider_turn_pending = cast(bool, data["provider_turn_pending"])
+    if outcome == "planning":
+        result["state"] = {
+            "kind": "planning",
+            "provider_turn_pending": provider_turn_pending,
+        }
+    elif outcome == "completed":
         result["state"] = {"kind": "completed", "part_count": data["part_count"]}
     elif outcome == "tools_pending":
         call_ids = cast(Sequence[str], data["tool_call_ids"])
@@ -253,6 +264,7 @@ def _model_turn(result: dict[str, Any], before: Mapping[str, Any], data: Mapping
                 call_ids,
                 empty_call_id_suffix_digest(),
             ).hex(),
+            "provider_turn_pending": provider_turn_pending,
         }
     else:
         result["state"] = {"kind": "limited", "reason": data["limit_reason"]}
@@ -275,6 +287,7 @@ def _tool_batch(
     metrics = cast(dict[str, Any], result["metrics"])
     metrics["tool_calls"] = cast(int, metrics["tool_calls"]) + len(calls)
     remaining = pending_count - len(calls)
+    provider_turn_pending = cast(bool, state["provider_turn_pending"])
     suspension = data["suspension"]
     after_state = cast(Mapping[str, Any], after["state"])
     after_active = (
@@ -293,12 +306,16 @@ def _tool_batch(
             "kind": "tools_pending",
             "pending_count": remaining,
             "call_id_digest": suffix.hex(),
+            "provider_turn_pending": provider_turn_pending,
         }
     else:
         if after_active.get("kind") != "planning":
             raise ValueError("tool_batch_pending_count_mismatch")
         suffix = empty_call_id_suffix_digest()
-        active = {"kind": "planning"}
+        active = {
+            "kind": "planning",
+            "provider_turn_pending": provider_turn_pending,
+        }
     if compose_call_id_digest(calls, suffix) != _view_digest(state.get("call_id_digest")):
         raise ValueError("tool_batch_not_prefix")
     result["state"] = (
@@ -327,7 +344,7 @@ def _conversation_insert(
     if cast(Mapping[str, Any], before["state"]).get("kind") != "planning":
         raise ValueError("insert_requires_planning")
     result["history_count"] = cast(int, result["history_count"]) + 1
-    result["state"] = {"kind": "planning"}
+    result["state"] = {"kind": "planning", "provider_turn_pending": False}
 
 
 def _history_rewrite(
@@ -338,7 +355,7 @@ def _history_rewrite(
     if data["before_count"] != before["history_count"]:
         raise ValueError("rewrite_before_mismatch")
     result["history_count"] = len(cast(Sequence[object], data["after_roles"]))
-    result["state"] = {"kind": "planning"}
+    result["state"] = {"kind": "planning", "provider_turn_pending": False}
 
 
 def _control(result: dict[str, Any], before: Mapping[str, Any], data: Mapping[str, Any]) -> None:

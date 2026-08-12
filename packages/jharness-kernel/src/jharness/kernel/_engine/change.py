@@ -71,10 +71,10 @@ def limited(reason: LimitReason) -> Change:
     return Change(ControlFact(time(), LimitedControl(reason)), Limited(reason))
 
 
-def insert(control: Insert) -> Change:
+def insert(control: Insert, state: Planning) -> Change:
     return Change(
         ConversationInsertFact(time(), control.source),
-        Planning(),
+        expect_instance(state, Planning, "insert state"),
         append=(control.message,),
     )
 

@@ -28,6 +28,7 @@
               "output": [
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "empty-1",
                   "name": "echo",
                   "arguments": {
@@ -39,6 +40,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": null,
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }
@@ -91,6 +93,7 @@
               "output": [
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "skip-1",
                   "name": "echo",
                   "arguments": {
@@ -99,6 +102,7 @@
                 },
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "skip-2",
                   "name": "echo",
                   "arguments": {
@@ -110,6 +114,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": null,
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }
@@ -162,6 +167,7 @@
               "output": [
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "serial-1",
                   "name": "echo",
                   "arguments": {
@@ -170,6 +176,7 @@
                 },
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "serial-2",
                   "name": "echo",
                   "arguments": {
@@ -181,6 +188,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": null,
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }
@@ -233,6 +241,7 @@
               "output": [
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "unsafe-1",
                   "name": "echo",
                   "arguments": {
@@ -241,6 +250,7 @@
                 },
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "unsafe-2",
                   "name": "echo",
                   "arguments": {
@@ -252,6 +262,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": null,
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }
@@ -304,6 +315,7 @@
               "output": [
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "large-1",
                   "name": "delayed_echo",
                   "arguments": {
@@ -312,6 +324,7 @@
                 },
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "large-2",
                   "name": "delayed_echo",
                   "arguments": {
@@ -323,6 +336,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": null,
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }

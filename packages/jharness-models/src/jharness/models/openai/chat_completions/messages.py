@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from jharness.kernel import ContentPart, Message, ProviderToolCall, ToolCall
+from jharness.kernel import ContentPart, Message, ProviderToolCall, StructuredToolCall
 from jharness.models.openai.errors import OPENAI_JSON, OpenAIChatCompletionsError
 from jharness.models.openai.profiles import OpenAIChatCompletionsProfile
 
@@ -31,14 +31,14 @@ def encode_chat_message(
 
     reasoning_content = None
     content_parts = message.parts
-    runtime_calls: tuple[ToolCall, ...] = ()
+    runtime_calls: tuple[StructuredToolCall, ...] = ()
     if role == "assistant":
         if any(isinstance(item, ProviderToolCall) for item in message.output):
             raise OpenAIChatCompletionsError(
                 "Chat Completions cannot encode provider tool output history"
             )
         assistant_parts = tuple(item for item in message.output if isinstance(item, ContentPart))
-        runtime_calls = message.runtime_tool_calls()
+        runtime_calls = _structured_runtime_calls(message)
         reasoning_content, content_parts = _extract_assistant_reasoning(
             assistant_parts,
             profile,
@@ -65,6 +65,15 @@ def encode_chat_message(
             if content == "" and profile.assistant_tool_call_content_mode == "nullable":
                 data["content"] = None
     return data
+
+
+def _structured_runtime_calls(message: Message) -> tuple[StructuredToolCall, ...]:
+    calls = message.runtime_tool_calls()
+    if any(not isinstance(item, StructuredToolCall) for item in calls):
+        raise OpenAIChatCompletionsError(
+            "Chat Completions cannot encode freeform runtime tool history"
+        )
+    return cast(tuple[StructuredToolCall, ...], calls)
 
 
 def encode_message_content(

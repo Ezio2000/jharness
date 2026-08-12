@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from jharness.kernel import ModelContentDelta, ModelToolCallDelta
+from jharness.kernel import (
+    ModelContentDelta,
+    ModelRuntimeToolCallDelta,
+    RuntimeToolKind,
+    StructuredToolCall,
+)
 from jharness.models._stream import DeltaAccumulator
 
 
@@ -15,9 +20,10 @@ def test_delta_accumulator_handles_many_tiny_chunks_without_changing_the_result(
     encoded_arguments = '{"value":"' + ("y" * chunk_count) + '"}'
     for index, chunk in enumerate(encoded_arguments):
         accumulator.apply(
-            ModelToolCallDelta(
+            ModelRuntimeToolCallDelta(
                 output_index=1,
-                arguments_delta=chunk,
+                input_kind=RuntimeToolKind.STRUCTURED,
+                input_delta=chunk,
                 id="call-1" if index == 0 else None,
                 name="search" if index == 0 else None,
             )
@@ -31,4 +37,6 @@ def test_delta_accumulator_handles_many_tiny_chunks_without_changing_the_result(
     )
 
     assert response.visible_parts()[0].text == "x" * chunk_count
-    assert response.runtime_tool_calls()[0].arguments == {"value": "y" * chunk_count}
+    call = response.runtime_tool_calls()[0]
+    assert isinstance(call, StructuredToolCall)
+    assert call.arguments == {"value": "y" * chunk_count}

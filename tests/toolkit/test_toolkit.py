@@ -9,16 +9,18 @@ import pytest
 
 from jharness.kernel import (
     ContentPart,
+    FreeformToolCall,
+    FreeformToolSpec,
     RunContext,
     SettledResult,
+    StructuredToolCall,
+    StructuredToolSpec,
     Suspension,
-    ToolCall,
     ToolContext,
     ToolError,
     ToolExecution,
     ToolFailure,
     ToolResult,
-    ToolSpec,
     ToolSuccess,
     ToolWaiting,
     WaitingResult,
@@ -29,6 +31,7 @@ from jharness.toolkit import (
     RetryExhaustedError,
     RetryingTool,
     ToolRegistry,
+    freeform_tool,
     function_tool,
 )
 
@@ -42,21 +45,21 @@ def context() -> ToolContext:
 
 @dataclass(slots=True)
 class ValueTool:
-    spec: ToolSpec
+    spec: StructuredToolSpec
     value: object
     calls: int = 0
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         self.calls += 1
         return SettledResult(ToolSuccess((ContentPart.text_part("ok"),), self.value))
 
 
 async def test_registry_opens_immutable_invocation_catalogs() -> None:
-    first = ValueTool(ToolSpec("first", "first", {"type": "object"}), {"value": 1})
-    second = ValueTool(ToolSpec("second", "second", {"type": "object"}), {"value": 2})
+    first = ValueTool(StructuredToolSpec("first", "first", {"type": "object"}), {"value": 1})
+    second = ValueTool(StructuredToolSpec("second", "second", {"type": "object"}), {"value": 2})
     registry = ToolRegistry((first,))
     before = await registry.open_catalog()
-    binding = before.bind(ToolCall("call", "first"))
+    binding = before.bind(StructuredToolCall("call", "first"))
     registry.register(second)
     after = await registry.open_catalog()
 
@@ -67,9 +70,43 @@ async def test_registry_opens_immutable_invocation_catalogs() -> None:
     assert isinstance(await binding.invoke(context()), SettledResult)
 
 
+async def test_freeform_tool_preserves_raw_input_and_rejects_structured_calls() -> None:
+    observed: list[str] = []
+
+    @freeform_tool(
+        name="apply_patch",
+        description="Apply a patch",
+        output_schema={
+            "type": "object",
+            "required": ["applied"],
+            "properties": {"applied": {"type": "boolean"}},
+        },
+    )
+    async def apply_patch(call: FreeformToolCall, tool_context: ToolContext) -> ToolResult:
+        del tool_context
+        observed.append(call.input)
+        return SettledResult(
+            ToolSuccess(
+                (ContentPart.text_part("applied"),),
+                {"applied": True},
+            )
+        )
+
+    catalog = await ToolRegistry((apply_patch,)).open_catalog()
+    assert isinstance(catalog.spec("apply_patch"), FreeformToolSpec)
+    result = await catalog.bind(
+        FreeformToolCall("patch-1", "apply_patch", "*** Begin Patch\n*** End Patch")
+    ).invoke(context())
+
+    assert observed == ["*** Begin Patch\n*** End Patch"]
+    assert isinstance(result, SettledResult)
+    with pytest.raises(ToolError, match="does not accept this runtime input kind"):
+        catalog.bind(StructuredToolCall("patch-2", "apply_patch", {}))
+
+
 async def test_binding_validates_input_and_output_schemas() -> None:
     tool = ValueTool(
-        ToolSpec(
+        StructuredToolSpec(
             "strict",
             "strict",
             {
@@ -90,10 +127,10 @@ async def test_binding_validates_input_and_output_schemas() -> None:
     catalog = await ToolRegistry((tool,)).open_catalog()
 
     with pytest.raises(ToolError, match="input_schema"):
-        catalog.bind(ToolCall("bad", "strict", {"count": "one"}))
+        catalog.bind(StructuredToolCall("bad", "strict", {"count": "one"}))
     with pytest.raises(ToolError, match="input_schema"):
-        catalog.bind(ToolCall("float", "strict", {"count": 1.0}))
-    call = ToolCall("ok", "strict", {"count": 1})
+        catalog.bind(StructuredToolCall("float", "strict", {"count": 1.0}))
+    call = StructuredToolCall("ok", "strict", {"count": 1})
     binding = catalog.bind(call)
     result = await binding.invoke(context())
     assert binding.call is call
@@ -104,15 +141,19 @@ async def test_binding_validates_input_and_output_schemas() -> None:
     invalid_output = ValueTool(tool.spec, {"value": "one"})
     invalid_catalog = await ToolRegistry((invalid_output,)).open_catalog()
     with pytest.raises(ToolError, match="output_schema"):
-        await invalid_catalog.bind(ToolCall("bad-output", "strict", {"count": 1})).invoke(context())
+        await invalid_catalog.bind(StructuredToolCall("bad-output", "strict", {"count": 1})).invoke(
+            context()
+        )
     float_output = ValueTool(tool.spec, {"value": 1.0})
     float_catalog = await ToolRegistry((float_output,)).open_catalog()
     with pytest.raises(ToolError, match="output_schema"):
-        await float_catalog.bind(ToolCall("float-output", "strict", {"count": 1})).invoke(context())
+        await float_catalog.bind(StructuredToolCall("float-output", "strict", {"count": 1})).invoke(
+            context()
+        )
 
 
 async def test_binding_preserves_waiting_result_and_validates_its_output() -> None:
-    spec = ToolSpec(
+    spec = StructuredToolSpec(
         "wait",
         "wait",
         {"type": "object"},
@@ -125,9 +166,9 @@ async def test_binding_preserves_waiting_result_and_validates_its_output() -> No
 
     @dataclass(frozen=True, slots=True)
     class WaitingTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
 
-        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
             return WaitingResult(
                 ToolWaiting(
                     (ContentPart.text_part("pending"),),
@@ -138,7 +179,7 @@ async def test_binding_preserves_waiting_result_and_validates_its_output() -> No
 
     result = (
         await (await ToolRegistry((WaitingTool(spec),)).open_catalog())
-        .bind(ToolCall("call", "wait"))
+        .bind(StructuredToolCall("call", "wait"))
         .invoke(context())
     )
 
@@ -148,7 +189,7 @@ async def test_binding_preserves_waiting_result_and_validates_its_output() -> No
 
 
 async def test_binding_preserves_framework_failures_outside_the_success_schema() -> None:
-    spec = ToolSpec(
+    spec = StructuredToolSpec(
         "guarded",
         "guarded",
         {"type": "object"},
@@ -163,17 +204,17 @@ async def test_binding_preserves_framework_failures_outside_the_success_schema()
 
     @dataclass(slots=True)
     class FailingTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
         calls: int = 0
 
-        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
             del call, context
             self.calls += 1
             raise RuntimeError("open")
 
     failing = FailingTool(spec)
     breaker = CircuitBreakingTool(failing, failure_threshold=1)
-    call = ToolCall("call", "guarded")
+    call = StructuredToolCall("call", "guarded")
     with pytest.raises(RuntimeError, match="open"):
         await breaker.invoke(call, context())
 
@@ -195,16 +236,16 @@ async def test_binding_preserves_framework_failures_outside_the_success_schema()
 async def test_binding_rejects_an_unwrapped_outcome() -> None:
     @dataclass(frozen=True, slots=True)
     class InvalidTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
 
-        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
             return cast(Any, ToolSuccess((ContentPart.text_part("invalid"),)))
 
     catalog = await ToolRegistry(
-        (InvalidTool(ToolSpec("invalid", "invalid", {"type": "object"})),)
+        (InvalidTool(StructuredToolSpec("invalid", "invalid", {"type": "object"})),)
     ).open_catalog()
     with pytest.raises(ToolError, match="SettledResult or WaitingResult"):
-        await catalog.bind(ToolCall("call", "invalid")).invoke(context())
+        await catalog.bind(StructuredToolCall("call", "invalid")).invoke(context())
 
 
 async def test_function_tool_decorator_preserves_explicit_spec() -> None:
@@ -214,21 +255,21 @@ async def test_function_tool_decorator_preserves_explicit_spec() -> None:
         input_schema={"type": "object"},
         execution=ToolExecution(read_only=True, idempotent=True),
     )
-    async def sum_tool(call: ToolCall, tool_context: ToolContext) -> ToolResult:
+    async def sum_tool(call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
         return SettledResult(
             ToolSuccess((ContentPart.text_part(str(sum(call.arguments.values()))),))
         )
 
-    result = await sum_tool.invoke(ToolCall("call", "sum", {"a": 1, "b": 2}), context())
+    result = await sum_tool.invoke(StructuredToolCall("call", "sum", {"a": 1, "b": 2}), context())
     assert sum_tool.spec.name == "sum"
     assert isinstance(result, SettledResult)
     assert result.outcome.parts[0].text == "3"
 
 
 def test_function_tool_and_registry_reject_synchronous_implementations() -> None:
-    spec = ToolSpec("sync", "sync", {"type": "object"})
+    spec = StructuredToolSpec("sync", "sync", {"type": "object"})
 
-    def sync_function(call: ToolCall, tool_context: ToolContext) -> ToolResult:
+    def sync_function(call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
         return SettledResult(ToolSuccess((ContentPart.text_part("no"),)))
 
     with pytest.raises(TypeError, match="must be async"):
@@ -236,9 +277,9 @@ def test_function_tool_and_registry_reject_synchronous_implementations() -> None
 
     @dataclass(frozen=True, slots=True)
     class SyncTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
 
-        def invoke(self, call: ToolCall, tool_context: ToolContext) -> ToolResult:
+        def invoke(self, call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
             return sync_function(call, tool_context)
 
     with pytest.raises(TypeError, match="must be async"):
@@ -246,17 +287,17 @@ def test_function_tool_and_registry_reject_synchronous_implementations() -> None
 
 
 def test_tool_adapters_reject_invalid_values_and_policy_limits() -> None:
-    spec = ToolSpec(
+    spec = StructuredToolSpec(
         "valid",
         "valid",
         {"type": "object"},
         execution=ToolExecution(read_only=True, idempotent=True),
     )
 
-    async def valid_function(call: ToolCall, tool_context: ToolContext) -> ToolResult:
+    async def valid_function(call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
         return SettledResult(ToolSuccess((ContentPart.text_part("ok"),)))
 
-    with pytest.raises(TypeError, match="spec must be ToolSpec"):
+    with pytest.raises(TypeError, match="spec must be StructuredToolSpec"):
         FunctionTool(cast(Any, object()), valid_function)
     with pytest.raises(TypeError, match="implement Tool"):
         ToolRegistry((cast(Any, object()),))
@@ -265,10 +306,10 @@ def test_tool_adapters_reject_invalid_values_and_policy_limits() -> None:
     class InvalidSpecTool:
         spec: object
 
-        async def invoke(self, call: ToolCall, tool_context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
             return await valid_function(call, tool_context)
 
-    with pytest.raises(TypeError, match="spec must be ToolSpec"):
+    with pytest.raises(TypeError, match="spec must be RuntimeToolSpec"):
         ToolRegistry((cast(Any, InvalidSpecTool(object())),))
     base = FunctionTool(spec, valid_function)
     with pytest.raises(ValueError, match="max_attempts"):
@@ -290,7 +331,7 @@ def test_tool_adapters_reject_invalid_values_and_policy_limits() -> None:
 
 
 class FlakyTool:
-    spec = ToolSpec(
+    spec = StructuredToolSpec(
         "flaky",
         "flaky",
         {"type": "object"},
@@ -301,7 +342,7 @@ class FlakyTool:
         self.failures = failures
         self.calls = 0
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         self.calls += 1
         if self.calls <= self.failures:
             raise RuntimeError("temporary")
@@ -316,14 +357,14 @@ async def test_retry_decorator_retries_one_logical_idempotent_call() -> None:
         retryable_exceptions=(RuntimeError,),
         backoff_initial_seconds=0.001,
         jitter_ratio=0,
-    ).invoke(ToolCall("call", "flaky"), context())
+    ).invoke(StructuredToolCall("call", "flaky"), context())
 
     assert isinstance(result, SettledResult)
     assert isinstance(result.outcome, ToolSuccess)
     assert base.calls == 3
     with pytest.raises(ValueError, match="idempotent"):
         RetryingTool(
-            ValueTool(ToolSpec("unsafe", "unsafe", {"type": "object"}), None),
+            ValueTool(StructuredToolSpec("unsafe", "unsafe", {"type": "object"}), None),
             max_attempts=2,
         )
 
@@ -332,17 +373,17 @@ async def test_retry_decorator_does_not_retry_unlisted_or_settled_failures() -> 
     unlisted = FlakyTool(1)
     with pytest.raises(RuntimeError, match="temporary"):
         await RetryingTool(unlisted, max_attempts=3).invoke(
-            ToolCall("unlisted", "flaky"),
+            StructuredToolCall("unlisted", "flaky"),
             context(),
         )
     assert unlisted.calls == 1
 
     @dataclass(slots=True)
     class SettledFailureTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
         calls: int = 0
 
-        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
             self.calls += 1
             return SettledResult(ToolFailure.from_error("rejected", "do not retry"))
 
@@ -351,7 +392,7 @@ async def test_retry_decorator_does_not_retry_unlisted_or_settled_failures() -> 
         settled,
         max_attempts=3,
         retryable_exceptions=(RuntimeError,),
-    ).invoke(ToolCall("settled", "flaky"), context())
+    ).invoke(StructuredToolCall("settled", "flaky"), context())
     assert isinstance(result, SettledResult)
     assert isinstance(result.outcome, ToolFailure)
     assert settled.calls == 1
@@ -366,7 +407,7 @@ async def test_retry_exhaustion_preserves_ordered_attempt_errors() -> None:
             retryable_exceptions=(RuntimeError,),
             backoff_initial_seconds=0.001,
             jitter_ratio=0,
-        ).invoke(ToolCall("call", "flaky"), context())
+        ).invoke(StructuredToolCall("call", "flaky"), context())
 
     assert caught.value.attempts == 3
     assert caught.value.first_error is caught.value.errors[0]
@@ -398,7 +439,7 @@ async def test_retry_backoff_is_exponential_jittered_and_finally_capped(
         backoff_multiplier=2,
         backoff_max_seconds=3,
         jitter_ratio=0.5,
-    ).invoke(ToolCall("call", "flaky"), context())
+    ).invoke(StructuredToolCall("call", "flaky"), context())
 
     assert delays == [3, 3]
 
@@ -408,10 +449,10 @@ async def test_retry_backoff_observes_cooperative_cancellation() -> None:
 
     @dataclass(slots=True)
     class CancellingFailureTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
         calls: int = 0
 
-        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
             nonlocal cancelled
             self.calls += 1
             cancelled = True
@@ -424,7 +465,7 @@ async def test_retry_backoff_observes_cooperative_cancellation() -> None:
         lambda: cancelled,
     )
     result = await RetryingTool(base, max_attempts=3).invoke(
-        ToolCall("call", "flaky"),
+        StructuredToolCall("call", "flaky"),
         selected_context,
     )
 
@@ -437,16 +478,16 @@ async def test_retry_backoff_observes_cooperative_cancellation() -> None:
 async def test_retry_decorator_owns_attempt_timeout() -> None:
     @dataclass(slots=True)
     class SlowTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
         calls: int = 0
 
-        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
             self.calls += 1
             await asyncio.sleep(1)
             return SettledResult(ToolSuccess((ContentPart.text_part("late"),)))
 
     slow = SlowTool(
-        ToolSpec(
+        StructuredToolSpec(
             "slow",
             "slow",
             {"type": "object"},
@@ -455,7 +496,7 @@ async def test_retry_decorator_owns_attempt_timeout() -> None:
     )
     with pytest.raises(RetryExhaustedError) as caught:
         await RetryingTool(slow, max_attempts=2, attempt_timeout_seconds=0.001).invoke(
-            ToolCall("call", "slow"), context()
+            StructuredToolCall("call", "slow"), context()
         )
     assert caught.value.attempts == 2
     assert all(isinstance(error, TimeoutError) for error in caught.value.errors)
@@ -465,22 +506,22 @@ async def test_retry_decorator_owns_attempt_timeout() -> None:
 async def test_decorators_propagate_cancellation_without_recording_failure() -> None:
     @dataclass(slots=True)
     class CancellingTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
         calls: int = 0
 
-        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
             self.calls += 1
             raise asyncio.CancelledError
 
     base = CancellingTool(
-        ToolSpec(
+        StructuredToolSpec(
             "cancel",
             "cancel",
             {"type": "object"},
             execution=ToolExecution(read_only=True, idempotent=True),
         )
     )
-    call = ToolCall("call", "cancel")
+    call = StructuredToolCall("call", "cancel")
     with pytest.raises(asyncio.CancelledError):
         await RetryingTool(base, max_attempts=2).invoke(call, context())
     breaker = CircuitBreakingTool(base, failure_threshold=1)
@@ -495,18 +536,18 @@ async def test_decorators_propagate_cancellation_without_recording_failure() -> 
 async def test_circuit_breaker_success_resets_consecutive_failure_count() -> None:
     @dataclass(slots=True)
     class AlternatingTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
         calls: int = 0
 
-        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
             self.calls += 1
             if self.calls % 2:
                 raise RuntimeError("temporary")
             return SettledResult(ToolSuccess((ContentPart.text_part("ok"),)))
 
-    base = AlternatingTool(ToolSpec("alternating", "alternating", {"type": "object"}))
+    base = AlternatingTool(StructuredToolSpec("alternating", "alternating", {"type": "object"}))
     breaker = CircuitBreakingTool(base, failure_threshold=2)
-    call = ToolCall("call", "alternating")
+    call = StructuredToolCall("call", "alternating")
     for _ in range(2):
         with pytest.raises(RuntimeError, match="temporary"):
             await breaker.invoke(call, context())
@@ -519,7 +560,7 @@ async def test_circuit_breaker_success_resets_consecutive_failure_count() -> Non
 async def test_circuit_breaker_opens_after_consecutive_failures() -> None:
     base = FlakyTool(10)
     breaker = CircuitBreakingTool(base, failure_threshold=2)
-    call = ToolCall("call", "flaky")
+    call = StructuredToolCall("call", "flaky")
     for _ in range(2):
         with pytest.raises(RuntimeError, match="temporary"):
             await breaker.invoke(call, context())
@@ -542,7 +583,7 @@ async def test_circuit_breaker_recovers_through_one_successful_half_open_probe(
         failure_threshold=2,
         recovery_timeout_seconds=0.001,
     )
-    call = ToolCall("call", "flaky")
+    call = StructuredToolCall("call", "flaky")
     for _ in range(2):
         with pytest.raises(RuntimeError, match="temporary"):
             await breaker.invoke(call, context())
@@ -566,12 +607,12 @@ async def test_circuit_breaker_admits_only_one_half_open_probe(
 
     @dataclass(slots=True)
     class ProbeTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
         started: asyncio.Event
         release: asyncio.Event
         calls: int = 0
 
-        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("open")
@@ -587,7 +628,7 @@ async def test_circuit_breaker_admits_only_one_half_open_probe(
         failure_threshold=1,
         recovery_timeout_seconds=0.001,
     )
-    call = ToolCall("call", "flaky")
+    call = StructuredToolCall("call", "flaky")
     with pytest.raises(RuntimeError, match="open"):
         await breaker.invoke(call, context())
     now[0] = 0.002
@@ -614,7 +655,7 @@ async def test_failed_or_cancelled_half_open_probe_has_explicit_recovery_semanti
         failure_threshold=1,
         recovery_timeout_seconds=0.001,
     )
-    call = ToolCall("call", "flaky")
+    call = StructuredToolCall("call", "flaky")
     with pytest.raises(RuntimeError):
         await failed_breaker.invoke(call, context())
     now[0] = 0.002
@@ -627,10 +668,10 @@ async def test_failed_or_cancelled_half_open_probe_has_explicit_recovery_semanti
 
     @dataclass(slots=True)
     class CancelledProbeTool:
-        spec: ToolSpec
+        spec: StructuredToolSpec
         calls: int = 0
 
-        async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+        async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("open")
@@ -656,25 +697,25 @@ async def test_failed_or_cancelled_half_open_probe_has_explicit_recovery_semanti
 
 
 def test_registry_rejects_duplicate_names_and_invalid_schemas() -> None:
-    tool = ValueTool(ToolSpec("same", "same", {"type": "object"}), None)
+    tool = ValueTool(StructuredToolSpec("same", "same", {"type": "object"}), None)
     with pytest.raises(ValueError, match="duplicate"):
         ToolRegistry((tool, tool))
     with pytest.raises(ValueError, match="valid JSON Schema"):
         ToolRegistry(
             (
                 ValueTool(
-                    ToolSpec("bad", "bad", {"type": "not-a-json-schema-type"}),
+                    StructuredToolSpec("bad", "bad", {"type": "not-a-json-schema-type"}),
                     None,
                 ),
             )
         )
     with pytest.raises(ValueError, match="unresolvable"):
-        ToolRegistry((ValueTool(ToolSpec("ref", "ref", {"$ref": "missing"}), None),))
+        ToolRegistry((ValueTool(StructuredToolSpec("ref", "ref", {"$ref": "missing"}), None),))
     with pytest.raises(ValueError, match="unresolvable"):
         ToolRegistry(
             (
                 ValueTool(
-                    ToolSpec("dynamic", "dynamic", {"$dynamicRef": "missing"}),
+                    StructuredToolSpec("dynamic", "dynamic", {"$dynamicRef": "missing"}),
                     None,
                 ),
             )
@@ -693,13 +734,13 @@ async def test_registry_resolves_and_enforces_dynamic_references_offline() -> No
     registry = ToolRegistry(
         (
             ValueTool(
-                ToolSpec("recursive", "recursive", recursive_schema),
+                StructuredToolSpec("recursive", "recursive", recursive_schema),
                 None,
             ),
         )
     )
     catalog = await registry.open_catalog()
 
-    catalog.bind(ToolCall("valid", "recursive", {"child": {"child": {}}}))
+    catalog.bind(StructuredToolCall("valid", "recursive", {"child": {"child": {}}}))
     with pytest.raises(ToolError, match="input_schema"):
-        catalog.bind(ToolCall("invalid", "recursive", {"child": 1}))
+        catalog.bind(StructuredToolCall("invalid", "recursive", {"child": 1}))

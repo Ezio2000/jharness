@@ -6,11 +6,15 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from jharness.kernel import ModelCapabilities
+from jharness.kernel import ModelCapabilities, RuntimeToolKind
 from jharness.models._http import model_client_config
 from jharness.models.anthropic import AnthropicModel, AnthropicProfile
 from jharness.models.deepseek import deepseek_anthropic_profile, deepseek_openai_chat_profile
-from jharness.models.openai import OpenAIChatCompletionsModel, OpenAIChatCompletionsProfile
+from jharness.models.openai import (
+    OpenAIChatCompletionsModel,
+    OpenAIChatCompletionsProfile,
+    OpenAIResponsesProfile,
+)
 
 
 @pytest.mark.parametrize("model_type", [OpenAIChatCompletionsModel, AnthropicModel])
@@ -206,16 +210,18 @@ def test_deepseek_profiles_validate_thinking_and_effort_combinations() -> None:
     assert plain.extra_request_body["thinking"] == {"type": "disabled"}
     assert plain.reasoning_content_mode == "live_only"
     assert plain.capabilities.seed is False
-    assert plain.capabilities.runtime_tools is True
+    assert plain.capabilities.runtime_tool_kinds == frozenset({RuntimeToolKind.STRUCTURED})
     assert openai_thinking.extra_request_body == {
         "thinking": {"type": "enabled"},
         "reasoning_effort": "high",
     }
     assert openai_thinking.reasoning_content_mode == "required_with_tools"
-    assert openai_thinking.capabilities.runtime_tools is True
+    assert openai_thinking.capabilities.runtime_tool_kinds == frozenset(
+        {RuntimeToolKind.STRUCTURED}
+    )
     assert openai_thinking.capabilities.tool_choice_types == frozenset({"auto"})
-    assert openai_thinking.capabilities.parallel_tool_calls is True
-    assert openai_thinking.capabilities.parallel_tool_call_control is False
+    assert openai_thinking.capabilities.parallel_runtime_tool_calls is True
+    assert openai_thinking.capabilities.parallel_runtime_tool_call_control is False
     assert openai_thinking.assistant_tool_call_content_mode == "required"
     assert openai_thinking.automatic_tool_choice_mode == "implicit"
     assert thinking.name.endswith("thinking")
@@ -232,8 +238,16 @@ def test_deepseek_profiles_validate_thinking_and_effort_combinations() -> None:
 
 
 def test_profiles_expose_only_the_new_capability_contract() -> None:
+    responses = OpenAIResponsesProfile()
+    assert responses.capabilities.input_modalities == frozenset({"text"})
+    assert responses.capabilities.provider_tools == frozenset()
+    assert responses.capabilities.structured_output is False
+    assert responses.store is False
+    assert responses.include == frozenset({"reasoning.encrypted_content"})
+
     profiles = (
         OpenAIChatCompletionsProfile(),
+        responses,
         AnthropicProfile(),
     )
     removed_fields = (

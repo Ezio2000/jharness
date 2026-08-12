@@ -44,7 +44,7 @@
                     "namespace": "openai.responses",
                     "type": "image_generation"
                   },
-                  "status": "completed",
+                  "status": "incomplete",
                   "arguments": {
                     "prompt": "draw a lighthouse"
                   },
@@ -67,6 +67,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": "fixture-response-1",
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }

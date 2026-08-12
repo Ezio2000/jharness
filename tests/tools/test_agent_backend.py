@@ -17,7 +17,7 @@ from jharness.kernel import (
     RunContext,
     RunLimits,
     Runtime,
-    ToolCall,
+    StructuredToolCall,
 )
 from jharness.toolkit import ToolRegistry
 from jharness.tools import AskQuestionTool
@@ -370,7 +370,7 @@ async def test_in_memory_backend_maps_unsupported_child_suspension() -> None:
     model = _StaticModel(
         ModelResponse(
             (
-                ToolCall(
+                StructuredToolCall(
                     "ask",
                     "AskQuestion",
                     {"questions": [{"id": "confirm", "kind": "confirm", "prompt": "Continue?"}]},

@@ -46,6 +46,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": null,
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }

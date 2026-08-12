@@ -38,7 +38,7 @@ from ._history_manifest import (
 _T = TypeVar("_T")
 
 _CREATE_HEADS = """
-CREATE TABLE IF NOT EXISTS jharness_v2_run_heads (
+CREATE TABLE IF NOT EXISTS jharness_v3_run_heads (
     run_id TEXT NOT NULL PRIMARY KEY CHECK (length(run_id) > 0),
     revision INTEGER NOT NULL CHECK (revision >= 0),
     checkpoint_id TEXT NOT NULL CHECK (length(checkpoint_id) > 0),
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS jharness_v2_run_heads (
 """
 
 _CREATE_LEDGER = """
-CREATE TABLE IF NOT EXISTS jharness_v2_checkpoint_ledger (
+CREATE TABLE IF NOT EXISTS jharness_v3_checkpoint_ledger (
     run_id TEXT NOT NULL CHECK (length(run_id) > 0),
     checkpoint_id TEXT NOT NULL CHECK (length(checkpoint_id) > 0),
     revision INTEGER NOT NULL CHECK (revision >= 0),
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS jharness_v2_checkpoint_ledger (
 """
 
 _CREATE_HISTORY = f"""
-CREATE TABLE IF NOT EXISTS jharness_v2_history_chunks (
+CREATE TABLE IF NOT EXISTS jharness_v3_history_chunks (
     run_id TEXT NOT NULL CHECK (length(run_id) > 0),
     history_generation INTEGER NOT NULL CHECK (history_generation >= 0),
     chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
@@ -147,7 +147,7 @@ class SQLiteRunRepository:
         self._closed = False
 
     async def initialize(self) -> None:
-        """Create the v2 repository schema if needed."""
+        """Create the v3 repository schema if needed."""
 
         await self._run(self._initialize_sync)
 
@@ -254,7 +254,7 @@ class SQLiteRunRepository:
 
             connection.executemany(
                 """
-                INSERT INTO jharness_v2_history_chunks (
+                INSERT INTO jharness_v3_history_chunks (
                     run_id,
                     history_generation,
                     chunk_index,
@@ -277,7 +277,7 @@ class SQLiteRunRepository:
             )
             connection.execute(
                 """
-                INSERT INTO jharness_v2_checkpoint_ledger (
+                INSERT INTO jharness_v3_checkpoint_ledger (
                     run_id, checkpoint_id, revision, checkpoint_digest
                 ) VALUES (?, ?, ?, ?)
                 """,
@@ -312,7 +312,7 @@ class SQLiteRunRepository:
         rows = connection.execute(
             """
             SELECT chunk_index, chunk_payload, chunk_digest, message_count
-            FROM jharness_v2_history_chunks
+            FROM jharness_v3_history_chunks
             WHERE run_id = ?
               AND history_generation = ?
               AND chunk_index < ?
@@ -394,7 +394,7 @@ def _read_head_manifest(connection: sqlite3.Connection, run_id: str) -> _Head | 
                history_chunk_count,
                history_message_count,
                history_digest
-        FROM jharness_v2_run_heads
+        FROM jharness_v3_run_heads
         WHERE run_id = ?
         """,
         (run_id,),
@@ -434,7 +434,7 @@ def _read_complete_head(
                history_message_count,
                history_digest,
                checkpoint_core
-        FROM jharness_v2_run_heads
+        FROM jharness_v3_run_heads
         WHERE run_id = ?
         """,
         (run_id,),
@@ -489,7 +489,7 @@ def _read_ledger(
     row = connection.execute(
         """
         SELECT revision, checkpoint_digest
-        FROM jharness_v2_checkpoint_ledger
+        FROM jharness_v3_checkpoint_ledger
         WHERE run_id = ? AND checkpoint_id = ?
         """,
         (run_id, checkpoint_id),
@@ -547,7 +547,7 @@ def _write_head(
     if actual_revision is None:
         connection.execute(
             """
-            INSERT INTO jharness_v2_run_heads (
+            INSERT INTO jharness_v3_run_heads (
                 run_id,
                 revision,
                 checkpoint_id,
@@ -566,7 +566,7 @@ def _write_head(
         return
     updated = connection.execute(
         """
-        UPDATE jharness_v2_run_heads
+        UPDATE jharness_v3_run_heads
         SET revision = ?,
             checkpoint_id = ?,
             parent_checkpoint_id = ?,

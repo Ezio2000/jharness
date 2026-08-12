@@ -107,23 +107,30 @@ class AnthropicCodec:
         payload: JsonObject,
         request: ModelRequest,
     ) -> None:
-        tools = encode_tools(request.runtime_tools, self.profile)
+        tools = encode_tools(
+            request.runtime_tools,
+            request.provider_tools,
+            self.profile,
+        )
         if tools:
             payload["tools"] = tools
         tool_choice = encode_tool_choice(
             request.tool_choice,
-            tool_names={tool.name for tool in request.runtime_tools},
+            runtime_tool_names={tool.name for tool in request.runtime_tools},
+            provider_tools=request.provider_tools,
+            may_return_runtime_tool_calls=request.may_return_runtime_tool_calls,
             profile=self.profile,
         )
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
 
     def _add_output_options(self, payload: JsonObject, request: ModelRequest) -> None:
-        if request.response_format is not None:
-            output_config = self._encode_response_format(request.response_format)
-            payload.update(self._merge_output_config(output_config))
-        elif self.profile.extra_output_config:
-            payload["output_config"] = dict(self.profile.extra_output_config)
+        output_config = (
+            self._encode_response_format(request.response_format)
+            if request.response_format is not None
+            else {}
+        )
+        payload.update(self._merge_output_config(output_config))
 
     def _add_stream_option(self, payload: JsonObject, *, stream: bool) -> None:
         if stream:
@@ -132,16 +139,14 @@ class AnthropicCodec:
             payload["stream"] = True
 
     def _add_extra_request_body(self, payload: JsonObject) -> None:
-        extra_request_body = cast(Mapping[object, Any], self.profile.extra_request_body)
-        for raw_key, value in extra_request_body.items():
-            if not isinstance(raw_key, str) or not raw_key:
-                raise AnthropicError("extra_request_body keys must be non-empty strings")
-            key = raw_key
-            if key in _RESERVED_REQUEST_FIELDS or key in payload:
-                raise AnthropicError(f"extra_request_body cannot set reserved request field: {key}")
-            if key == self.profile.seed_field:
-                raise AnthropicError(f"extra_request_body cannot set reserved request field: {key}")
-            payload[key] = value
+        reserved_fields = _RESERVED_REQUEST_FIELDS.union(payload)
+        if self.profile.seed_field is not None:
+            reserved_fields.add(self.profile.seed_field)
+        collision = reserved_fields.intersection(self.profile.extra_request_body)
+        if collision:
+            key = min(collision)
+            raise AnthropicError(f"extra_request_body cannot set reserved request field: {key}")
+        payload.update(cast(JsonObject, thaw_json_value(self.profile.extra_request_body)))
 
     def decode_response(
         self,
@@ -157,7 +162,7 @@ class AnthropicCodec:
             raise AnthropicError("Anthropic response requires role='assistant'")
         if "content" not in value or value["content"] is None:
             raise AnthropicError("Anthropic response requires content")
-        output = decode_content_blocks(value["content"])
+        output = decode_content_blocks(value["content"], self.profile)
         if not output:
             raise AnthropicError("Anthropic assistant response requires content or tool_use")
         stop_reason = ANTHROPIC_JSON.required_string(
@@ -173,6 +178,10 @@ class AnthropicCodec:
             usage=usage,
             model_id=ANTHROPIC_JSON.optional_string(value.get("model")),
             response_id=ANTHROPIC_JSON.optional_string(value.get("id")),
+            provider_turn_pending=(
+                stop_reason == "pause_turn"
+                or any(getattr(item, "status", None) == "in_progress" for item in output)
+            ),
             metadata=metadata,
         )
 
@@ -185,7 +194,7 @@ class AnthropicCodec:
             return {
                 "format": {
                     "type": "json_schema",
-                    "schema": dict(self.profile.json_object_schema),
+                    "schema": thaw_json_value(self.profile.json_object_schema),
                 }
             }
         if response_format.type == "json_schema":
@@ -210,7 +219,7 @@ class AnthropicCodec:
     ) -> JsonObject:
         if not output_config and not self.profile.extra_output_config:
             return {}
-        merged = dict(self.profile.extra_output_config)
+        merged = cast(JsonObject, thaw_json_value(self.profile.extra_output_config))
         for key, value in output_config.items():
             if key in merged:
                 raise AnthropicError(f"extra_output_config cannot set response format field: {key}")

@@ -21,7 +21,7 @@ import jharness.tools as tools
 from jharness.kernel import (
     RunContext,
     SettledResult,
-    ToolCall,
+    StructuredToolCall,
     ToolContext,
     ToolError,
     ToolFailure,
@@ -58,7 +58,7 @@ async def _invoke_async(
         _emit_progress,
         is_cancelled,
     )
-    call = ToolCall("bash-call", tool.spec.name, arguments)
+    call = StructuredToolCall("bash-call", tool.spec.name, arguments)
     if through_registry:
         catalog = await ToolRegistry((tool,)).open_catalog()
         result = await catalog.bind(call).invoke(context)
@@ -271,7 +271,7 @@ def test_bash_registry_rejects_invalid_model_arguments(tmp_path: Path) -> None:
         )
         for index, arguments in enumerate(invalid):
             with pytest.raises(ToolError, match="do not match input_schema"):
-                catalog.bind(ToolCall(f"invalid-{index}", "Bash", arguments))
+                catalog.bind(StructuredToolCall(f"invalid-{index}", "Bash", arguments))
 
     asyncio.run(validate())
 

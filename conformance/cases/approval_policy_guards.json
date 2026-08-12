@@ -28,6 +28,7 @@
               "output": [
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "call-1",
                   "name": "echo",
                   "arguments": {
@@ -39,6 +40,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": null,
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }
@@ -100,6 +102,7 @@
               "output": [
                 {
                   "kind": "runtime_tool_call",
+                  "input_kind": "structured",
                   "id": "call-2",
                   "name": "echo",
                   "arguments": {
@@ -111,6 +114,7 @@
               "usage": null,
               "model_id": "fixture-model",
               "response_id": null,
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }

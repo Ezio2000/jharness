@@ -85,9 +85,9 @@
     },
     "model_turn_data": {
       "type": "object",
-      "required": ["result", "part_count", "tool_call_ids", "finish_reason", "usage", "limit_reason"],
+      "required": ["result", "part_count", "tool_call_ids", "provider_turn_pending", "finish_reason", "usage", "limit_reason"],
       "properties": {
-        "result": { "enum": ["completed", "tools_pending", "limited"] },
+        "result": { "enum": ["planning", "completed", "tools_pending", "limited"] },
         "part_count": { "type": "integer", "minimum": 0 },
         "tool_call_ids": {
           "type": "array",
@@ -95,6 +95,7 @@
           "$comment": "Runtime tool call ids only, preserving assistant output order; provider tool calls remain in the assistant message.",
           "items": { "type": "string", "minLength": 1 }
         },
+        "provider_turn_pending": { "type": "boolean" },
         "finish_reason": { "type": ["string", "null"] },
         "usage": {
           "oneOf": [
@@ -111,10 +112,20 @@
       },
       "allOf": [
         {
+          "if": { "properties": { "result": { "const": "planning" } }, "required": ["result"] },
+          "then": {
+            "properties": {
+              "tool_call_ids": { "maxItems": 0 },
+              "limit_reason": { "type": "null" }
+            }
+          }
+        },
+        {
           "if": { "properties": { "result": { "const": "completed" } }, "required": ["result"] },
           "then": {
             "properties": {
               "tool_call_ids": { "maxItems": 0 },
+              "provider_turn_pending": { "const": false },
               "limit_reason": { "type": "null" }
             }
           }
@@ -132,7 +143,8 @@
           "if": { "properties": { "result": { "const": "limited" } }, "required": ["result"] },
           "then": {
             "properties": {
-              "limit_reason": { "const": "max_total_tokens" }
+              "limit_reason": { "const": "max_total_tokens" },
+              "provider_turn_pending": { "const": false }
             }
           }
         }
@@ -253,17 +265,21 @@
     },
     "planning_view": {
       "type": "object",
-      "required": ["kind"],
-      "properties": { "kind": { "const": "planning" } },
+      "required": ["kind", "provider_turn_pending"],
+      "properties": {
+        "kind": { "const": "planning" },
+        "provider_turn_pending": { "type": "boolean" }
+      },
       "additionalProperties": false
     },
     "tools_pending_view": {
       "type": "object",
-      "required": ["kind", "pending_count", "call_id_digest"],
+      "required": ["kind", "pending_count", "call_id_digest", "provider_turn_pending"],
       "properties": {
         "kind": { "const": "tools_pending" },
         "pending_count": { "type": "integer", "minimum": 1 },
-        "call_id_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "call_id_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "provider_turn_pending": { "type": "boolean" }
       },
       "$comment": "The suffix digest is composable with a tool-batch call-id prefix, allowing compact deterministic transition verification.",
       "additionalProperties": false

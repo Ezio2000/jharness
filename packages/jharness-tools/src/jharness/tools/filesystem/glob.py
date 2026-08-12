@@ -8,7 +8,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from jharness.kernel import ToolCall, ToolContext, ToolExecution, ToolResult, ToolRisk, ToolSpec
+from jharness.kernel import (
+    StructuredToolCall,
+    StructuredToolSpec,
+    ToolContext,
+    ToolExecution,
+    ToolResult,
+    ToolRisk,
+)
 from jharness.tools.filesystem._common import (
     DEFAULT_EXCLUDED_DIRECTORY_NAMES,
     FilesystemFailure,
@@ -50,7 +57,7 @@ class GlobTool:
     max_search_seconds: float
     max_scanned_entries: int
     excluded_directory_names: frozenset[str]
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(
         self,
@@ -90,7 +97,7 @@ class GlobTool:
     def root(self) -> Path:
         return self.workspace.root
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         pattern = cast(str, call.arguments["pattern"])
         base_path = cast(str, call.arguments.get("path", "."))
         limit = cast(int, call.arguments.get("limit", self.default_limit))
@@ -164,7 +171,7 @@ class GlobTool:
                         yield display_path
 
 
-def _spec(default_limit: int, max_limit: int, max_pattern_chars: int) -> ToolSpec:
+def _spec(default_limit: int, max_limit: int, max_pattern_chars: int) -> StructuredToolSpec:
     output = {
         "type": "object",
         "required": ["matches", "truncated"],
@@ -174,7 +181,7 @@ def _spec(default_limit: int, max_limit: int, max_pattern_chars: int) -> ToolSpe
         },
         "additionalProperties": False,
     }
-    return ToolSpec(
+    return StructuredToolSpec(
         name="Glob",
         description=(
             "Find files by a relative glob pattern within the configured workspace. "

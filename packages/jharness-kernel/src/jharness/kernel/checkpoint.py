@@ -61,6 +61,7 @@ def _roles(value: object, label: str, *, non_empty: bool = False) -> tuple[str, 
 
 
 class ModelTurnResult(StrEnum):
+    PLANNING = "planning"
     COMPLETED = "completed"
     TOOLS_PENDING = "tools_pending"
     LIMITED = "limited"
@@ -139,6 +140,7 @@ class ModelTurnFact:
     result: ModelTurnResult
     part_count: int
     tool_call_ids: tuple[str, ...]
+    provider_turn_pending: bool
     finish_reason: str | None
     usage: ModelUsage | None
     limit_reason: LimitReason | None
@@ -153,6 +155,7 @@ class ModelTurnFact:
             raise ValueError("model turn part_count must be >= 0")
         call_ids = _strings(self.tool_call_ids, "model turn tool_call_ids", unique=True)
         object.__setattr__(self, "tool_call_ids", call_ids)
+        expect_bool(self.provider_turn_pending, "model turn provider_turn_pending")
         expect_optional_str(self.finish_reason, "model turn finish_reason")
         if self.usage is not None:
             expect_instance(self.usage, ModelUsage, "model turn usage")
@@ -161,13 +164,16 @@ class ModelTurnFact:
         self._validate_result(part_count, call_ids)
 
     def _validate_result(self, part_count: int, call_ids: tuple[str, ...]) -> None:
-        if self.result is ModelTurnResult.COMPLETED:
+        if self.result is ModelTurnResult.PLANNING:
             if call_ids or self.limit_reason is not None:
+                raise ValueError("planning model turn requires no runtime calls or limit")
+        elif self.result is ModelTurnResult.COMPLETED:
+            if call_ids or self.limit_reason is not None or self.provider_turn_pending:
                 raise ValueError("completed model turn requires no runtime calls or limit")
         elif self.result is ModelTurnResult.TOOLS_PENDING:
             if not call_ids or self.limit_reason is not None:
                 raise ValueError("tools_pending model turn requires calls and no limit")
-        elif self.limit_reason is not LimitReason.MAX_TOTAL_TOKENS:
+        elif self.limit_reason is not LimitReason.MAX_TOTAL_TOKENS or self.provider_turn_pending:
             raise ValueError("limited model turn requires max_total_tokens")
 
 
@@ -385,8 +391,8 @@ def _validate_tool_boundary(snapshot: RunSnapshot, fact: ToolBatchFact) -> None:
 
 
 def _validate_planning_boundary(snapshot: RunSnapshot, kind: str) -> None:
-    if not isinstance(snapshot.state, Planning):
-        raise ValueError(f"{kind} checkpoint must leave Planning state")
+    if not isinstance(snapshot.state, Planning) or snapshot.state.provider_turn_pending:
+        raise ValueError(f"{kind} checkpoint must leave interruptible Planning state")
 
 
 def _validate_history_boundary(
@@ -405,9 +411,17 @@ def _validate_model_boundary(snapshot: RunSnapshot, fact: ModelTurnFact) -> None
     assistant = _validate_model_message(snapshot, fact)
     if fact.result is ModelTurnResult.COMPLETED:
         _validate_completed_model(snapshot, fact, assistant.visible_parts())
+    elif fact.result is ModelTurnResult.PLANNING:
+        if (
+            not isinstance(snapshot.state, Planning)
+            or snapshot.state.provider_turn_pending is not fact.provider_turn_pending
+        ):
+            raise ValueError("planning model fact must match Planning state")
     elif fact.result is ModelTurnResult.TOOLS_PENDING:
         if not isinstance(snapshot.state, ToolsPending):
             raise ValueError("tools_pending model fact must match ToolsPending state")
+        if snapshot.state.provider_turn_pending is not fact.provider_turn_pending:
+            raise ValueError("tools_pending provider continuation must match model fact")
         calls = assistant.runtime_tool_calls()
         if len(snapshot.state.pending) != len(calls) or any(
             pending != call

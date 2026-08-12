@@ -45,19 +45,6 @@ def immutable_string_mapping(value: object, label: str) -> Mapping[str, str]:
     return MappingProxyType(result)
 
 
-def immutable_string_set_mapping(
-    value: object,
-    label: str,
-) -> Mapping[str, frozenset[str]]:
-    if not isinstance(value, Mapping):
-        raise TypeError(f"{label} must be a mapping")
-    result: dict[str, frozenset[str]] = {}
-    for key, item in cast(Mapping[object, object], value).items():
-        required_string(key, f"{label} key")
-        result[cast(str, key)] = string_set(item, f"{label}[{key!r}]")
-    return MappingProxyType(result)
-
-
 def string_set(value: object, label: str) -> frozenset[str]:
     if not isinstance(value, frozenset):
         raise TypeError(f"{label} must be a frozenset")
@@ -73,7 +60,6 @@ def validate_capabilities(
     profile: str,
     input_modalities: frozenset[str],
     output_modalities: frozenset[str],
-    allowed_provider_tools: frozenset[str] = frozenset(),
 ) -> ModelCapabilities:
     """Validate one protocol profile against its actual codec surface."""
 
@@ -87,13 +73,4 @@ def validate_capabilities(
     if unsupported_outputs:
         modality = min(unsupported_outputs)
         raise ValueError(f"unsupported {profile} output modality: {modality}")
-    unsupported_tools = {
-        tool.type for tool in value.provider_tools if tool.type not in allowed_provider_tools
-    }
-    if unsupported_tools:
-        tool_type = min(unsupported_tools)
-        raise ValueError(f"unsupported {profile} provider tool type: {tool_type}")
-    types = [tool.type for tool in value.provider_tools]
-    if len(types) != len(set(types)):
-        raise ValueError(f"{profile} provider tool types must be unique")
     return value

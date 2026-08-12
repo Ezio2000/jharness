@@ -7,12 +7,14 @@ from typing import Any, Literal, cast
 
 from jharness.kernel.errors import ProtocolError
 from jharness.kernel.tools import (
+    FreeformToolSpec,
+    RuntimeToolSpec,
     SettledResult,
+    StructuredToolSpec,
     ToolAccepted,
     ToolExecution,
     ToolFailure,
     ToolRisk,
-    ToolSpec,
     ToolSuccess,
     ToolWaiting,
     WaitingResult,
@@ -30,10 +32,10 @@ from jharness.kernel.wire.messages import decode_tool_outcome_value, encode_tool
 from jharness.kernel.wire.state import decode_suspension_value, encode_suspension
 
 __all__ = [
+    "decode_runtime_tool_spec",
     "decode_tool_result",
-    "decode_tool_spec",
+    "encode_runtime_tool_spec",
     "encode_tool_result",
-    "encode_tool_spec",
 ]
 
 _RISK_FIELDS = frozenset(
@@ -41,13 +43,13 @@ _RISK_FIELDS = frozenset(
 )
 
 
-def encode_tool_spec(spec: ToolSpec) -> dict[str, Any]:
-    """Encode one portable tool specification."""
+def encode_runtime_tool_spec(spec: RuntimeToolSpec) -> dict[str, Any]:
+    """Encode one portable runtime-tool specification."""
 
-    return {
+    encoded: dict[str, Any] = {
+        "kind": "structured" if isinstance(spec, StructuredToolSpec) else "freeform",
         "name": spec.name,
         "description": spec.description,
-        "input_schema": _encode_schema(spec.input_schema),
         "output_schema": (
             None if spec.output_schema is None else _encode_schema(spec.output_schema)
         ),
@@ -58,29 +60,50 @@ def encode_tool_spec(spec: ToolSpec) -> dict[str, Any]:
         },
         "risk": encode_risk_value(spec.risk),
     }
+    if isinstance(spec, StructuredToolSpec):
+        encoded["input_schema"] = _encode_schema(spec.input_schema)
+    return encoded
 
 
-def decode_tool_spec(value: object) -> ToolSpec:
-    """Decode one portable tool specification."""
+def decode_runtime_tool_spec(value: object) -> RuntimeToolSpec:
+    """Decode one portable runtime-tool specification."""
 
-    return decode_document(value, "tool spec", decode_tool_spec_value)
+    return decode_document(value, "runtime tool spec", decode_runtime_tool_spec_value)
 
 
-def decode_tool_spec_value(value: object) -> ToolSpec:
+def decode_runtime_tool_spec_value(value: object) -> RuntimeToolSpec:
+    mapping = json_object(value, "runtime tool spec")
+    kind = string(mapping.get("kind"), "runtime tool spec kind")
+    required = {"kind", "name", "description", "output_schema", "execution", "risk"}
     fields = object_fields(
-        value,
-        "tool spec",
-        {"name", "description", "input_schema", "output_schema", "execution", "risk"},
+        mapping,
+        f"{kind} runtime tool spec",
+        required | ({"input_schema"} if kind == "structured" else set()),
     )
     raw_output = fields["output_schema"]
-    return ToolSpec(
-        name=string(fields["name"], "tool name", non_empty=True),
-        description=string(fields["description"], "tool description"),
-        input_schema=_decode_schema(fields["input_schema"], "input_schema"),
-        output_schema=(None if raw_output is None else _decode_schema(raw_output, "output_schema")),
-        execution=_decode_execution(fields["execution"]),
-        risk=decode_risk_value(fields["risk"]),
-    )
+    name = string(fields["name"], "tool name", non_empty=True)
+    description = string(fields["description"], "tool description")
+    output_schema = None if raw_output is None else _decode_schema(raw_output, "output_schema")
+    execution = _decode_execution(fields["execution"])
+    risk = decode_risk_value(fields["risk"])
+    if kind == "structured":
+        return StructuredToolSpec(
+            name=name,
+            description=description,
+            input_schema=_decode_schema(fields["input_schema"], "input_schema"),
+            output_schema=output_schema,
+            execution=execution,
+            risk=risk,
+        )
+    if kind == "freeform":
+        return FreeformToolSpec(
+            name=name,
+            description=description,
+            output_schema=output_schema,
+            execution=execution,
+            risk=risk,
+        )
+    raise ProtocolError(f"runtime tool spec kind has unsupported value: {kind}")
 
 
 def _encode_schema(value: Mapping[str, Any] | bool) -> Mapping[str, Any] | bool:

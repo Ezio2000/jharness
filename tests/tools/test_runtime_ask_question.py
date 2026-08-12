@@ -23,9 +23,9 @@ from jharness.kernel import (
     RequestError,
     RunContext,
     Runtime,
+    StructuredToolCall,
     Suspended,
     SuspensionSelector,
-    ToolCall,
     ToolChoice,
 )
 from jharness.kernel.wire import decode_checkpoint, encode_checkpoint
@@ -172,13 +172,13 @@ class _TranscriptQuestionModel(Model):
         del context, stream, emit_delta
         self.requests.append(request)
         assert [spec.name for spec in request.runtime_tools] == ["AskQuestion"]
-        assert request.tool_choice.allow_parallel_tool_calls is False
+        assert request.tool_choice.allow_parallel_runtime_tool_calls is False
 
         response = _external_payload(request)
         if response is None:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "ask-real",
                         "AskQuestion",
                         {"questions": self._questions},
@@ -219,7 +219,7 @@ class _MultipleQuestionCallsModel(Model):
         emit_delta: DeltaSink | None,
     ) -> ModelResponse:
         del context, stream, emit_delta
-        assert request.tool_choice.allow_parallel_tool_calls is False
+        assert request.tool_choice.allow_parallel_runtime_tool_calls is False
         question = {
             "id": "confirm",
             "kind": "confirm",
@@ -227,8 +227,8 @@ class _MultipleQuestionCallsModel(Model):
         }
         return ModelResponse(
             (
-                ToolCall("ask-first", "AskQuestion", {"questions": [question]}),
-                ToolCall("ask-second", "AskQuestion", {"questions": [question]}),
+                StructuredToolCall("ask-first", "AskQuestion", {"questions": [question]}),
+                StructuredToolCall("ask-second", "AskQuestion", {"questions": [question]}),
             )
         )
 
@@ -244,7 +244,7 @@ def _runtime(model: Model) -> Runtime:
     return Runtime(
         model=model,
         tools=ToolRegistry((AskQuestionTool(),)),
-        tool_choice=ToolChoice(allow_parallel_tool_calls=False),
+        tool_choice=ToolChoice(allow_parallel_runtime_tool_calls=False),
     )
 
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from jharness.kernel._digest import append_history_digest, empty_history_digest
 from jharness.kernel._validation import expect_instance_tuple
 from jharness.kernel.history import RunHistory
-from jharness.kernel.messages import Message, ToolCall
+from jharness.kernel.messages import Message, RuntimeToolCall
 from jharness.kernel.state import (
     Failed,
     Limited,
@@ -193,7 +193,9 @@ def _pending_state(state: RunState) -> ToolsPending | None:
     return None
 
 
-def _record_call_ids(calls: tuple[ToolCall, ...], seen: _PersistentIdSet) -> _PersistentIdSet:
+def _record_call_ids(
+    calls: tuple[RuntimeToolCall, ...], seen: _PersistentIdSet
+) -> _PersistentIdSet:
     updated = seen
     for call in calls:
         if call.id in updated:

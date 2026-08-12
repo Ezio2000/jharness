@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import time
 from typing import Any, TypeAlias, cast
 from uuid import uuid4
@@ -26,6 +26,8 @@ from jharness.kernel.approval import ApprovalPolicy
 from jharness.kernel.checkpoint import (
     Checkpoint,
     HistoryRewriteFact,
+    ModelTurnFact,
+    ModelTurnResult,
     ResumedFact,
     StartedFact,
 )
@@ -53,6 +55,7 @@ from jharness.kernel.models import (
 from jharness.kernel.repository import EphemeralRepository, RunRepository
 from jharness.kernel.snapshot import RunSnapshot
 from jharness.kernel.state import (
+    Completed,
     Limited,
     Planning,
     RunMetrics,
@@ -284,7 +287,12 @@ class Engine:
         capabilities: ModelCapabilities,
         skip_reducer: bool,
     ) -> tuple[Checkpoint, bool]:
-        if self._config.history_reducer is not None and not skip_reducer:
+        state = cast(Planning, checkpoint.snapshot.state)
+        if (
+            self._config.history_reducer is not None
+            and not skip_reducer
+            and not state.provider_turn_pending
+        ):
             rewrite = await self._reduce_history(checkpoint)
             if rewrite is not None:
                 rewritten = isinstance(rewrite.fact, HistoryRewriteFact)
@@ -307,7 +315,10 @@ class Engine:
             checkpoint.snapshot,
             deadline=self._deadline,
             inbox=cast(ControlInbox, self._inbox),
+            defer_insert=self._deferred.append if state.provider_turn_pending else None,
         )
+        if state.provider_turn_pending and self._deferred:
+            change = _continue_for_deferred_inserts(change)
         return await self._commit(checkpoint, change), False
 
     async def _tools(self, checkpoint: Checkpoint, state: ToolsPending) -> Checkpoint:
@@ -347,8 +358,8 @@ class Engine:
         state = cast(Planning | ToolsPending, checkpoint.snapshot.state)
         if pause is not None:
             return suspend(state, pause.suspension)
-        if isinstance(state, Planning) and self._deferred:
-            return insert(self._deferred.popleft())
+        if isinstance(state, Planning) and not state.provider_turn_pending and self._deferred:
+            return insert(self._deferred.popleft(), state)
         return None
 
     async def _reduce_history(self, checkpoint: Checkpoint) -> Change | None:
@@ -363,7 +374,7 @@ class Engine:
             if isinstance(interrupted.control, Pause):
                 return suspend(Planning(), interrupted.control.suspension)
             if isinstance(interrupted.control, Insert):
-                return insert(interrupted.control)
+                return insert(interrupted.control, Planning())
             raise
         except WorkDeadlineReached:
             return limited(LimitReason.DEADLINE)
@@ -433,3 +444,16 @@ class Engine:
 
 def _deadline_change(change: Change) -> bool:
     return isinstance(change.state, Limited) and change.state.reason is LimitReason.DEADLINE
+
+
+def _continue_for_deferred_inserts(change: Change) -> Change:
+    """Keep a completed continuation active until queued inserts become durable."""
+
+    if not isinstance(change.state, Completed):
+        return change
+    fact = expect_instance(change.fact, ModelTurnFact, "completed model turn fact")
+    return replace(
+        change,
+        fact=replace(fact, result=ModelTurnResult.PLANNING),
+        state=Planning(),
+    )

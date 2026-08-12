@@ -27,11 +27,11 @@ from jharness.kernel import (
     RunContext,
     Runtime,
     SettledResult,
+    StructuredToolCall,
     Suspended,
     Suspension,
     SuspensionView,
     ToolBatchFact,
-    ToolCall,
     ToolContext,
     ToolError,
     ToolFailure,
@@ -72,7 +72,7 @@ async def _invoke_async(
         _emit_progress,
         lambda: cancelled,
     )
-    call = ToolCall("question-call", tool.spec.name, arguments)
+    call = StructuredToolCall("question-call", tool.spec.name, arguments)
     if through_registry:
         catalog = await ToolRegistry((tool,)).open_catalog()
         return await catalog.bind(call).invoke(context)
@@ -921,7 +921,7 @@ def test_registry_rejects_structurally_invalid_arguments() -> None:
         catalog = await ToolRegistry((tool,)).open_catalog()
         for index, arguments in enumerate(invalid):
             with pytest.raises(ToolError, match="do not match input_schema"):
-                catalog.bind(ToolCall(f"invalid-{index}", "AskQuestion", arguments))
+                catalog.bind(StructuredToolCall(f"invalid-{index}", "AskQuestion", arguments))
 
     asyncio.run(validate())
 
@@ -1843,7 +1843,7 @@ def _question_checkpoint(
     )
     selected_tool = AskQuestionTool() if tool is None else tool
     context = RunContext(run_id, time.time())
-    call = ToolCall(tool_call_id, "AskQuestion", selected_arguments)
+    call = StructuredToolCall(tool_call_id, "AskQuestion", selected_arguments)
     result = asyncio.run(
         selected_tool.invoke(call, ToolContext(context, _emit_progress, lambda: False))
     )
@@ -1906,7 +1906,7 @@ def test_extract_question_request_rejects_wrong_type_suspension_and_resume_state
 
     wrong_resume = _forged_checkpoint(
         Suspended(
-            ToolsPending(PendingToolCalls((ToolCall("pending", "AskQuestion"),))),
+            ToolsPending(PendingToolCalls((StructuredToolCall("pending", "AskQuestion"),))),
             _ask_suspension(),
         )
     )
@@ -2004,7 +2004,7 @@ def test_extract_question_request_binds_snapshot_context_contract_and_assistant_
         )
 
     user_message, _, tool_message = checkpoint.snapshot.history
-    malformed_call = ToolCall("call:one", "AskQuestion", {"questions": []})
+    malformed_call = StructuredToolCall("call:one", "AskQuestion", {"questions": []})
     malformed_history = (
         user_message,
         Message.assistant((malformed_call,)),
@@ -2020,7 +2020,7 @@ def test_extract_question_request_binds_snapshot_context_contract_and_assistant_
             )
         )
 
-    changed_call = ToolCall(
+    changed_call = StructuredToolCall(
         "call:one",
         "AskQuestion",
         {"questions": [{"id": "confirm", "kind": "confirm", "prompt": "Different?"}]},
@@ -2120,7 +2120,9 @@ def test_current_waiting_outcome_rejects_stale_or_unproven_tool_messages() -> No
             "call",
         )
 
-    wrong_identity = Message.assistant((ToolCall("call", "Other", assistant_call.arguments),))
+    wrong_identity = Message.assistant(
+        (StructuredToolCall("call", "Other", assistant_call.arguments),)
+    )
     with pytest.raises(ValueError, match="wrong identity"):
         question_response_module._current_waiting_outcome(
             _forged_checkpoint(
@@ -2131,7 +2133,9 @@ def test_current_waiting_outcome_rejects_stale_or_unproven_tool_messages() -> No
             "call",
         )
 
-    wrong_call_id = Message.assistant((ToolCall("other", "AskQuestion", assistant_call.arguments),))
+    wrong_call_id = Message.assistant(
+        (StructuredToolCall("other", "AskQuestion", assistant_call.arguments),)
+    )
     with pytest.raises(ValueError, match="wrong identity"):
         question_response_module._current_waiting_outcome(
             _forged_checkpoint(

@@ -180,9 +180,9 @@ class MySQLRunRepository:
         self._write_timeout = _positive_integer(write_timeout, "write_timeout")
         worker_count = _positive_integer(max_workers, "max_workers")
 
-        self._heads_table = f"{self._table_prefix}_v2_run_heads"
-        self._ledger_table = f"{self._table_prefix}_v2_checkpoint_ledger"
-        self._history_table = f"{self._table_prefix}_v2_history_chunks"
+        self._heads_table = f"{self._table_prefix}_v3_run_heads"
+        self._ledger_table = f"{self._table_prefix}_v3_checkpoint_ledger"
+        self._history_table = f"{self._table_prefix}_v3_history_chunks"
         self._executor = ThreadPoolExecutor(
             max_workers=worker_count,
             thread_name_prefix="jharness-mysql",
@@ -194,7 +194,7 @@ class MySQLRunRepository:
         self._closed = False
 
     async def initialize(self) -> None:
-        """Connect to MySQL and create the v2 InnoDB schema if needed."""
+        """Connect to MySQL and create the v3 InnoDB schema if needed."""
 
         await self._run(self._initialize_sync, "initialization")
 
@@ -900,7 +900,7 @@ def _validate_table_prefix(value: str) -> str:
     value = _non_empty_string(value, "table_prefix")
     if _TABLE_PREFIX.fullmatch(value) is None:
         raise ValueError("table_prefix must contain only ASCII letters, digits, and underscores")
-    suffixes = ("_v2_run_heads", "_v2_checkpoint_ledger", "_v2_history_chunks")
+    suffixes = ("_v3_run_heads", "_v3_checkpoint_ledger", "_v3_history_chunks")
     if any(len(f"{value}{suffix}") > 64 for suffix in suffixes):
         raise ValueError("table_prefix is too long for a MySQL table name")
     return value

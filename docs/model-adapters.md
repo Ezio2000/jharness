@@ -55,10 +55,15 @@ model = OpenAIResponsesModel(
 
 Profiles declare endpoint capabilities and request-shape differences. The runtime
 checks those capabilities before invocation instead of guessing from a model name.
-Custom profiles can enable only features the selected endpoint actually supports.
 Every profile carries one immutable `ModelCapabilities` value, and the model client
 returns that same value unchanged. There is no second set of per-feature profile
 booleans for the client to translate.
+
+The default `OpenAIResponsesProfile` is deliberately conservative: text input and
+output, runtime functions, streaming, and usage only. It does not claim image/file
+input, structured output, JSON mode, or provider-hosted tools for an arbitrary model
+identifier. The host opts into only features verified for its selected model by
+supplying an explicit profile.
 
 For example, narrow Chat Completions to text input while retaining its other default
 capabilities:
@@ -79,11 +84,13 @@ text_only = OpenAIChatCompletionsProfile(
 ```
 
 `ModelCapabilities.tool_choice_types` declares the exact accepted choice vocabulary;
-`parallel_tool_call_control` says whether `allow_parallel_tool_calls=False` can be
-honored; and `seed` declares whether `ModelOptions.seed` is accepted. Protocol-only
-wire choices—such as whether automatic tool choice is explicit, how reasoning history
-is encoded, or which fields a hosted tool accepts—remain profile policy rather than
-kernel semantics.
+`parallel_runtime_tool_calls` and `parallel_runtime_tool_call_control` describe runtime-owned calls
+only. The latter says whether a model that may return parallel runtime calls can honor
+`allow_parallel_runtime_tool_calls=False`; provider-only selection neither requires that
+control nor emits its wire field. `seed` declares whether `ModelOptions.seed` is
+accepted. Protocol-only wire choices—such as whether automatic tool choice is explicit,
+how reasoning history is encoded, or which fields a hosted tool accepts—remain profile
+policy rather than kernel semantics.
 
 ## Capability and Execution Boundaries
 
@@ -93,9 +100,9 @@ The kernel values deliberately do not copy a supplier's feature list:
 | --- | --- | --- |
 | Image understanding | `"image"` in `ModelCapabilities.input_modalities` and an image `ContentPart` in the request | The model |
 | Native image output | `"image"` in `ModelCapabilities.output_modalities` | The model |
-| Host function call | `ToolSpec` in `ModelRequest.runtime_tools`; returned as `ToolCall` | JHarness runtime and the host tool catalog |
+| Host function call | `RuntimeToolSpec` (`StructuredToolSpec` or `FreeformToolSpec`) in `ModelRequest.runtime_tools`; returned as the matching `RuntimeToolCall` | JHarness runtime and the host tool catalog |
 | Hosted image generation or web search | Namespaced `ProviderToolId` in `ModelCapabilities.provider_tools`, requested with `ProviderToolSpec`, and returned as `ProviderToolCall` | The remote provider |
-| Mixed protocol result | `ModelResponse.output` containing ordered `ContentPart`, `ToolCall`, and `ProviderToolCall` values | The adapter maps it; the kernel preserves it |
+| Mixed protocol result | `ModelResponse.output` containing ordered `ContentPart`, `RuntimeToolCall`, and `ProviderToolCall` values | The adapter maps it; the kernel preserves it |
 
 A hosted image-generation result may contain an image in
 `ProviderToolCall.output` even when the model itself advertises only text output. The
@@ -107,13 +114,15 @@ The current adapters expose these boundaries as follows:
 | Adapter/profile | Default model input | Native model output | Runtime tools | Provider-hosted tools | Conversation rule |
 | --- | --- | --- | --- | --- | --- |
 | OpenAI Chat Completions | Text and image | Text | Function tools | None | Complete JHarness history is encoded as messages |
-| Anthropic Messages | Text, image, and file | Text | Client `tool_use` blocks | None | Complete JHarness history is encoded as Messages blocks |
-| OpenAI Responses | Text, image, and file | Text | Function tools | `openai.responses/image_generation` and `openai.responses/web_search` | Ordered history is encoded as Responses input items; JHarness does not rely on a stored conversation ID |
-| DeepSeek Responses profile | Text only | Text | Function tools | `deepseek.responses/web_search` | Strictly stateless; complete history is resent |
+| Anthropic Messages | Text, image, and file | Text | Client `tool_use` blocks | Profile-installed server-tool codecs | Complete JHarness history is encoded as Messages blocks |
+| OpenAI Responses default | Text | Text | Function tools | None | Complete ordered history is encoded as Responses input items with `store=false` |
+| OpenAI Responses explicit profile | Host-declared subset of text, image, and file | Text | Function tools | Host-declared image generation and/or web search | Profile storage policy and complete ordered history are authoritative |
+| DeepSeek Responses profile | Text only | Text | Function and `apply_patch` freeform tools | `deepseek.responses/web_search` | Strictly stateless; complete history is resent |
+| DeepSeek Anthropic profile | Text only | Text | Client `tool_use` blocks | `deepseek.anthropic/web_search` | Complete Messages history, including opaque search results, is replayed exactly |
 
-Profiles remain authoritative. A custom compatible endpoint may advertise a narrower
-set, and the runtime rejects unsupported request modalities or tool identities before
-network invocation.
+Profiles remain authoritative. The runtime rejects request modalities and tool
+identities that the selected explicit profile does not advertise before network
+invocation.
 
 ### Profile Ownership
 
@@ -146,12 +155,98 @@ message = Message(
 )
 ```
 
-Declare OpenAI-hosted image generation separately and pass it to `Runtime`:
+Declare OpenAI-hosted image generation in an explicit model profile. Generated bytes
+must be externalized through a host-owned `ResponsesArtifactStore` before the model
+response can enter durable history:
 
 ```python
-from jharness.kernel import ProviderToolId, ProviderToolSpec, Runtime, ToolChoice
+import asyncio
+import os
+from dataclasses import replace
+from hashlib import sha256
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+
+from jharness.kernel import ArtifactRef, ProviderToolId, ProviderToolSpec, Runtime, ToolChoice
+from jharness.models.openai import (
+    OpenAIResponsesModel,
+    OpenAIResponsesProfile,
+    ResponsesArtifactStore,
+    ResponsesImageGenerationTool,
+    ResponsesProviderToolRegistry,
+)
+
+
+class LocalImageArtifacts(ResponsesArtifactStore):
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, digest: str) -> Path:
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise ValueError("invalid image artifact digest")
+        return self.root / digest[:2] / digest
+
+    @staticmethod
+    def _write_atomically(path: Path, data: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            if sha256(path.read_bytes()).hexdigest() != path.name:
+                raise ValueError("existing image artifact is corrupt")
+            return
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(mode="wb", dir=path.parent, delete=False) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(data)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    async def save_image(self, data, *, media_type, call_id, context):
+        del call_id, context
+        digest = sha256(data).hexdigest()
+        await asyncio.to_thread(self._write_atomically, self._path(digest), data)
+        return ArtifactRef(
+            f"sha256:{digest}",
+            media_type=media_type,
+            size_bytes=len(data),
+            sha256=digest,
+        )
+
+    async def load_image(self, artifact, *, call_id, context):
+        del call_id, context
+        digest = artifact.sha256
+        if digest is None or artifact.ref != f"sha256:{digest}":
+            raise ValueError("invalid image artifact reference")
+        data = await asyncio.to_thread(self._path(digest).read_bytes)
+        if sha256(data).hexdigest() != digest:
+            raise ValueError("stored image artifact is corrupt")
+        return data
+
 
 image_generation = ProviderToolId("openai.responses", "image_generation")
+base = OpenAIResponsesProfile()
+profile = OpenAIResponsesProfile(
+    capabilities=replace(
+        base.capabilities,
+        tool_choice_types=base.capabilities.tool_choice_types | {"provider"},
+        provider_tools=frozenset({image_generation}),
+    ),
+    provider_tool_registry=ResponsesProviderToolRegistry(
+        (ResponsesImageGenerationTool(tool=image_generation),)
+    ),
+)
+model = OpenAIResponsesModel(
+    base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    api_key=os.environ["OPENAI_API_KEY"],
+    model=os.environ["OPENAI_MODEL"],
+    profile=profile,
+    artifact_store=LocalImageArtifacts(Path("artifacts").resolve()),
+)
 runtime = Runtime(
     model=model,
     provider_tools=(
@@ -164,9 +259,35 @@ runtime = Runtime(
 )
 ```
 
-The Responses adapter sends this as an `image_generation` hosted tool. OpenAI executes
-it, and the adapter records the call and its image result as one `ProviderToolCall` in
-ordered output. The JHarness tool registry is not involved.
+The client persists the decoded image before returning `ModelResponse` and replaces
+its inline base64 with an `ArtifactRef`. Before a later model turn, it loads that
+artifact into an invocation-local wire request. Durable checkpoints and repository
+history therefore never retain generated image base64. Partial streaming images remain
+live-only. The JHarness tool registry is not involved.
+
+`call_id` is provider-controlled and response-scoped. An artifact store must not use it
+as a filesystem path or assume it is globally unique. A successful save is durable;
+repeated saves of the same bytes are idempotent, and an existing reference is never
+reassigned to different content. The returned `ArtifactRef` must remain stable across
+process restarts and carry exact `size_bytes` and SHA-256 metadata. A load either returns
+the exact referenced bytes or fails the model turn.
+
+Artifact saving happens before the response checkpoint is committed. Cancellation,
+subsequent validation failure, or repository failure can therefore leave an unreferenced
+save. The host must retain reachable artifacts for at least as long as their checkpoints,
+configure the same store when recovering a run, and garbage-collect staged artifacts
+that never become reachable from committed history. Content-addressed storage, as in the
+example, makes repeated saves safe and simplifies that cleanup.
+
+### Responses Storage Policy
+
+The default OpenAI Responses profile sends `store=false` and requests
+`reasoning.encrypted_content`, allowing reasoning items to round-trip in complete
+history without relying on provider storage. Set `store=True` explicitly only when the
+host permits provider retention; `include` may then be empty. `store` and `include` are
+first-class profile fields and cannot be overridden through `extra_request_body`.
+Compatible endpoints that do not implement these fields use `store=None` and an empty
+`include`, as the DeepSeek Responses profile does.
 
 ## DeepSeek Profiles
 
@@ -208,10 +329,11 @@ model = OpenAIResponsesModel(
 ```
 
 This profile accepts only `deepseek-v4-flash`, text input and output, runtime function
-tools, and the provider-hosted `deepseek.responses/web_search` tool. It rejects image
-or file input, image generation, unmodeled provider tools, `seed`, and attempts to
-disable parallel tool calls. Web-search configuration must be omitted because the
-endpoint does not apply it. These checks happen locally instead of relying on fields
+tools, the exact freeform runtime tool `apply_patch`, and the provider-hosted
+`deepseek.responses/web_search` tool. Web search accepts the proven `web_search` and
+`web_search_2025_08_26` wire variants. It rejects image or file input, image generation,
+unmodeled provider tools, `seed`, and requests to disable parallel runtime calls while
+runtime tools remain selectable. These checks happen locally instead of relying on fields
 the compatible endpoint may silently ignore. DeepSeek Responses is stateless: every
 request carries the complete ordered history, and the codec omits `store` and
 `previous_response_id` instead of relying on provider-managed conversation state. It
@@ -258,7 +380,8 @@ Chat Completions and Messages are normalized into the same ordered kernel result
 Responses. Messages retains native block order; Chat Completions places its content
 before the provider-ordered call array because that wire protocol exposes them as
 separate fields. Neither adapter exposes separate content and tool-call result arrays
-to the kernel. Responses function items use the provider `call_id` as `ToolCall.id`,
+to the kernel. Responses function and custom items use the provider `call_id` as
+`RuntimeToolCall.id`,
 while hosted tool items become namespaced `ProviderToolCall` values.
 
 Streaming events use `output_index` and, for nested content, `content_index`.
@@ -289,7 +412,9 @@ selected native item data in explicit `ContentPart.data`, `metadata`, or
 opaque details do not become general kernel semantics. The package implements OpenAI
 Chat Completions, Anthropic Messages, and OpenAI-compatible Responses. Hosted tools
 are available only when explicitly advertised by the selected profile and requested
-through `ProviderToolSpec`; current Responses support covers image generation and web
-search, while the Chat Completions and Messages adapters expose runtime tools only.
+through `ProviderToolSpec`. Responses installs independent codecs for image generation
+and web search; Anthropic Messages installs independent server-tool codecs, including
+DeepSeek's verified web search. Chat Completions remains a runtime-tool protocol unless
+a concrete Chat-compatible endpoint exposes a stable hosted-call lifecycle.
 Provider-managed conversation state, batch jobs, and file-upload management remain
 outside this package.

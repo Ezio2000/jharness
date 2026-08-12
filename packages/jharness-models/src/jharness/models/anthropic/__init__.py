@@ -3,6 +3,11 @@
 from jharness.models.anthropic.errors import AnthropicError
 from jharness.models.anthropic.messages_api.client import AnthropicModel
 from jharness.models.anthropic.messages_api.codec import AnthropicCodec
+from jharness.models.anthropic.messages_api.server_tools import (
+    AnthropicServerToolCodec,
+    AnthropicServerToolRegistry,
+    anthropic_web_search_codec,
+)
 from jharness.models.anthropic.profiles import AnthropicProfile
 
 __all__ = [
@@ -10,4 +15,7 @@ __all__ = [
     "AnthropicError",
     "AnthropicModel",
     "AnthropicProfile",
+    "AnthropicServerToolCodec",
+    "AnthropicServerToolRegistry",
+    "anthropic_web_search_codec",
 ]

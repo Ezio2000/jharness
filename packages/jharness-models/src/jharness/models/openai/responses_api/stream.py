@@ -13,15 +13,18 @@ from jharness.kernel import (
     ModelProviderToolCallDelta,
     ModelReasoningDelta,
     ModelResponse,
-    ModelToolCallDelta,
+    ModelRuntimeToolCallDelta,
     ModelUsageDelta,
-    ProviderToolId,
     ProviderToolStatus,
+    RuntimeToolKind,
 )
 from jharness.models.openai.errors import OPENAI_RESPONSES_JSON, OpenAIResponsesError
 from jharness.models.openai.profiles import OpenAIResponsesProfile
 from jharness.models.openai.responses_api.codec import OpenAIResponsesCodec, decode_usage
-from jharness.models.openai.responses_api.messages import provider_status
+from jharness.models.openai.responses_api.provider_tools import (
+    ResponsesProviderToolCodec,
+    is_terminal_provider_status,
+)
 
 
 @dataclass(slots=True)
@@ -30,6 +33,8 @@ class _ItemState:
     item_type: str
     call_id: str | None = None
     name: str | None = None
+    runtime_kind: RuntimeToolKind | None = None
+    provider_codec: ResponsesProviderToolCodec | None = None
     status: ProviderToolStatus | None = None
     closed: bool = False
 
@@ -38,15 +43,6 @@ class _ItemState:
 class _PartState:
     part_type: str
     closed: bool = False
-
-
-_PROVIDER_TERMINAL_STATUSES = frozenset(
-    {
-        ProviderToolStatus.COMPLETED,
-        ProviderToolStatus.INCOMPLETE,
-        ProviderToolStatus.FAILED,
-    }
-)
 
 
 class OpenAIResponsesStreamDecoder:
@@ -89,10 +85,9 @@ class OpenAIResponsesStreamDecoder:
         handler = self._event_handlers().get(event_type)
         if handler is not None:
             return False, handler(value)
-        if event_type.startswith("response.image_generation_call."):
-            return False, self._image_generation_event(event_type, value)
-        if event_type.startswith("response.web_search_call."):
-            return False, self._web_search_event(event_type, value)
+        provider_codec = self._profile.provider_tool_registry.codec_for_event(event_type)
+        if provider_codec is not None:
+            return False, self._provider_tool_event(provider_codec, event_type, value)
         if event_type in {
             "response.completed",
             "response.incomplete",
@@ -129,6 +124,7 @@ class OpenAIResponsesStreamDecoder:
                 "response.reasoning_summary_text.delta",
             ),
             "response.function_call_arguments.delta": self._function_arguments_delta,
+            "response.custom_tool_call_input.delta": self._custom_input_delta,
             **{
                 event_type: partial(self._validate_done_event, event_type)
                 for event_type in (
@@ -137,6 +133,7 @@ class OpenAIResponsesStreamDecoder:
                     "response.reasoning_text.done",
                     "response.reasoning_summary_text.done",
                     "response.function_call_arguments.done",
+                    "response.custom_tool_call_input.done",
                 )
             },
         }
@@ -200,39 +197,57 @@ class OpenAIResponsesStreamDecoder:
         self._items[output_index] = state
         if item_type in {"message", "reasoning"}:
             return []
-        if item_type == "function_call":
+        runtime_kind = {
+            "function_call": RuntimeToolKind.STRUCTURED,
+            "custom_tool_call": RuntimeToolKind.FREEFORM,
+        }.get(item_type)
+        if runtime_kind is not None:
+            if runtime_kind not in self._profile.capabilities.runtime_tool_kinds:
+                raise OpenAIResponsesError(
+                    f"{self._profile.name} does not support {runtime_kind.value} runtime tools"
+                )
+            state.runtime_kind = runtime_kind
             state.call_id = OPENAI_RESPONSES_JSON.required_string(
                 item.get("call_id"),
-                "Responses function call call_id",
+                "Responses runtime tool call call_id",
             )
             state.name = OPENAI_RESPONSES_JSON.required_string(
                 item.get("name"),
-                "Responses function call name",
+                "Responses runtime tool call name",
             )
-            arguments = item.get("arguments", "")
-            if not isinstance(arguments, str):
-                raise OpenAIResponsesError("Responses function call arguments must be a string")
+            if (
+                runtime_kind is RuntimeToolKind.FREEFORM
+                and not self._profile.allows_freeform_runtime_tool(state.name)
+            ):
+                raise OpenAIResponsesError(
+                    f"{self._profile.name} does not support freeform runtime tool: {state.name}"
+                )
+            input_field = "arguments" if runtime_kind is RuntimeToolKind.STRUCTURED else "input"
+            input_value = item.get(input_field, "")
+            if not isinstance(input_value, str):
+                raise OpenAIResponsesError(
+                    f"Responses runtime tool call {input_field} must be a string"
+                )
             return [
-                ModelToolCallDelta(
+                ModelRuntimeToolCallDelta(
                     output_index=output_index,
-                    arguments_delta=arguments,
+                    input_kind=runtime_kind,
+                    input_delta=input_value,
                     id=state.call_id,
                     name=state.name,
                 )
             ]
-        if item_type in {"image_generation_call", "web_search_call"}:
-            state.status = provider_status(
-                item.get("status"),
-                label=f"Responses {item_type} status",
+        provider_codec = self._profile.provider_tool_registry.codec_for_output_item(item_type)
+        if provider_codec is not None:
+            state.provider_codec = provider_codec
+            update = provider_codec.stream_item_update(item)
+            return self._changed_provider_status(
+                output_index,
+                state,
+                update.status,
+                "response.output_item.added",
+                data=update.data,
             )
-            return [
-                self._provider_delta(
-                    output_index,
-                    state,
-                    event="response.output_item.added",
-                    data={},
-                )
-            ]
         raise OpenAIResponsesError(f"unsupported Responses streamed output item: {item_type}")
 
     def _output_item_done(self, value: Mapping[str, Any]) -> list[ModelDelta]:
@@ -251,23 +266,16 @@ class OpenAIResponsesStreamDecoder:
         ):
             raise OpenAIResponsesError("Responses output item completed with open content parts")
         state.closed = True
-        if state.item_type not in {"image_generation_call", "web_search_call"}:
+        if state.provider_codec is None:
             return []
-        updated = provider_status(
-            item.get("status"),
-            label=f"Responses {state.item_type} status",
+        update = state.provider_codec.stream_item_update(item)
+        return self._changed_provider_status(
+            output_index,
+            state,
+            update.status,
+            "response.output_item.done",
+            data=update.data,
         )
-        if state.status is updated:
-            return []
-        state.status = updated
-        return [
-            self._provider_delta(
-                output_index,
-                state,
-                event="response.output_item.done",
-                data={},
-            )
-        ]
 
     def _content_part_event(
         self,
@@ -447,76 +455,74 @@ class OpenAIResponsesStreamDecoder:
         )
 
     def _function_arguments_delta(self, value: Mapping[str, Any]) -> list[ModelDelta]:
+        return self._runtime_input_delta(
+            value,
+            RuntimeToolKind.STRUCTURED,
+            "arguments",
+        )
+
+    def _custom_input_delta(self, value: Mapping[str, Any]) -> list[ModelDelta]:
+        return self._runtime_input_delta(
+            value,
+            RuntimeToolKind.FREEFORM,
+            "input",
+        )
+
+    def _runtime_input_delta(
+        self,
+        value: Mapping[str, Any],
+        input_kind: RuntimeToolKind,
+        label: str,
+    ) -> list[ModelDelta]:
         output_index = _output_index(value)
         state = self._open_item(output_index)
-        if state.item_type != "function_call" or state.call_id is None or state.name is None:
+        if state.runtime_kind is not input_kind or state.call_id is None or state.name is None:
             raise OpenAIResponsesError(
-                "Responses function arguments delta requires a function_call item"
+                f"Responses runtime tool {label} delta does not match its output item"
             )
         _validate_item_id(value, state)
         delta = value.get("delta")
         if not isinstance(delta, str):
-            raise OpenAIResponsesError("Responses function arguments delta requires a string")
+            raise OpenAIResponsesError(f"Responses runtime tool {label} delta requires a string")
         return (
-            [ModelToolCallDelta(output_index=output_index, arguments_delta=delta)] if delta else []
+            [
+                ModelRuntimeToolCallDelta(
+                    output_index=output_index,
+                    input_kind=input_kind,
+                    input_delta=delta,
+                )
+            ]
+            if delta
+            else []
         )
 
-    def _image_generation_event(
+    def _provider_tool_event(
         self,
+        codec: ResponsesProviderToolCodec,
         event_type: str,
         value: Mapping[str, Any],
     ) -> list[ModelDelta]:
-        output_index, state = self._provider_event_item(value, "image_generation_call")
-        suffix = event_type.removeprefix("response.image_generation_call.")
-        if suffix == "partial_image":
-            image = OPENAI_RESPONSES_JSON.required_string(
-                value.get("partial_image_b64"),
-                "Responses partial image base64",
-            )
-            partial_index = _nonnegative_int(
-                value.get("partial_image_index"),
-                "Responses partial image index",
-            )
-            if partial_index > 3:
-                raise OpenAIResponsesError("Responses partial image index must be at most 3")
-            return self._changed_provider_status(
-                output_index,
-                state,
-                ProviderToolStatus.IN_PROGRESS,
-                event_type,
-                data={"base64": image, "partial_image_index": partial_index},
-            )
-        status = _provider_event_status(suffix, "image generation")
-        return self._changed_provider_status(output_index, state, status, event_type)
-
-    def _web_search_event(
-        self,
-        event_type: str,
-        value: Mapping[str, Any],
-    ) -> list[ModelDelta]:
-        output_index, state = self._provider_event_item(value, "web_search_call")
-        suffix = event_type.removeprefix("response.web_search_call.")
-        status = _provider_event_status(suffix, "web search")
-        data: dict[str, object] = {}
-        if isinstance(value.get("action"), Mapping):
-            data["action"] = value["action"]
+        output_index, state = self._provider_event_item(value, codec)
+        update = codec.stream_event_update(event_type, value)
         return self._changed_provider_status(
             output_index,
             state,
-            status,
+            update.status,
             event_type,
-            data=data,
+            data=update.data,
         )
 
     def _provider_event_item(
         self,
         value: Mapping[str, Any],
-        expected_type: str,
+        codec: ResponsesProviderToolCodec,
     ) -> tuple[int, _ItemState]:
         output_index = _output_index(value)
         state = self._open_item(output_index)
-        if state.item_type != expected_type:
-            raise OpenAIResponsesError(f"Responses provider event requires {expected_type} item")
+        if state.provider_codec is not codec:
+            raise OpenAIResponsesError(
+                "Responses provider event does not match its output item codec"
+            )
         _validate_item_id(value, state)
         return output_index, state
 
@@ -530,7 +536,7 @@ class OpenAIResponsesStreamDecoder:
         data: Mapping[str, object] | None = None,
     ) -> list[ModelDelta]:
         current = state.status
-        if current in _PROVIDER_TERMINAL_STATUSES:
+        if is_terminal_provider_status(current):
             if status is ProviderToolStatus.IN_PROGRESS:
                 raise OpenAIResponsesError(
                     "Responses provider tool status cannot return to in_progress"
@@ -558,22 +564,16 @@ class OpenAIResponsesStreamDecoder:
         event: str,
         data: Mapping[str, object],
     ) -> ModelProviderToolCallDelta:
+        if state.provider_codec is None:
+            raise OpenAIResponsesError("Responses provider delta requires a registered codec")
         return ModelProviderToolCallDelta(
             output_index=output_index,
             id=state.item_id,
-            tool=self._provider_tool(
-                "image_generation" if state.item_type == "image_generation_call" else "web_search"
-            ),
+            tool=state.provider_codec.tool,
             status=state.status,
             event=event,
             data=data,
         )
-
-    def _provider_tool(self, tool_type: str) -> ProviderToolId:
-        try:
-            return self._profile.provider_tool(tool_type)
-        except ValueError as exc:
-            raise OpenAIResponsesError(str(exc)) from exc
 
     def _validate_done_event(
         self,
@@ -585,6 +585,7 @@ class OpenAIResponsesStreamDecoder:
         _validate_item_id(value, state)
         expected = {
             "response.function_call_arguments.done": "function_call",
+            "response.custom_tool_call_input.done": "custom_tool_call",
             "response.output_text.done": "message",
             "response.reasoning_summary_text.done": "reasoning",
             "response.reasoning_text.done": "reasoning",
@@ -603,7 +604,10 @@ class OpenAIResponsesStreamDecoder:
                 raise OpenAIResponsesError(
                     "Responses reasoning summary done requires an open summary_text part"
                 )
-        elif event_type != "response.function_call_arguments.done":
+        elif event_type not in {
+            "response.function_call_arguments.done",
+            "response.custom_tool_call_input.done",
+        }:
             part_index = _content_index(value)
             expected_part_type = {
                 "response.output_text.done": "output_text",
@@ -620,6 +624,7 @@ class OpenAIResponsesStreamDecoder:
             raise OpenAIResponsesError(f"Responses {event_type} was emitted twice")
         field = {
             "response.function_call_arguments.done": "arguments",
+            "response.custom_tool_call_input.done": "input",
             "response.output_text.done": "text",
             "response.reasoning_summary_text.done": "text",
             "response.reasoning_text.done": "text",
@@ -676,10 +681,10 @@ class OpenAIResponsesStreamDecoder:
     def _validate_item_identity(state: _ItemState, item: Mapping[str, Any]) -> None:
         if item.get("id") != state.item_id or item.get("type") != state.item_type:
             raise OpenAIResponsesError("Responses streamed output item identity changed")
-        if state.item_type == "function_call" and (
+        if state.runtime_kind is not None and (
             item.get("call_id") != state.call_id or item.get("name") != state.name
         ):
-            raise OpenAIResponsesError("Responses streamed function identity changed")
+            raise OpenAIResponsesError("Responses streamed runtime tool identity changed")
 
     def _open_item(self, output_index: int) -> _ItemState:
         state = self._items.get(output_index)
@@ -734,18 +739,6 @@ def _validate_item_id(value: Mapping[str, Any], state: _ItemState) -> None:
     )
     if item_id != state.item_id:
         raise OpenAIResponsesError("Responses event item_id changed")
-
-
-def _provider_event_status(suffix: str, label: str) -> ProviderToolStatus:
-    if suffix in {"in_progress", "generating", "searching"}:
-        return ProviderToolStatus.IN_PROGRESS
-    if suffix == "completed":
-        return ProviderToolStatus.COMPLETED
-    if suffix == "incomplete":
-        return ProviderToolStatus.INCOMPLETE
-    if suffix == "failed":
-        return ProviderToolStatus.FAILED
-    raise OpenAIResponsesError(f"unsupported Responses {label} event: {suffix}")
 
 
 def _is_array(value: object) -> bool:

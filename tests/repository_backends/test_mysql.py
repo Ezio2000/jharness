@@ -183,9 +183,9 @@ def _repository(table_prefix: str) -> MySQLRunRepository:
 def _drop_test_tables(table_prefix: str) -> None:
     config = _mysql_config()
     table_names = (
-        f"{table_prefix}_v2_history_chunks",
-        f"{table_prefix}_v2_checkpoint_ledger",
-        f"{table_prefix}_v2_run_heads",
+        f"{table_prefix}_v3_history_chunks",
+        f"{table_prefix}_v3_checkpoint_ledger",
+        f"{table_prefix}_v3_run_heads",
     )
     connection = pymysql.connect(
         host=config.host,
@@ -225,19 +225,19 @@ async def _capture_commit(
     return None
 
 
-async def test_mysql_schema_uses_only_hashed_v2_tables() -> None:
+async def test_mysql_schema_uses_only_hashed_v3_tables() -> None:
     repository = MySQLRunRepository(table_prefix="jharness_unit")
     try:
         heads = repository._create_heads_sql()  # pyright: ignore[reportPrivateUsage]
         ledger = repository._create_ledger_sql()  # pyright: ignore[reportPrivateUsage]
         history = repository._create_history_sql()  # pyright: ignore[reportPrivateUsage]
-        assert "jharness_unit_v2_run_heads" in heads
+        assert "jharness_unit_v3_run_heads" in heads
         assert "run_key BINARY(32)" in heads
         assert "checkpoint_core LONGBLOB" in heads
-        assert "jharness_unit_v2_checkpoint_ledger" in ledger
+        assert "jharness_unit_v3_checkpoint_ledger" in ledger
         assert "PRIMARY KEY (run_key, checkpoint_key)" in ledger
         assert "UNIQUE KEY run_revision (run_key, revision)" in ledger
-        assert "jharness_unit_v2_history_chunks" in history
+        assert "jharness_unit_v3_history_chunks" in history
         assert "PRIMARY KEY (run_key, history_generation, chunk_index)" in history
         assert "_v1_" not in heads + ledger + history
     finally:
@@ -638,7 +638,7 @@ async def test_mysql_append_inserts_exactly_one_delta_chunk(
         history_inserts = [
             query
             for query, _ in cursor.queries
-            if "INSERT INTO `jharness_delta_v2_history_chunks`" in query
+            if "INSERT INTO `jharness_delta_v3_history_chunks`" in query
         ]
         assert len(history_inserts) == 1
         assert connection.committed

@@ -5,8 +5,8 @@
 Portable lifecycle is one flat discriminated union:
 
 ```text
-Planning
-ToolsPending(non-empty ordered runtime tool calls)
+Planning(provider_turn_pending: bool)
+ToolsPending(non-empty ordered runtime tool calls, provider_turn_pending: bool)
 Suspended(resume_to: Planning | ToolsPending, suspension)
 Completed(final content)
 Failed(error)
@@ -48,6 +48,15 @@ pending work. A serial runtime tool call is a tool batch of one. A parallel
 batch is durable only after every selected runtime call has a normalized
 result. A checkpoint stores tool messages in model call order.
 
+`provider_turn_pending=true` is a provider-neutral durable continuation fact.
+It preserves unfinished provider-owned work without creating host tool work.
+While set, history reduction, conversation insertion, and resume-appended
+messages are forbidden so the next model request sees the provider turn and its
+continuation adjacently. Runtime calls may still enter `ToolsPending`; the flag
+survives every selected runtime batch and returns to `Planning(true)` when the
+last runtime call settles. A later model response clears the flag by returning
+`provider_turn_pending=false`.
+
 ## Metrics
 
 - `planning_steps` increases by one for each committed complete model response.
@@ -62,10 +71,13 @@ metrics.
 
 A complete model response always commits its ordered assistant output, usage,
 and one planning-step increment together. Its model-turn fact has a `result`
-that determines the after state: `completed` uses its visible-part count,
-`tools_pending` uses its ordered runtime call ids, and `limited` records
-`max_total_tokens`. Visible parts consist of direct content plus completed or
-failed provider-tool output in output order. Provider tool calls never create
+that determines the after state: `planning` records either a pending provider
+turn or a cleared continuation with deferred conversation inserts,
+`completed` uses its visible-part count, `tools_pending` uses its ordered
+runtime call ids, and `limited` records
+`max_total_tokens`. Visible parts consist of direct content plus output from any
+terminal provider-tool status (`completed`, `incomplete`, or `failed`) in output
+order. Provider tool calls never create
 `ToolsPending`. No separate terminal checkpoint is required for the same
 response.
 

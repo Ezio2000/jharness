@@ -162,6 +162,7 @@ def _decode_model_turn(at: float, value: object) -> ModelTurnFact:
                 "result",
                 "part_count",
                 "tool_call_ids",
+                "provider_turn_pending",
                 "finish_reason",
                 "usage",
                 "limit_reason",
@@ -178,6 +179,10 @@ def _decode_model_turn(at: float, value: object) -> ModelTurnFact:
             data["tool_call_ids"],
             "model turn tool_call_ids",
             non_empty_items=True,
+        ),
+        provider_turn_pending=boolean(
+            data["provider_turn_pending"],
+            "model turn provider_turn_pending",
         ),
         finish_reason=optional_string(data["finish_reason"], "model turn finish_reason"),
         usage=None if raw_usage is None else decode_model_usage_value(raw_usage),
@@ -318,13 +323,23 @@ def _decode_state_view(value: object, *, active: bool = False) -> dict[str, Any]
     if active and kind not in {"planning", "tools_pending"}:
         raise ProtocolError("active state view must be planning or tools_pending")
     if kind == "planning":
-        object_fields(raw, "planning view", frozenset({"kind"}))
-        return {"kind": "planning"}
+        data = object_fields(
+            raw,
+            "planning view",
+            frozenset({"kind", "provider_turn_pending"}),
+        )
+        return {
+            "kind": "planning",
+            "provider_turn_pending": boolean(
+                data["provider_turn_pending"],
+                "view provider_turn_pending",
+            ),
+        }
     if kind == "tools_pending":
         data = object_fields(
             raw,
             "tools pending view",
-            frozenset({"kind", "pending_count", "call_id_digest"}),
+            frozenset({"kind", "pending_count", "call_id_digest", "provider_turn_pending"}),
         )
         return {
             "kind": "tools_pending",
@@ -334,6 +349,10 @@ def _decode_state_view(value: object, *, active: bool = False) -> dict[str, Any]
                 minimum=1,
             ),
             "call_id_digest": _digest_hex(data["call_id_digest"], "view call_id_digest"),
+            "provider_turn_pending": boolean(
+                data["provider_turn_pending"],
+                "view provider_turn_pending",
+            ),
         }
     if kind == "suspended":
         data = object_fields(

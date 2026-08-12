@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 from jharness.kernel import (
     ContentPart,
     SettledResult,
+    StructuredToolCall,
+    StructuredToolSpec,
     Suspension,
-    ToolCall,
     ToolContext,
     ToolExecution,
     ToolFailure,
     ToolResult,
     ToolRisk,
-    ToolSpec,
     ToolWaiting,
     WaitingResult,
     thaw_json_value,
@@ -50,7 +50,7 @@ class AskQuestionTool:
     max_options: int
     max_prompt_chars: int
     max_answer_chars: int
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(
         self,
@@ -85,7 +85,7 @@ class AskQuestionTool:
             ),
         )
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         if context.cancel_requested:
             return _failure("cancelled", "AskQuestion was cancelled.")
         try:
@@ -156,7 +156,7 @@ def _spec(
     max_options: int,
     max_prompt_chars: int,
     max_answer_chars: int,
-) -> ToolSpec:
+) -> StructuredToolSpec:
     kinds = ", ".join(kind for kind in SUPPORTED_QUESTION_KINDS if kind in enabled_kinds)
     model_input_schema = input_schema(
         enabled_kinds,
@@ -176,7 +176,7 @@ def _spec(
         json.dumps((model_input_schema, model_output_schema), allow_nan=False)
     except (OverflowError, ValueError) as exc:
         raise ValueError("AskQuestion limits must produce JSON-serializable schemas") from exc
-    return ToolSpec(
+    return StructuredToolSpec(
         name="AskQuestion",
         description=(
             "Ask the user one or more structured questions and wait for the Host to collect "

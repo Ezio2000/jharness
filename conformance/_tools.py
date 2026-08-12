@@ -12,23 +12,26 @@ from conformance._values import boolean, load_object, mapping, number, sequence,
 from jharness.kernel import (
     BatchPolicy,
     ContentPart,
+    FreeformToolCall,
+    FreeformToolSpec,
     RunLimits,
+    RuntimeToolCall,
     SettledResult,
+    StructuredToolCall,
+    StructuredToolSpec,
     Suspension,
     ToolAccepted,
     ToolBatch,
-    ToolCall,
     ToolCatalog,
     ToolContext,
     ToolFailure,
     ToolResult,
-    ToolSpec,
     ToolSuccess,
     ToolWaiting,
     WaitingResult,
     thaw_json_value,
 )
-from jharness.kernel.wire import decode_tool_spec
+from jharness.kernel.wire import decode_runtime_tool_spec
 from jharness.toolkit import ToolRegistry
 
 
@@ -40,7 +43,7 @@ class _FaultBatchPolicy:
 
     def select(
         self,
-        pending: Sequence[ToolCall],
+        pending: Sequence[RuntimeToolCall],
         catalog: ToolCatalog,
         limits: RunLimits,
     ) -> ToolBatch:
@@ -53,7 +56,9 @@ class _FaultBatchPolicy:
             raise ValueError("serial tool batch must contain exactly one call")
         if self._kind == "oversized":
             first = pending[0]
-            extra = ToolCall(f"{first.id}-extra", first.name, {})
+            if not isinstance(first, StructuredToolCall):
+                raise ValueError("oversized fixture requires a structured tool call")
+            extra = StructuredToolCall(f"{first.id}-extra", first.name, {})
             return ToolBatch("invalid", (first, extra), parallel=True)
         return ToolBatch("invalid", tuple(pending[:2]), parallel=True)
 
@@ -69,7 +74,7 @@ class StandardTool:
 
     def __init__(
         self,
-        spec: ToolSpec,
+        spec: StructuredToolSpec,
         behavior: str,
         defaults: Mapping[str, Any],
     ) -> None:
@@ -77,7 +82,7 @@ class StandardTool:
         self.behavior = behavior
         self.defaults = dict(defaults)
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         arguments = dict(self.defaults)
         raw_arguments = thaw_json_value(call.arguments)
         arguments.update(mapping(raw_arguments, "tool arguments"))
@@ -154,6 +159,22 @@ class StandardTool:
         )
 
 
+class StandardFreeformTool:
+    """Deterministic freeform-input fixture tool."""
+
+    __slots__ = ("behavior", "spec")
+
+    def __init__(self, spec: FreeformToolSpec, behavior: str) -> None:
+        self.spec = spec
+        self.behavior = behavior
+
+    async def invoke(self, call: FreeformToolCall, context: ToolContext) -> ToolResult:
+        del context
+        if self.behavior != "freeform_echo":
+            raise AssertionError(f"unsupported freeform tool behavior: {self.behavior}")
+        return SettledResult(ToolSuccess((ContentPart.text_part(call.input),)))
+
+
 def _cancelled(arguments: Mapping[str, Any]) -> SettledResult:
     return SettledResult(
         ToolFailure.from_error(
@@ -170,14 +191,19 @@ def load_standard_tools(
 ) -> ToolRegistry:
     document = load_object(manifest_path, "tool contract")
     schemas.validate_document(schema_path, document)
-    tools: list[StandardTool] = []
+    tools: list[StandardTool | StandardFreeformTool] = []
     for raw_entry in sequence(document["tools"], "standard tools"):
         entry = mapping(raw_entry, "standard tool")
-        tools.append(
-            StandardTool(
-                decode_tool_spec(entry["spec"]),
-                string(entry["behavior"], "standard tool behavior"),
-                mapping(entry["defaults"], "standard tool defaults"),
+        spec = decode_runtime_tool_spec(entry["spec"])
+        behavior = string(entry["behavior"], "standard tool behavior")
+        if isinstance(spec, StructuredToolSpec):
+            tools.append(
+                StandardTool(
+                    spec,
+                    behavior,
+                    mapping(entry["defaults"], "standard tool defaults"),
+                )
             )
-        )
+        else:
+            tools.append(StandardFreeformTool(spec, behavior))
     return ToolRegistry(tuple(tools))

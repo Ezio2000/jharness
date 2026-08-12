@@ -19,7 +19,7 @@
       "properties": {
         "spec": { "$ref": "https://jharness.invalid/spec/v0/tools.schema.json" },
         "behavior": {
-          "enum": ["success", "exception", "accepted", "waiting", "progress", "strict", "invalid_output"]
+          "enum": ["success", "exception", "accepted", "waiting", "progress", "strict", "invalid_output", "freeform_echo"]
         },
         "defaults": { "type": "object" },
         "required_arguments": {

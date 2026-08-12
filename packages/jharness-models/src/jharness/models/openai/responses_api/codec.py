@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, NoReturn, cast
 
 from jharness.kernel import (
+    FreeformToolCall,
     ModelError,
     ModelErrorInfo,
     ModelOutputItem,
@@ -15,7 +16,7 @@ from jharness.kernel import (
     ProviderToolCall,
     ProviderToolStatus,
     ResponseFormat,
-    ToolCall,
+    StructuredToolCall,
     thaw_json_value,
 )
 from jharness.models.openai.errors import OPENAI_RESPONSES_JSON, OpenAIResponsesError
@@ -30,6 +31,7 @@ JsonObject = dict[str, Any]
 
 _RESERVED_REQUEST_FIELDS = frozenset(
     {
+        "include",
         "input",
         "max_output_tokens",
         "model",
@@ -71,6 +73,7 @@ class OpenAIResponsesCodec:
             "model": selected_model,
             "input": encode_responses_input(request.messages, self.profile),
         }
+        self._add_state_options(payload)
         self._add_model_options(payload, request)
         self._add_tool_options(payload, request, tools)
         self._add_response_format(payload, request.response_format)
@@ -104,7 +107,7 @@ class OpenAIResponsesCodec:
         output = decode_output_items(
             value.get("output"),
             self.profile,
-            image_media_type=_configured_image_media_type(value.get("tools")),
+            response=value,
         )
         if not output:
             raise OpenAIResponsesError("Responses terminal response requires output")
@@ -115,7 +118,9 @@ class OpenAIResponsesCodec:
             raise OpenAIResponsesError(
                 "Responses terminal response cannot contain in-progress provider tools"
             )
-        if status == "incomplete" and any(isinstance(item, ToolCall) for item in output):
+        if status == "incomplete" and any(
+            isinstance(item, StructuredToolCall | FreeformToolCall) for item in output
+        ):
             raise OpenAIResponsesError(
                 "incomplete Responses cannot expose runtime tool calls for execution"
             )
@@ -131,6 +136,12 @@ class OpenAIResponsesCodec:
             )
         except (TypeError, ValueError) as exc:
             raise OpenAIResponsesError(f"Responses terminal response is invalid: {exc}") from exc
+
+    def _add_state_options(self, payload: JsonObject) -> None:
+        if self.profile.store is not None:
+            payload["store"] = self.profile.store
+        if self.profile.include:
+            payload["include"] = sorted(self.profile.include)
 
     def _add_model_options(self, payload: JsonObject, request: ModelRequest) -> None:
         options = request.options
@@ -163,13 +174,18 @@ class OpenAIResponsesCodec:
         )
         if choice is not None:
             payload["tool_choice"] = choice
-        if not tools or request.tool_choice.type == "none":
+        if not request.may_return_runtime_tool_calls:
             return
-        allow_parallel = request.tool_choice.allow_parallel_tool_calls
-        if self.profile.capabilities.parallel_tool_call_control:
+        capabilities = self.profile.capabilities
+        if not capabilities.parallel_runtime_tool_calls:
+            return
+        allow_parallel = request.tool_choice.allow_parallel_runtime_tool_calls
+        if capabilities.parallel_runtime_tool_call_control:
             payload["parallel_tool_calls"] = allow_parallel
         elif not allow_parallel:
-            raise OpenAIResponsesError(f"{self.profile.name} cannot disable parallel tool calls")
+            raise OpenAIResponsesError(
+                f"{self.profile.name} cannot disable parallel runtime tool calls"
+            )
 
     def _add_response_format(
         self,
@@ -227,7 +243,11 @@ class OpenAIResponsesCodec:
         output: Sequence[ModelOutputItem],
     ) -> str:
         if status == "completed":
-            return "tool_calls" if any(isinstance(item, ToolCall) for item in output) else "stop"
+            return (
+                "tool_calls"
+                if any(isinstance(item, StructuredToolCall | FreeformToolCall) for item in output)
+                else "stop"
+            )
         details_value = value.get("incomplete_details")
         if details_value is None:
             return "incomplete"
@@ -325,39 +345,3 @@ def _response_metadata(value: Mapping[str, Any], provider: str) -> JsonObject:
         if key in value:
             metadata[key] = value[key]
     return metadata
-
-
-def _configured_image_media_type(value: object) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
-        raise OpenAIResponsesError("Responses tools must be an array")
-    output_format: str | None = None
-    image_tool_seen = False
-    for raw_tool in cast(Sequence[object], value):
-        tool = OPENAI_RESPONSES_JSON.mapping(raw_tool, "Responses tool")
-        if tool.get("type") != "image_generation":
-            continue
-        if image_tool_seen:
-            raise OpenAIResponsesError("Responses contains duplicate image_generation tools")
-        image_tool_seen = True
-        raw_format = tool.get("output_format")
-        if raw_format is None:
-            continue
-        output_format = OPENAI_RESPONSES_JSON.required_string(
-            raw_format,
-            "Responses image_generation output_format",
-        )
-    if output_format is None:
-        return None
-    media_types = {
-        "jpeg": "image/jpeg",
-        "png": "image/png",
-        "webp": "image/webp",
-    }
-    try:
-        return media_types[output_format]
-    except KeyError as exc:
-        raise OpenAIResponsesError(
-            f"unsupported Responses image output format: {output_format}"
-        ) from exc

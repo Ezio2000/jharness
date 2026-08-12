@@ -27,6 +27,7 @@ from jharness.kernel import (
     ProviderToolId,
     RunContext,
     Runtime,
+    RuntimeToolKind,
 )
 from jharness.models.decorators import FallbackModel, RetryingModel
 
@@ -776,9 +777,8 @@ async def test_fallback_does_not_start_backup_after_the_deadline(
 
 _BOOLEAN_CAPABILITY_FIELDS = (
     "streaming",
-    "runtime_tools",
-    "parallel_tool_calls",
-    "parallel_tool_call_control",
+    "parallel_runtime_tool_calls",
+    "parallel_runtime_tool_call_control",
     "structured_output",
     "json_mode",
     "seed",
@@ -787,10 +787,10 @@ _BOOLEAN_CAPABILITY_FIELDS = (
 
 _CAPABILITY_FIELDS = (
     "streaming",
-    "runtime_tools",
+    "runtime_tool_kinds",
     "tool_choice_types",
-    "parallel_tool_calls",
-    "parallel_tool_call_control",
+    "parallel_runtime_tool_calls",
+    "parallel_runtime_tool_call_control",
     "input_modalities",
     "output_modalities",
     "provider_tools",
@@ -809,8 +809,6 @@ def test_fallback_capability_inventory_tracks_kernel_contract() -> None:
 def test_fallback_capabilities_are_the_safe_intersection(field: str) -> None:
     all_enabled = ModelCapabilities(streaming=True)
     changes: dict[str, object] = {field: False}
-    if field == "runtime_tools":
-        changes["tool_choice_types"] = frozenset({"auto", "none"})
     one_disabled = replace(all_enabled, **cast(Any, changes))
     primary_disabled = FallbackModel(
         _ScriptModel((_response("unused"),), capabilities=one_disabled),
@@ -828,6 +826,20 @@ def test_fallback_capabilities_are_the_safe_intersection(field: str) -> None:
         for other in _BOOLEAN_CAPABILITY_FIELDS
         if other != field
     )
+
+
+def test_fallback_capabilities_intersect_runtime_tool_kinds() -> None:
+    structured_and_freeform = ModelCapabilities(
+        runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED, RuntimeToolKind.FREEFORM})
+    )
+    structured_only = ModelCapabilities(runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED}))
+
+    capabilities = FallbackModel(
+        _ScriptModel((_response("unused"),), capabilities=structured_and_freeform),
+        _ScriptModel((_response("unused"),), capabilities=structured_only),
+    ).capabilities
+
+    assert capabilities.runtime_tool_kinds == frozenset({RuntimeToolKind.STRUCTURED})
 
 
 def test_fallback_capabilities_intersect_exact_tool_choice_types() -> None:

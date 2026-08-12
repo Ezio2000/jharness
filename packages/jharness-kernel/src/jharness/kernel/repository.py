@@ -359,6 +359,8 @@ def _write_state(writer: DigestWriter, value: RunState) -> None:
     writer.field("kind")
     writer.string(value.kind)
     if isinstance(value, Planning):
+        writer.field("provider_turn_pending")
+        writer.boolean(value.provider_turn_pending)
         return
     if isinstance(value, ToolsPending):
         _write_pending(writer, value)
@@ -381,6 +383,8 @@ def _write_state(writer: DigestWriter, value: RunState) -> None:
 def _write_active_state(writer: DigestWriter, value: Planning | ToolsPending) -> None:
     writer.field("kind")
     writer.string(value.kind)
+    writer.field("provider_turn_pending")
+    writer.boolean(value.provider_turn_pending)
     if isinstance(value, ToolsPending):
         _write_pending(writer, value)
 

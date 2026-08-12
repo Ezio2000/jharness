@@ -25,7 +25,7 @@ from jharness.kernel import (
     ModelResponse,
     RunContext,
     Runtime,
-    ToolCall,
+    StructuredToolCall,
     ToolFailure,
     ToolSuccess,
     thaw_json_value,
@@ -113,12 +113,14 @@ def test_runtime_read_edit_read_hands_off_model_visible_sha256(tmp_path: Path) -
     def respond(turn: int, request: ModelRequest) -> ModelResponse:
         assert {spec.name for spec in request.runtime_tools} == {"Edit", "Read"}
         if turn == 0:
-            return ModelResponse((ToolCall("read-before", "Read", {"file_path": "note.txt"}),))
+            return ModelResponse(
+                (StructuredToolCall("read-before", "Read", {"file_path": "note.txt"}),)
+            )
         if turn == 1:
             observed["read"] = _last_visible_read_sha256(request)
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "edit",
                         "Edit",
                         {
@@ -133,7 +135,9 @@ def test_runtime_read_edit_read_hands_off_model_visible_sha256(tmp_path: Path) -
         if turn == 2:
             result = _last_success(request)
             observed["edit"] = cast(str, result["sha256"])
-            return ModelResponse((ToolCall("read-after", "Read", {"file_path": "note.txt"}),))
+            return ModelResponse(
+                (StructuredToolCall("read-after", "Read", {"file_path": "note.txt"}),)
+            )
         if turn == 3:
             result = _last_success(request)
             observed["final_read"] = _last_visible_read_sha256(request)
@@ -180,7 +184,7 @@ def test_runtime_write_then_read_observes_created_content(tmp_path: Path) -> Non
         if turn == 0:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "write",
                         "Write",
                         {
@@ -195,7 +199,9 @@ def test_runtime_write_then_read_observes_created_content(tmp_path: Path) -> Non
         if turn == 1:
             observed["write_sha256"] = result["sha256"]
             observed["operation"] = result["operation"]
-            return ModelResponse((ToolCall("read", "Read", {"file_path": "created.txt"}),))
+            return ModelResponse(
+                (StructuredToolCall("read", "Read", {"file_path": "created.txt"}),)
+            )
         if turn == 2:
             observed["read_sha256"] = result["sha256"]
             observed["content"] = result["content"]
@@ -236,7 +242,7 @@ def test_runtime_approval_deny_does_not_write_to_disk(tmp_path: Path) -> None:
             assert [spec.name for spec in request.runtime_tools] == ["Write"]
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "denied-write",
                         "Write",
                         {
@@ -281,7 +287,7 @@ def test_runtime_two_writes_are_serial_and_report_nonparallel_starts(tmp_path: P
         if turn == 0:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "write-first",
                         "Write",
                         {
@@ -290,7 +296,7 @@ def test_runtime_two_writes_are_serial_and_report_nonparallel_starts(tmp_path: P
                             "expected_sha256": None,
                         },
                     ),
-                    ToolCall(
+                    StructuredToolCall(
                         "write-second",
                         "Write",
                         {

@@ -112,11 +112,14 @@ class FallbackModel:
             tool_choice_types = tool_choice_types.difference({"provider"})
         return ModelCapabilities(
             streaming=primary.streaming and backup.streaming,
-            runtime_tools=primary.runtime_tools and backup.runtime_tools,
+            runtime_tool_kinds=(primary.runtime_tool_kinds & backup.runtime_tool_kinds),
             tool_choice_types=tool_choice_types,
-            parallel_tool_calls=(primary.parallel_tool_calls and backup.parallel_tool_calls),
-            parallel_tool_call_control=(
-                primary.parallel_tool_call_control and backup.parallel_tool_call_control
+            parallel_runtime_tool_calls=(
+                primary.parallel_runtime_tool_calls and backup.parallel_runtime_tool_calls
+            ),
+            parallel_runtime_tool_call_control=(
+                primary.parallel_runtime_tool_call_control
+                and backup.parallel_runtime_tool_call_control
             ),
             input_modalities=primary.input_modalities & backup.input_modalities,
             output_modalities=primary.output_modalities & backup.output_modalities,

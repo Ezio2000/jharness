@@ -13,7 +13,14 @@ from typing import Literal, Protocol, TypeAlias, TypedDict, cast
 
 import regex
 
-from jharness.kernel import ToolCall, ToolContext, ToolExecution, ToolResult, ToolRisk, ToolSpec
+from jharness.kernel import (
+    StructuredToolCall,
+    StructuredToolSpec,
+    ToolContext,
+    ToolExecution,
+    ToolResult,
+    ToolRisk,
+)
 from jharness.tools.filesystem._common import (
     DEFAULT_EXCLUDED_DIRECTORY_NAMES,
     FilesystemFailure,
@@ -90,7 +97,7 @@ class GrepTool:
     max_total_bytes: int
     max_output_bytes: int
     excluded_directory_names: frozenset[str]
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(
         self,
@@ -152,7 +159,7 @@ class GrepTool:
     def root(self) -> Path:
         return self.workspace.root
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         pattern = cast(str, call.arguments["pattern"])
         path = cast(str, call.arguments.get("path", "."))
         glob = cast(str | None, call.arguments.get("glob"))
@@ -547,7 +554,7 @@ def _spec(
     max_limit: int,
     max_context: int,
     max_pattern_chars: int,
-) -> ToolSpec:
+) -> StructuredToolSpec:
     common_properties = {
         "output_mode": {"type": "string"},
         "truncated": {"type": "boolean"},
@@ -620,7 +627,7 @@ def _spec(
             },
         ]
     }
-    return ToolSpec(
+    return StructuredToolSpec(
         name="Grep",
         description=(
             "Search UTF-8 text files with a regular expression inside the configured workspace. "

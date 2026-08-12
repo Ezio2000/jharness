@@ -9,10 +9,10 @@ from jharness.kernel import (
     ArtifactRef,
     ContentPart,
     Message,
-    ToolCall,
+    StructuredToolCall,
+    StructuredToolSpec,
     ToolChoice,
     ToolFailure,
-    ToolSpec,
     ToolSuccess,
 )
 from jharness.models.anthropic import AnthropicError, AnthropicProfile
@@ -68,7 +68,7 @@ def test_openai_message_codec_covers_roles_multimodal_and_native_parts() -> None
         ),
         system_content_mode="parts",
     )
-    call = ToolCall("call-1", "search", {"q": "x"})
+    call = StructuredToolCall("call-1", "search", {"q": "x"})
 
     assert encode_chat_message(Message.external("callback"), profile) == {
         "role": "user",
@@ -122,7 +122,7 @@ def test_openai_message_codec_covers_roles_multimodal_and_native_parts() -> None
 
 
 def test_openai_tool_codec_validates_choices_and_arguments() -> None:
-    spec = ToolSpec("search", "search", {"type": "object"})
+    spec = StructuredToolSpec("search", "search", {"type": "object"})
     profile = OpenAIChatCompletionsProfile()
 
     assert encode_openai_tools((spec,), profile)[0]["function"]["name"] == "search"
@@ -146,8 +146,8 @@ def test_openai_tool_codec_validates_choices_and_arguments() -> None:
         ]
     )
     assert calls == [
-        ToolCall("call-1", "search", {"q": "x"}),
-        ToolCall("call-2", "search", {}),
+        StructuredToolCall("call-1", "search", {"q": "x"}),
+        StructuredToolCall("call-2", "search", {}),
     ]
 
     with pytest.raises(OpenAIChatCompletionsError, match="requires at least one"):
@@ -182,7 +182,7 @@ def test_openai_message_codec_rejects_unsupported_content() -> None:
 
 def test_anthropic_message_codec_covers_system_tools_and_native_parts() -> None:
     profile = AnthropicProfile(system_content_mode="blocks")
-    call = ToolCall("call-1", "search", {"q": "x"})
+    call = StructuredToolCall("call-1", "search", {"q": "x"})
     thinking = ContentPart(
         type="thinking",
         text="reason",
@@ -219,13 +219,13 @@ def test_anthropic_message_codec_covers_system_tools_and_native_parts() -> None:
         {"type": "redacted_thinking", "data": "secret"},
         {"type": "tool_use", "id": "call-2", "name": "search", "input": {}},
     ]
-    decoded = Message.assistant(decode_content_blocks(blocks))
+    decoded = Message.assistant(decode_content_blocks(blocks, profile))
     assert [part.type for part in decoded.visible_parts()] == [
         "text",
         "thinking",
         "redacted_thinking",
     ]
-    assert decoded.runtime_tool_calls() == (ToolCall("call-2", "search", {}),)
+    assert decoded.runtime_tool_calls() == (StructuredToolCall("call-2", "search", {}),)
     assert encode_message(Message.external("callback"), profile)["role"] == "user"
 
 
@@ -295,11 +295,13 @@ def test_anthropic_media_and_tool_choice_codec() -> None:
         "type": "file",
         "file_id": "file-1",
     }
-    spec = ToolSpec("search", "search", {"type": "object"})
-    assert encode_anthropic_tools((spec,), profile)[0]["name"] == "search"
+    spec = StructuredToolSpec("search", "search", {"type": "object"})
+    assert encode_anthropic_tools((spec,), (), profile)[0]["name"] == "search"
     assert encode_anthropic_choice(
-        ToolChoice("required", allow_parallel_tool_calls=False),
-        tool_names={"search"},
+        ToolChoice("required", allow_parallel_runtime_tool_calls=False),
+        runtime_tool_names={"search"},
+        provider_tools=(),
+        may_return_runtime_tool_calls=True,
         profile=profile,
     ) == {"type": "any", "disable_parallel_tool_use": True}
 
@@ -322,6 +324,6 @@ def test_anthropic_codec_rejects_invalid_roles_media_and_blocks() -> None:
     with pytest.raises(AnthropicError, match="video input"):
         encode_user_content_part(ContentPart("video", uri="https://x/video"), profile)
     with pytest.raises(AnthropicError, match="non-empty text"):
-        decode_content_blocks([{"type": "text", "text": ""}])
+        decode_content_blocks([{"type": "text", "text": ""}], profile)
     with pytest.raises(AnthropicError, match="invalid JSON"):
         decode_tool_uses([{"id": "call", "name": "tool", "input": "{"}])

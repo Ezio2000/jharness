@@ -14,13 +14,13 @@ from typing import cast
 from jharness.kernel import (
     ContentPart,
     SettledResult,
-    ToolCall,
+    StructuredToolCall,
+    StructuredToolSpec,
     ToolContext,
     ToolExecution,
     ToolFailure,
     ToolResult,
     ToolRisk,
-    ToolSpec,
     ToolSuccess,
 )
 from jharness.tools.filesystem._common import (
@@ -76,7 +76,7 @@ class BashTool:
     max_stdout_bytes: int
     max_stderr_bytes: int
     terminate_grace_seconds: float
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(
         self,
@@ -117,7 +117,7 @@ class BashTool:
     def root(self) -> Path:
         return self.workspace.root
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         command_value = call.arguments.get("command")
         working_directory_value = call.arguments.get("working_directory", ".")
         if (
@@ -269,7 +269,7 @@ def _failure(
     )
 
 
-def _spec(max_command_chars: int) -> ToolSpec:
+def _spec(max_command_chars: int) -> StructuredToolSpec:
     output = {
         "type": "object",
         "required": [
@@ -296,7 +296,7 @@ def _spec(max_command_chars: int) -> ToolSpec:
         },
         "additionalProperties": False,
     }
-    return ToolSpec(
+    return StructuredToolSpec(
         name="Bash",
         description=(
             "Run one non-interactive foreground Bash command from a directory inside the "

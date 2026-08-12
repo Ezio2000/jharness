@@ -4,11 +4,23 @@ from __future__ import annotations
 
 from typing import Literal, cast
 
-from jharness.kernel import ModelCapabilities, ProviderToolId
+from jharness.kernel import ModelCapabilities, RuntimeToolKind
 from jharness.models.anthropic import AnthropicProfile
+from jharness.models.anthropic.messages_api.server_tools import (
+    AnthropicServerToolRegistry,
+    anthropic_web_search_codec,
+)
+from jharness.models.deepseek.tools import (
+    DEEPSEEK_ANTHROPIC_WEB_SEARCH,
+    DEEPSEEK_RESPONSES_WEB_SEARCH,
+)
 from jharness.models.openai.profiles import (
     OpenAIChatCompletionsProfile,
     OpenAIResponsesProfile,
+)
+from jharness.models.openai.responses_api.provider_tools import (
+    ResponsesProviderToolRegistry,
+    ResponsesWebSearchTool,
 )
 
 DeepSeekThinkingEffort = Literal["high", "max"]
@@ -41,10 +53,10 @@ def deepseek_openai_chat_profile(
         name=_profile_name("deepseek-openai-chat", thinking),
         capabilities=ModelCapabilities(
             streaming=True,
-            runtime_tools=True,
+            runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED}),
             tool_choice_types=(frozenset({"auto"}) if thinking else _RUNTIME_TOOL_CHOICES),
-            parallel_tool_calls=True,
-            parallel_tool_call_control=False,
+            parallel_runtime_tool_calls=True,
+            parallel_runtime_tool_call_control=False,
             input_modalities=frozenset({"text"}),
             output_modalities=frozenset({"text"}),
             structured_output=False,
@@ -69,21 +81,24 @@ def deepseek_anthropic_profile(
 
     thinking = _validate_options(thinking, effort)
     extra_request_body = _thinking_request_body(thinking=thinking, effort=None)
+    web_search = DEEPSEEK_ANTHROPIC_WEB_SEARCH
     return AnthropicProfile(
         name=_profile_name("deepseek-anthropic", thinking),
         capabilities=ModelCapabilities(
             streaming=True,
-            runtime_tools=True,
-            tool_choice_types=_RUNTIME_TOOL_CHOICES,
-            parallel_tool_calls=True,
-            parallel_tool_call_control=False,
+            runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED}),
+            tool_choice_types=_ALL_TOOL_CHOICES,
+            parallel_runtime_tool_calls=True,
+            parallel_runtime_tool_call_control=False,
             input_modalities=frozenset({"text"}),
             output_modalities=frozenset({"text"}),
+            provider_tools=frozenset({web_search}),
             structured_output=False,
             json_mode=False,
             seed=False,
             usage_reporting=True,
         ),
+        server_tools=AnthropicServerToolRegistry((anthropic_web_search_codec(web_search),)),
         redacted_thinking_mode="reject",
         stream_usage_mode="include",
         extra_request_body=extra_request_body,
@@ -106,26 +121,39 @@ def deepseek_openai_responses_profile(
     extra_request_body: dict[str, object] = {}
     if effort is not None:
         extra_request_body["reasoning"] = {"effort": effort}
+    web_search = DEEPSEEK_RESPONSES_WEB_SEARCH
     return OpenAIResponsesProfile(
         name="deepseek-openai-responses",
         capabilities=ModelCapabilities(
             streaming=True,
-            runtime_tools=True,
+            runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED, RuntimeToolKind.FREEFORM}),
             tool_choice_types=(
                 frozenset({"auto", "none"}) if effort != "none" else _ALL_TOOL_CHOICES
             ),
-            parallel_tool_calls=True,
-            parallel_tool_call_control=False,
+            parallel_runtime_tool_calls=True,
+            parallel_runtime_tool_call_control=False,
             input_modalities=frozenset({"text"}),
             output_modalities=frozenset({"text"}),
-            provider_tools=frozenset({ProviderToolId("deepseek.responses", "web_search")}),
+            provider_tools=frozenset({web_search}),
             structured_output=True,
             json_mode=True,
             seed=False,
             usage_reporting=True,
         ),
         reasoning_history_mode="content",
-        provider_tool_configuration_fields={"web_search": frozenset()},
+        store=None,
+        include=frozenset(),
+        provider_tool_registry=ResponsesProviderToolRegistry(
+            (
+                ResponsesWebSearchTool(
+                    tool=web_search,
+                    allowed_variants=frozenset({"web_search", "web_search_2025_08_26"}),
+                    configuration_fields=frozenset({"variant"}),
+                ),
+            )
+        ),
+        freeform_runtime_tool_names=frozenset({"apply_patch"}),
+        emit_freeform_runtime_tool_description=False,
         allowed_models=frozenset({"deepseek-v4-flash"}),
         extra_request_body=extra_request_body,
         finish_reason_map={

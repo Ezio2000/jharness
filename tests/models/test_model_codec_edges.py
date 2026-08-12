@@ -6,7 +6,14 @@ from typing import Any
 
 import pytest
 
-from jharness.kernel import ArtifactRef, ContentPart, Message, ToolCall, ToolChoice, ToolSpec
+from jharness.kernel import (
+    ArtifactRef,
+    ContentPart,
+    Message,
+    StructuredToolCall,
+    StructuredToolSpec,
+    ToolChoice,
+)
 from jharness.models.anthropic import AnthropicError, AnthropicProfile
 from jharness.models.anthropic.messages_api.messages import (
     decode_content_blocks,
@@ -63,7 +70,7 @@ def test_openai_content_edges_and_incremental_native_parts() -> None:
             input_modalities=frozenset({"text", "image", "video", "file"}),
         ),
     )
-    call = ToolCall("call", "lookup")
+    call = StructuredToolCall("call", "lookup")
     assert encode_chat_message(Message.assistant((call,)), profile)["content"] is None
     assert encode_openai_content((), "user", profile) == ""
     assert encode_openai_content((ContentPart.text_part("ok"),), "tool", profile) == "ok"
@@ -173,12 +180,12 @@ def test_openai_content_decoder_rejects_invalid_blocks(value: object, pattern: s
 
 
 def test_openai_tool_codec_edges() -> None:
-    spec = ToolSpec("lookup", "lookup", {"type": "object"})
+    spec = StructuredToolSpec("lookup", "lookup", {"type": "object"})
     profile = OpenAIChatCompletionsProfile()
     assert encode_openai_tools((), profile) == []
     disabled_capabilities = replace(
         profile.capabilities,
-        runtime_tools=False,
+        runtime_tool_kinds=frozenset(),
         tool_choice_types=frozenset({"auto", "none"}),
     )
     with pytest.raises(OpenAIChatCompletionsError, match="does not support tools"):
@@ -273,7 +280,7 @@ def test_anthropic_message_grouping_and_mid_conversation_system_edges() -> None:
 
 def test_anthropic_content_shapes_and_native_metadata() -> None:
     profile = AnthropicProfile()
-    call = ToolCall("call", "lookup")
+    call = StructuredToolCall("call", "lookup")
     assert encode_anthropic_content((), "user", profile) == ""
     assert encode_anthropic_content((ContentPart.text_part("a"),), "assistant", profile) == "a"
     assert encode_anthropic_message(Message.assistant((call,)), profile)["content"] == [
@@ -336,7 +343,7 @@ def test_anthropic_content_shapes_and_native_metadata() -> None:
 )
 def test_anthropic_content_decoder_rejects_invalid_blocks(block: object, pattern: str) -> None:
     with pytest.raises(AnthropicError, match=pattern):
-        decode_content_blocks([block])
+        decode_content_blocks([block], AnthropicProfile())
 
 
 def test_anthropic_native_blocks_validate_role_shape_and_capabilities() -> None:
@@ -419,21 +426,31 @@ def test_anthropic_media_rejects_invalid_sources(part: ContentPart, pattern: str
 
 
 def test_anthropic_tool_codec_edges() -> None:
-    spec = ToolSpec("lookup", "lookup", {"type": "object"})
+    spec = StructuredToolSpec("lookup", "lookup", {"type": "object"})
     profile = AnthropicProfile()
-    call = ToolCall("call", "lookup", {"x": 1})
-    assert encode_anthropic_tools((), profile) == []
+    call = StructuredToolCall("call", "lookup", {"x": 1})
+    assert encode_anthropic_tools((), (), profile) == []
     disabled_capabilities = replace(
         profile.capabilities,
-        runtime_tools=False,
+        runtime_tool_kinds=frozenset(),
         tool_choice_types=frozenset({"auto", "none"}),
     )
-    with pytest.raises(AnthropicError, match="does not support tools"):
+    with pytest.raises(AnthropicError, match="does not support structured runtime tools"):
         encode_anthropic_tools(
             (spec,),
+            (),
             AnthropicProfile(capabilities=disabled_capabilities),
         )
-    assert encode_anthropic_choice(ToolChoice(), tool_names=set(), profile=profile) is None
+    assert (
+        encode_anthropic_choice(
+            ToolChoice(),
+            runtime_tool_names=set(),
+            provider_tools=(),
+            may_return_runtime_tool_calls=False,
+            profile=profile,
+        )
+        is None
+    )
     no_choice = AnthropicProfile(
         capabilities=replace(
             profile.capabilities,
@@ -441,15 +458,34 @@ def test_anthropic_tool_codec_edges() -> None:
         ),
         automatic_tool_choice_mode="implicit",
     )
-    assert encode_anthropic_choice(ToolChoice(), tool_names={"lookup"}, profile=no_choice) is None
+    assert (
+        encode_anthropic_choice(
+            ToolChoice(),
+            runtime_tool_names={"lookup"},
+            provider_tools=(),
+            may_return_runtime_tool_calls=True,
+            profile=no_choice,
+        )
+        is None
+    )
     with pytest.raises(AnthropicError, match="does not support tool_choice"):
-        encode_anthropic_choice(ToolChoice("none"), tool_names={"lookup"}, profile=no_choice)
-    assert encode_anthropic_choice(ToolChoice("none"), tool_names={"lookup"}, profile=profile) == {
-        "type": "none"
-    }
+        encode_anthropic_choice(
+            ToolChoice("none"),
+            runtime_tool_names={"lookup"},
+            provider_tools=(),
+            may_return_runtime_tool_calls=True,
+            profile=no_choice,
+        )
+    assert encode_anthropic_choice(
+        ToolChoice("none"),
+        runtime_tool_names={"lookup"},
+        provider_tools=(),
+        may_return_runtime_tool_calls=True,
+        profile=profile,
+    ) == {"type": "none"}
     assert encode_assistant_tool_uses((call,))[0]["input"] == {"x": 1}
     assert decode_tool_uses([{"id": "call", "name": "lookup", "input": None}]) == [
-        ToolCall("call", "lookup")
+        StructuredToolCall("call", "lookup")
     ]
     assert decode_tool_uses([{"id": "call", "name": "lookup", "input": '{"x":1}'}]) == [call]
 

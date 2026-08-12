@@ -44,7 +44,7 @@
           "enum": [
             "message",
             "model_response",
-            "tool_spec",
+            "runtime_tool_spec",
             "tool_result",
             "state",
             "snapshot",

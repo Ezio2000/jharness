@@ -7,7 +7,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from jharness.kernel import ToolCall, ToolContext, ToolExecution, ToolResult, ToolRisk, ToolSpec
+from jharness.kernel import (
+    StructuredToolCall,
+    StructuredToolSpec,
+    ToolContext,
+    ToolExecution,
+    ToolResult,
+    ToolRisk,
+)
 from jharness.tools.filesystem._common import (
     FilesystemFailure,
     OperationCancelled,
@@ -37,7 +44,7 @@ class EditTool:
 
     workspace: Workspace
     max_file_bytes: int
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(self, root: PathInput, *, max_file_bytes: int = _MAX_FILE_BYTES) -> None:
         max_file_bytes = positive_int(max_file_bytes, "max_file_bytes")
@@ -49,7 +56,7 @@ class EditTool:
     def root(self) -> Path:
         return self.workspace.root
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         file_path = cast(str, call.arguments["file_path"])
         old_string = cast(str, call.arguments["old_string"])
         new_string = cast(str, call.arguments["new_string"])
@@ -125,7 +132,7 @@ class EditTool:
         )
 
 
-def _spec(max_file_bytes: int) -> ToolSpec:
+def _spec(max_file_bytes: int) -> StructuredToolSpec:
     output = {
         "type": "object",
         "required": ["path", "replacements", "previous_sha256", "sha256", "bytes_written"],
@@ -138,7 +145,7 @@ def _spec(max_file_bytes: int) -> ToolSpec:
         },
         "additionalProperties": False,
     }
-    return ToolSpec(
+    return StructuredToolSpec(
         name="Edit",
         description=(
             "Replace exact text in an existing UTF-8 file within the configured workspace. "

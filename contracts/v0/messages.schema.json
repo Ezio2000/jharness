@@ -52,13 +52,31 @@
       "$comment": "The outcome is the single model-visible tool result. Host suspension data is never copied into a message.",
       "additionalProperties": false
     },
-    "tool_call": {
+    "runtime_tool_call": {
+      "oneOf": [
+        { "$ref": "#/$defs/structured_tool_call" },
+        { "$ref": "#/$defs/freeform_tool_call" }
+      ]
+    },
+    "structured_tool_call": {
       "type": "object",
-      "required": ["id", "name", "arguments"],
+      "required": ["input_kind", "id", "name", "arguments"],
       "properties": {
+        "input_kind": { "const": "structured" },
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1 },
         "arguments": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "freeform_tool_call": {
+      "type": "object",
+      "required": ["input_kind", "id", "name", "input"],
+      "properties": {
+        "input_kind": { "const": "freeform" },
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "input": { "type": "string" }
       },
       "additionalProperties": false
     },
@@ -79,13 +97,32 @@
       "additionalProperties": false
     },
     "runtime_tool_call_output_item": {
+      "oneOf": [
+        { "$ref": "#/$defs/structured_runtime_tool_call_output_item" },
+        { "$ref": "#/$defs/freeform_runtime_tool_call_output_item" }
+      ]
+    },
+    "structured_runtime_tool_call_output_item": {
       "type": "object",
-      "required": ["kind", "id", "name", "arguments"],
+      "required": ["kind", "input_kind", "id", "name", "arguments"],
       "properties": {
         "kind": { "const": "runtime_tool_call" },
+        "input_kind": { "const": "structured" },
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1 },
         "arguments": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "freeform_runtime_tool_call_output_item": {
+      "type": "object",
+      "required": ["kind", "input_kind", "id", "name", "input"],
+      "properties": {
+        "kind": { "const": "runtime_tool_call" },
+        "input_kind": { "const": "freeform" },
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "input": { "type": "string" }
       },
       "additionalProperties": false
     },

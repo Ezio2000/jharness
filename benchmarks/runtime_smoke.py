@@ -18,11 +18,11 @@ from jharness.kernel import (
     RunLimits,
     Runtime,
     SettledResult,
-    ToolCall,
+    StructuredToolCall,
+    StructuredToolSpec,
     ToolContext,
     ToolExecution,
     ToolResult,
-    ToolSpec,
     ToolSuccess,
 )
 from jharness.toolkit import ToolRegistry
@@ -41,10 +41,10 @@ class _Tracker:
 
 @dataclass(slots=True)
 class _TimedTool:
-    spec: ToolSpec
+    spec: StructuredToolSpec
     tracker: _Tracker
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         del context
         self.tracker.active += 1
         self.tracker.maximum = max(self.tracker.maximum, self.tracker.active)
@@ -56,7 +56,7 @@ class _TimedTool:
 
 
 class _BenchmarkModel:
-    def __init__(self, calls: tuple[ToolCall, ...]) -> None:
+    def __init__(self, calls: tuple[StructuredToolCall, ...]) -> None:
         self._calls = calls
         self._turn = 0
 
@@ -83,10 +83,17 @@ async def _measure(*, parallel: bool) -> tuple[float, int]:
     tracker = _Tracker()
     concurrency = "parallel" if parallel else "serial"
     execution = ToolExecution(concurrency, read_only=parallel, idempotent=parallel)
-    calls = tuple(ToolCall(f"call-{index}", f"tool-{index}") for index in range(_TOOL_COUNT))
+    calls = tuple(
+        StructuredToolCall(f"call-{index}", f"tool-{index}") for index in range(_TOOL_COUNT)
+    )
     tools = tuple(
         _TimedTool(
-            ToolSpec(call.name, "timed benchmark tool", {"type": "object"}, execution=execution),
+            StructuredToolSpec(
+                call.name,
+                "timed benchmark tool",
+                {"type": "object"},
+                execution=execution,
+            ),
             tracker,
         )
         for call in calls

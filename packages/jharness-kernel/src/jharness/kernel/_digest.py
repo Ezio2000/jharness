@@ -12,8 +12,9 @@ from jharness.kernel.messages import (
     ErrorInfo,
     Message,
     ProviderToolCall,
+    RuntimeToolCall,
+    StructuredToolCall,
     TaskRef,
-    ToolCall,
 )
 from jharness.kernel.tools import ToolAccepted, ToolFailure, ToolOutcome, ToolWaiting
 
@@ -107,7 +108,7 @@ def empty_history_digest() -> bytes:
 
 
 def append_history_digest(previous: bytes, message: Message) -> bytes:
-    writer = DigestWriter("jharness.kernel.history.append.v0")
+    writer = DigestWriter("jharness.kernel.history.append.v1")
     writer.field("previous")
     writer.bytes(previous)
     writer.field("message")
@@ -119,7 +120,7 @@ def empty_tool_call_suffix_digest() -> bytes:
     return DigestWriter("jharness.kernel.tool_calls.suffix.empty.v1").finish()
 
 
-def prepend_tool_call_digest(suffix: bytes, call: ToolCall) -> bytes:
+def prepend_tool_call_digest(suffix: bytes, call: RuntimeToolCall) -> bytes:
     writer = DigestWriter("jharness.kernel.tool_calls.suffix.prepend.v1")
     writer.field("call")
     write_tool_call(writer, call)
@@ -158,7 +159,7 @@ def write_message(writer: DigestWriter, value: Message) -> None:
     for item in value.output:
         if isinstance(item, ContentPart):
             _write_content_part(writer, item)
-        elif isinstance(item, ToolCall):
+        elif isinstance(item, RuntimeToolCall):
             write_tool_call(writer, item)
         else:
             _write_provider_tool_call(writer, item)
@@ -218,20 +219,26 @@ def _write_artifact(writer: DigestWriter, value: ArtifactRef) -> None:
     writer.json(value.metadata)
 
 
-def write_tool_calls(writer: DigestWriter, values: tuple[ToolCall, ...]) -> None:
+def write_tool_calls(writer: DigestWriter, values: tuple[RuntimeToolCall, ...]) -> None:
     writer.sequence(len(values))
     for value in values:
         write_tool_call(writer, value)
 
 
-def write_tool_call(writer: DigestWriter, value: ToolCall) -> None:
-    writer.field("tool_call")
+def write_tool_call(writer: DigestWriter, value: RuntimeToolCall) -> None:
+    writer.field("runtime_tool_call")
+    writer.field("input_kind")
+    writer.string("structured" if isinstance(value, StructuredToolCall) else "freeform")
     writer.field("id")
     writer.string(value.id)
     writer.field("name")
     writer.string(value.name)
-    writer.field("arguments")
-    writer.json(value.arguments)
+    if isinstance(value, StructuredToolCall):
+        writer.field("arguments")
+        writer.json(value.arguments)
+    else:
+        writer.field("input")
+        writer.string(value.input)
 
 
 def _write_provider_tool_call(writer: DigestWriter, value: ProviderToolCall) -> None:
