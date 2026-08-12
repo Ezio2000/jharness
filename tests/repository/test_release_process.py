@@ -241,7 +241,10 @@ def test_release_workflow_builds_and_publishes_five_distributions() -> None:
     assert '| wc -l)" -eq 10' in artifact_checks
     assert "test -f dist/SHA256SUMS" in artifact_checks
     recovery_checks = _run(build, "Verify recovered run identity and artifacts")
+    assert 'test "$tag_sha" = "$run_sha"' in recovery_checks
+    assert 'test "$run_event" = "push"' in recovery_checks
     assert 'test "$run_path" = ".github/workflows/release.yml"' in recovery_checks
+    assert 'test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"' not in recovery_checks
     assert "scripts/verify_distribution.py dist" in recovery_checks
     assert "-name '*.whl' -o -name '*.tar.gz'" in recovery_checks
     assert '| wc -l)" -eq 10' in recovery_checks

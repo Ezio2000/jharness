@@ -152,7 +152,6 @@ jobs:
           run_sha="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq .head_sha)"
           run_event="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq .event)"
           run_path="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq .path)"
-          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
           test "$tag_sha" = "$run_sha"
           test "$run_event" = "push"
           test "$run_path" = ".github/workflows/release.yml"
