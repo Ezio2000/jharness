@@ -14,8 +14,8 @@ from jharness.models.openai import OpenAIResponsesModel
 | Adapter | Runtime tools | Provider-hosted tools | Ordered output |
 | --- | --- | --- | --- |
 | OpenAI Chat | Function calls | None | Content and calls are normalized into `ModelResponse.output` |
-| Anthropic Messages | Client `tool_use` | Profile-installed server-tool codecs | Native block order is retained |
-| OpenAI Responses | Function and freeform calls | Profile-installed image generation and web search codecs | Native Responses item order is retained |
+| Anthropic Messages | Client `tool_use` | Official web-search preset or explicit server-tool codecs | Native block order is retained |
+| OpenAI Responses | Function and freeform calls | Official web-search and image-generation presets or explicit codecs | Native Responses item order is retained |
 
 DeepSeek's native Responses endpoint uses `OpenAIResponsesModel` with
 `deepseek_responses_profile`. That profile is text-only, accepts only
@@ -29,11 +29,30 @@ ownership is separate: `RuntimeToolCall` is executed by the JHarness runtime, wh
 interleaved with `ContentPart` values in ordered output.
 
 Each protocol profile contains the exact immutable `ModelCapabilities` returned by
-its model client. The default Responses profile is conservative and text-only;
-model-specific modalities, structured output, and hosted tools require explicit host
-opt-in. Tool selection is declared as a set of supported types rather than a coarse
-boolean. Supplier factories only compose protocol capabilities and wire policies; the
-shared codecs contain no supplier-name branches.
+its model client. The default Responses and Messages profile classes remain
+provider-tool neutral. The official `openai_responses_profile()` and
+`anthropic_messages_profile()` factories install their hosted-tool identities and
+codecs, but do not add a tool to any request. The host must still pass an explicit
+`ProviderToolSpec` factory result to `Runtime`, and selecting an official profile is
+the host's confirmation that the chosen endpoint and model support its advertised
+capabilities. Tool selection is declared as a set of supported types rather than a
+coarse boolean. Supplier factories only compose protocol capabilities and wire
+policies; the shared codecs contain no supplier-name branches.
+
+```python
+from jharness.kernel import Runtime
+from jharness.models.openai import (
+    OpenAIResponsesModel,
+    openai_responses_profile,
+    openai_responses_web_search,
+)
+
+model = OpenAIResponsesModel(..., profile=openai_responses_profile())
+runtime = Runtime(
+    model=model,
+    provider_tools=(openai_responses_web_search(),),
+)
+```
 
 OpenAI Responses sends `store=false` by default and requests encrypted reasoning
 history. Hosted image generation additionally requires a host-owned

@@ -6,6 +6,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Added explicit official hosted-tool presets for OpenAI Responses and Anthropic
+  Messages. OpenAI now exposes `OPENAI_RESPONSES_WEB_SEARCH`,
+  `OPENAI_RESPONSES_IMAGE_GENERATION`, `openai_responses_web_search`,
+  `openai_responses_image_generation`, and `openai_responses_profile`; Anthropic now
+  exposes `ANTHROPIC_MESSAGES_WEB_SEARCH`, `anthropic_messages_web_search`, and
+  `anthropic_messages_profile`. The low-level profile classes remain provider-tool
+  neutral, and a runtime still has to request every hosted tool explicitly.
+
 ## [0.7.0] - 2026-08-12
 
 ### Changed

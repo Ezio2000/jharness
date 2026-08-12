@@ -72,8 +72,11 @@ output rather than response-level metadata, so they do not persist this identity
 The default `OpenAIResponsesProfile` is deliberately conservative: text input and
 output, runtime functions, streaming, and usage only. It does not claim image/file
 input, structured output, JSON mode, or provider-hosted tools for an arbitrary model
-identifier. The host opts into only features verified for its selected model by
-supplying an explicit profile.
+identifier. `AnthropicMessagesProfile` likewise keeps its server-tool registry empty.
+The official `openai_responses_profile()` and `anthropic_messages_profile()` factories
+install the corresponding supplier-hosted tool identities and codecs. Selecting one is
+the host's explicit confirmation that its chosen endpoint and model support those
+advertised capabilities.
 
 For example, narrow Chat Completions to text input while retaining its other default
 capabilities:
@@ -124,9 +127,9 @@ The current adapters expose these boundaries as follows:
 | Adapter/profile | Default model input | Native model output | Runtime tools | Provider-hosted tools | Conversation rule |
 | --- | --- | --- | --- | --- | --- |
 | OpenAI Chat | Text and image | Text | Function tools | None | Complete JHarness history is encoded as messages |
-| Anthropic Messages | Text, image, and file | Text | Client `tool_use` blocks | Profile-installed server-tool codecs | Complete JHarness history is encoded as Messages blocks |
+| Anthropic Messages | Text, image, and file | Text | Client `tool_use` blocks | Official web-search preset or host-installed server-tool codecs | Complete JHarness history is encoded as Messages blocks |
 | OpenAI Responses default | Text | Text | Function tools | None | Complete ordered history is encoded as Responses input items with `store=false` |
-| OpenAI Responses explicit profile | Host-declared subset of text, image, and file | Text | Function tools | Host-declared image generation and/or web search | Profile storage policy and complete ordered history are authoritative |
+| OpenAI Responses official/explicit profile | Host-declared subset of text, image, and file | Text | Function tools | Official web-search and image-generation presets or host-installed codecs | Profile storage policy and complete ordered history are authoritative |
 | DeepSeek Responses profile | Text only | Text | Function and `apply_patch` freeform tools | `deepseek.responses/web_search` | Strictly stateless; complete history is resent |
 | DeepSeek Messages profile | Text only | Text | Client `tool_use` blocks | `deepseek.messages/web_search` | Complete Messages history, including opaque search results, is replayed exactly |
 
@@ -142,6 +145,83 @@ invocation.
 | Protocol profile | One `ModelCapabilities` plus immutable wire policies for Chat Completions, Responses, or Messages | Duplicate capabilities as `supports_*` flags |
 | Supplier factory | Compose a protocol profile for one concrete endpoint, such as DeepSeek thinking or Responses | Add supplier checks to a shared codec |
 | Protocol codec/client | Consume the profile, validate wire data, and expose `profile.capabilities` unchanged | Infer features from model names or translate a second capability representation |
+
+### Hosted-Tool Presets
+
+Official hosted-tool presets are supplier-owned declarations in `jharness-models`.
+They are not local tools and never enter JHarness binding, approval, batching, or
+execution. A supplier profile declares what may be requested; the
+`Runtime(..., provider_tools=...)` argument still declares what this invocation
+actually enables.
+
+OpenAI Responses exposes web search and image generation:
+
+```python
+import os
+
+from jharness.kernel import Runtime, ToolChoice
+from jharness.models.openai import (
+    OPENAI_RESPONSES_WEB_SEARCH,
+    OpenAIResponsesModel,
+    openai_responses_profile,
+    openai_responses_web_search,
+)
+
+model = OpenAIResponsesModel(
+    base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    api_key=os.environ["OPENAI_API_KEY"],
+    model=os.environ["OPENAI_MODEL"],
+    profile=openai_responses_profile(),
+)
+runtime = Runtime(
+    model=model,
+    provider_tools=(
+        openai_responses_web_search({"search_context_size": "high"}),
+    ),
+    tool_choice=ToolChoice(
+        type="provider",
+        provider_tool=OPENAI_RESPONSES_WEB_SEARCH,
+    ),
+)
+```
+
+Anthropic Messages exposes its versioned server-side web search through the same
+public pattern:
+
+```python
+import os
+
+from jharness.kernel import Runtime
+from jharness.models.anthropic import (
+    AnthropicMessagesModel,
+    anthropic_messages_profile,
+    anthropic_messages_web_search,
+)
+
+model = AnthropicMessagesModel(
+    base_url=os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+    api_key=os.environ["ANTHROPIC_API_KEY"],
+    model=os.environ["ANTHROPIC_MODEL"],
+    profile=anthropic_messages_profile(),
+)
+runtime = Runtime(
+    model=model,
+    provider_tools=(
+        anthropic_messages_web_search(
+            {"variant": "web_search_20260318", "max_uses": 3},
+        ),
+    ),
+)
+```
+
+The Anthropic preset accepts the current `web_search_20250305`,
+`web_search_20260209`, and `web_search_20260318` variants. With no `variant`, it uses
+the basic `web_search_20250305` declaration; select a later capability-keyed variant
+explicitly when the chosen model and deployment support it.
+
+Constructing either official profile sends no tool declaration by itself. The generic
+`OpenAIResponsesProfile()` and `AnthropicMessagesProfile()` classes remain available
+for compatible endpoints or narrower, host-composed capability sets.
 
 ### Vision and Hosted Image Generation
 
@@ -172,18 +252,17 @@ response can enter durable history:
 ```python
 import asyncio
 import os
-from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from jharness.kernel import ArtifactRef, ProviderToolId, ProviderToolSpec, Runtime, ToolChoice
+from jharness.kernel import ArtifactRef, Runtime, ToolChoice
 from jharness.models.openai import (
-    OpenAIResponsesModel,
-    OpenAIResponsesProfile,
+    OPENAI_RESPONSES_IMAGE_GENERATION,
     OpenAIResponsesArtifactStore,
-    OpenAIResponsesImageGenerationTool,
-    OpenAIResponsesProviderToolRegistry,
+    OpenAIResponsesModel,
+    openai_responses_image_generation,
+    openai_responses_profile,
 )
 
 
@@ -238,34 +317,24 @@ class LocalImageArtifacts(OpenAIResponsesArtifactStore):
         return data
 
 
-image_generation = ProviderToolId("openai.responses", "image_generation")
-base = OpenAIResponsesProfile()
-profile = OpenAIResponsesProfile(
-    capabilities=replace(
-        base.capabilities,
-        tool_choice_types=base.capabilities.tool_choice_types | {"provider"},
-        provider_tools=frozenset({image_generation}),
-    ),
-    provider_tool_registry=OpenAIResponsesProviderToolRegistry(
-        (OpenAIResponsesImageGenerationTool(tool=image_generation),)
-    ),
-)
 model = OpenAIResponsesModel(
     base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     api_key=os.environ["OPENAI_API_KEY"],
     model=os.environ["OPENAI_MODEL"],
-    profile=profile,
+    profile=openai_responses_profile(),
     artifact_store=LocalImageArtifacts(Path("artifacts").resolve()),
 )
 runtime = Runtime(
     model=model,
     provider_tools=(
-        ProviderToolSpec(
-            image_generation,
+        openai_responses_image_generation(
             {"size": "1024x1024", "output_format": "png"},
         ),
     ),
-    tool_choice=ToolChoice(type="provider", provider_tool=image_generation),
+    tool_choice=ToolChoice(
+        type="provider",
+        provider_tool=OPENAI_RESPONSES_IMAGE_GENERATION,
+    ),
 )
 ```
 
