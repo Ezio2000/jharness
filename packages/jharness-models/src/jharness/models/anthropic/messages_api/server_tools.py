@@ -93,9 +93,7 @@ class AnthropicServerToolCodec:
             unsupported = set(configuration).difference(allowed_for_variant)
             if unsupported:
                 key = min(unsupported)
-                raise AnthropicError(
-                    f"unsupported {variant} configuration field: {key}"
-                )
+                raise AnthropicError(f"unsupported {variant} configuration field: {key}")
         return {
             "type": variant,
             "name": self.declaration_name,

@@ -108,9 +108,7 @@ def test_anthropic_web_search_limits_response_inclusion_by_variant() -> None:
     )
 
     with pytest.raises(AnthropicError, match="unsupported web_search_20250305"):
-        codec.encode_declaration(
-            ProviderToolSpec(_WEB_SEARCH, {"response_inclusion": "all"})
-        )
+        codec.encode_declaration(ProviderToolSpec(_WEB_SEARCH, {"response_inclusion": "all"}))
 
     declaration = codec.encode_declaration(
         ProviderToolSpec(
