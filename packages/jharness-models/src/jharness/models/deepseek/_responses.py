@@ -6,13 +6,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from jharness.kernel import ProviderToolId, ProviderToolStatus
-from jharness.models.openai.responses_api.provider_tools import (
-    ProviderStreamUpdate,
-    ResponsesWebSearchTool,
+from jharness.models.openai.responses.provider_tools import (
+    OpenAIResponsesProviderToolStreamUpdate,
+    OpenAIResponsesWebSearchTool,
 )
 
 
-class _DeepSeekResponsesWebSearchTool(ResponsesWebSearchTool):
+class _DeepSeekResponsesWebSearchTool(OpenAIResponsesWebSearchTool):
     """Decode DeepSeek search lifecycle events without finalizing the output item."""
 
     __slots__ = ()
@@ -21,12 +21,12 @@ class _DeepSeekResponsesWebSearchTool(ResponsesWebSearchTool):
         self,
         event_type: str,
         value: Mapping[str, Any],
-    ) -> ProviderStreamUpdate:
+    ) -> OpenAIResponsesProviderToolStreamUpdate:
         update = super().stream_event_update(event_type, value)
-        return ProviderStreamUpdate(ProviderToolStatus.IN_PROGRESS, update.data)
+        return OpenAIResponsesProviderToolStreamUpdate(ProviderToolStatus.IN_PROGRESS, update.data)
 
 
-def deepseek_responses_web_search_codec(tool: ProviderToolId) -> ResponsesWebSearchTool:
+def deepseek_responses_web_search_codec(tool: ProviderToolId) -> OpenAIResponsesWebSearchTool:
     """Build the DeepSeek-specific hosted web-search codec."""
 
     return _DeepSeekResponsesWebSearchTool(

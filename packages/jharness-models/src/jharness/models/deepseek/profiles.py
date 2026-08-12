@@ -5,20 +5,18 @@ from __future__ import annotations
 from typing import Literal, cast
 
 from jharness.kernel import ModelCapabilities, RuntimeToolKind
-from jharness.models.anthropic import AnthropicProfile
-from jharness.models.anthropic.messages_api.server_tools import (
-    AnthropicServerToolRegistry,
-    anthropic_web_search_codec,
+from jharness.models.anthropic.messages.profile import AnthropicMessagesProfile
+from jharness.models.anthropic.messages.server_tools import (
+    AnthropicMessagesServerToolRegistry,
+    anthropic_messages_web_search_codec,
 )
 from jharness.models.deepseek.tools import (
-    DEEPSEEK_ANTHROPIC_WEB_SEARCH,
+    DEEPSEEK_MESSAGES_WEB_SEARCH,
     DEEPSEEK_RESPONSES_WEB_SEARCH,
 )
-from jharness.models.openai.profiles import (
-    OpenAIChatCompletionsProfile,
-    OpenAIResponsesProfile,
-)
-from jharness.models.openai.responses_api.provider_tools import ResponsesProviderToolRegistry
+from jharness.models.openai.chat.profile import OpenAIChatProfile
+from jharness.models.openai.responses.profile import OpenAIResponsesProfile
+from jharness.models.openai.responses.provider_tools import OpenAIResponsesProviderToolRegistry
 
 from . import _responses
 
@@ -37,17 +35,17 @@ _RUNTIME_TOOL_CHOICES = frozenset({"auto", "none", "required", "runtime"})
 _ALL_TOOL_CHOICES = frozenset({"auto", "none", "required", "runtime", "provider"})
 
 
-def deepseek_openai_chat_profile(
+def deepseek_chat_profile(
     *,
-    thinking: bool,
+    thinking: bool = False,
     effort: DeepSeekThinkingEffort | None = None,
-) -> OpenAIChatCompletionsProfile:
+) -> OpenAIChatProfile:
     """Return a DeepSeek profile for the OpenAI Chat Completions wire protocol."""
 
     thinking = _validate_options(thinking, effort)
     extra_request_body = _thinking_request_body(thinking=thinking, effort=effort)
-    return OpenAIChatCompletionsProfile(
-        name=_profile_name("deepseek-openai-chat", thinking),
+    return OpenAIChatProfile(
+        name=_profile_name("deepseek-chat", thinking),
         capabilities=ModelCapabilities(
             streaming=True,
             runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED}),
@@ -69,18 +67,18 @@ def deepseek_openai_chat_profile(
     )
 
 
-def deepseek_anthropic_profile(
+def deepseek_messages_profile(
     *,
-    thinking: bool,
+    thinking: bool = False,
     effort: DeepSeekThinkingEffort | None = None,
-) -> AnthropicProfile:
+) -> AnthropicMessagesProfile:
     """Return a DeepSeek profile for the Anthropic Messages wire protocol."""
 
     thinking = _validate_options(thinking, effort)
     extra_request_body = _thinking_request_body(thinking=thinking, effort=None)
-    web_search = DEEPSEEK_ANTHROPIC_WEB_SEARCH
-    return AnthropicProfile(
-        name=_profile_name("deepseek-anthropic", thinking),
+    web_search = DEEPSEEK_MESSAGES_WEB_SEARCH
+    return AnthropicMessagesProfile(
+        name=_profile_name("deepseek-messages", thinking),
         capabilities=ModelCapabilities(
             streaming=True,
             runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED}),
@@ -95,7 +93,9 @@ def deepseek_anthropic_profile(
             seed=False,
             usage_reporting=True,
         ),
-        server_tools=AnthropicServerToolRegistry((anthropic_web_search_codec(web_search),)),
+        server_tools=AnthropicMessagesServerToolRegistry(
+            (anthropic_messages_web_search_codec(web_search),)
+        ),
         redacted_thinking_mode="reject",
         stream_usage_mode="include",
         extra_request_body=extra_request_body,
@@ -103,7 +103,7 @@ def deepseek_anthropic_profile(
     )
 
 
-def deepseek_openai_responses_profile(
+def deepseek_responses_profile(
     *,
     effort: DeepSeekResponsesEffort | None = None,
 ) -> OpenAIResponsesProfile:
@@ -120,7 +120,7 @@ def deepseek_openai_responses_profile(
         extra_request_body["reasoning"] = {"effort": effort}
     web_search = DEEPSEEK_RESPONSES_WEB_SEARCH
     return OpenAIResponsesProfile(
-        name="deepseek-openai-responses",
+        name="deepseek-responses",
         capabilities=ModelCapabilities(
             streaming=True,
             runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED, RuntimeToolKind.FREEFORM}),
@@ -140,7 +140,7 @@ def deepseek_openai_responses_profile(
         reasoning_history_mode="content",
         store=None,
         include=frozenset(),
-        provider_tool_registry=ResponsesProviderToolRegistry(
+        provider_tool_registry=OpenAIResponsesProviderToolRegistry(
             (_responses.deepseek_responses_web_search_codec(web_search),)
         ),
         freeform_runtime_tool_names=frozenset({"apply_patch"}),
@@ -178,5 +178,4 @@ def _validate_options(thinking: object, effort: object) -> bool:
 
 
 def _profile_name(prefix: str, thinking: bool) -> str:
-    mode = "thinking" if thinking else "nonthinking"
-    return f"{prefix}-{mode}"
+    return f"{prefix}-thinking" if thinking else prefix

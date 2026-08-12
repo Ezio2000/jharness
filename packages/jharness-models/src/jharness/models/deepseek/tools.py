@@ -7,8 +7,8 @@ from typing import Any
 
 from jharness.kernel import ProviderToolId, ProviderToolSpec
 
-DEEPSEEK_ANTHROPIC_WEB_SEARCH = ProviderToolId(
-    "deepseek.anthropic",
+DEEPSEEK_MESSAGES_WEB_SEARCH = ProviderToolId(
+    "deepseek.messages",
     "web_search",
 )
 DEEPSEEK_RESPONSES_WEB_SEARCH = ProviderToolId(
@@ -17,13 +17,13 @@ DEEPSEEK_RESPONSES_WEB_SEARCH = ProviderToolId(
 )
 
 
-def deepseek_anthropic_web_search(
+def deepseek_messages_web_search(
     configuration: Mapping[str, Any] | None = None,
 ) -> ProviderToolSpec:
-    """Declare DeepSeek's Anthropic-compatible hosted web-search tool."""
+    """Declare DeepSeek's Messages-compatible hosted web-search tool."""
 
     return ProviderToolSpec(
-        DEEPSEEK_ANTHROPIC_WEB_SEARCH,
+        DEEPSEEK_MESSAGES_WEB_SEARCH,
         {} if configuration is None else configuration,
     )
 

@@ -5,9 +5,9 @@ three explicit wire APIs:
 
 | Import | Wire API | Configuration |
 | --- | --- | --- |
-| `jharness.models.openai` | OpenAI Chat Completions | `OpenAIChatCompletionsModel` and `OpenAIChatCompletionsProfile` |
+| `jharness.models.openai` | OpenAI Chat (Chat Completions API) | `OpenAIChatModel` and `OpenAIChatProfile` |
 | `jharness.models.openai` | OpenAI Responses | `OpenAIResponsesModel` and `OpenAIResponsesProfile` |
-| `jharness.models.anthropic` | Anthropic Messages | `AnthropicModel` and `AnthropicProfile` |
+| `jharness.models.anthropic` | Anthropic Messages | `AnthropicMessagesModel` and `AnthropicMessagesProfile` |
 | `jharness.models.deepseek` | Compatible Chat Completions, Messages, or native Responses endpoint | DeepSeek profile factories for the concrete adapters above |
 
 Install the adapter package with `uv add jharness-models`. Provider APIs are not
@@ -18,21 +18,21 @@ flattened into `jharness.models`; import from the namespaces shown above.
 ```python
 import os
 
-from jharness.models.openai import OpenAIChatCompletionsModel
+from jharness.models.openai import OpenAIChatModel
 
-model = OpenAIChatCompletionsModel(
+model = OpenAIChatModel(
     base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     api_key=os.environ["OPENAI_API_KEY"],
     model=os.environ["OPENAI_MODEL"],
 )
 ```
 
-The Anthropic equivalent is:
+The Anthropic Messages equivalent is:
 
 ```python
-from jharness.models.anthropic import AnthropicModel
+from jharness.models.anthropic import AnthropicMessagesModel
 
-model = AnthropicModel(
+model = AnthropicMessagesModel(
     base_url=os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
     api_key=os.environ["ANTHROPIC_API_KEY"],
     model=os.environ["ANTHROPIC_MODEL"],
@@ -59,6 +59,16 @@ Every profile carries one immutable `ModelCapabilities` value, and the model cli
 returns that same value unchanged. There is no second set of per-feature profile
 booleans for the client to translate.
 
+Built-in profile identifiers use the same concise API vocabulary as their Python
+types: `openai-chat`, `openai-responses`, `anthropic-messages`, `deepseek-chat`,
+`deepseek-messages`, and `deepseek-responses`. A DeepSeek thinking profile appends
+`-thinking`; the default non-thinking profiles have no mode suffix.
+
+`profile.name` is an observable adapter identity, not a display label or a supplier
+field. It is emitted as `ModelResponse.metadata["provider"]` and
+`ModelErrorInfo.provider`. Runtime checkpoints, history, and traces preserve assistant
+output rather than response-level metadata, so they do not persist this identity.
+
 The default `OpenAIResponsesProfile` is deliberately conservative: text input and
 output, runtime functions, streaming, and usage only. It does not claim image/file
 input, structured output, JSON mode, or provider-hosted tools for an arbitrary model
@@ -71,10 +81,10 @@ capabilities:
 ```python
 from dataclasses import replace
 
-from jharness.models.openai import OpenAIChatCompletionsProfile
+from jharness.models.openai import OpenAIChatProfile
 
-default = OpenAIChatCompletionsProfile()
-text_only = OpenAIChatCompletionsProfile(
+default = OpenAIChatProfile()
+text_only = OpenAIChatProfile(
     name="text-only-chat",
     capabilities=replace(
         default.capabilities,
@@ -113,12 +123,12 @@ The current adapters expose these boundaries as follows:
 
 | Adapter/profile | Default model input | Native model output | Runtime tools | Provider-hosted tools | Conversation rule |
 | --- | --- | --- | --- | --- | --- |
-| OpenAI Chat Completions | Text and image | Text | Function tools | None | Complete JHarness history is encoded as messages |
+| OpenAI Chat | Text and image | Text | Function tools | None | Complete JHarness history is encoded as messages |
 | Anthropic Messages | Text, image, and file | Text | Client `tool_use` blocks | Profile-installed server-tool codecs | Complete JHarness history is encoded as Messages blocks |
 | OpenAI Responses default | Text | Text | Function tools | None | Complete ordered history is encoded as Responses input items with `store=false` |
 | OpenAI Responses explicit profile | Host-declared subset of text, image, and file | Text | Function tools | Host-declared image generation and/or web search | Profile storage policy and complete ordered history are authoritative |
 | DeepSeek Responses profile | Text only | Text | Function and `apply_patch` freeform tools | `deepseek.responses/web_search` | Strictly stateless; complete history is resent |
-| DeepSeek Anthropic profile | Text only | Text | Client `tool_use` blocks | `deepseek.anthropic/web_search` | Complete Messages history, including opaque search results, is replayed exactly |
+| DeepSeek Messages profile | Text only | Text | Client `tool_use` blocks | `deepseek.messages/web_search` | Complete Messages history, including opaque search results, is replayed exactly |
 
 Profiles remain authoritative. The runtime rejects request modalities and tool
 identities that the selected explicit profile does not advertise before network
@@ -156,7 +166,7 @@ message = Message(
 ```
 
 Declare OpenAI-hosted image generation in an explicit model profile. Generated bytes
-must be externalized through a host-owned `ResponsesArtifactStore` before the model
+must be externalized through a host-owned `OpenAIResponsesArtifactStore` before the model
 response can enter durable history:
 
 ```python
@@ -171,13 +181,13 @@ from jharness.kernel import ArtifactRef, ProviderToolId, ProviderToolSpec, Runti
 from jharness.models.openai import (
     OpenAIResponsesModel,
     OpenAIResponsesProfile,
-    ResponsesArtifactStore,
-    ResponsesImageGenerationTool,
-    ResponsesProviderToolRegistry,
+    OpenAIResponsesArtifactStore,
+    OpenAIResponsesImageGenerationTool,
+    OpenAIResponsesProviderToolRegistry,
 )
 
 
-class LocalImageArtifacts(ResponsesArtifactStore):
+class LocalImageArtifacts(OpenAIResponsesArtifactStore):
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -236,8 +246,8 @@ profile = OpenAIResponsesProfile(
         tool_choice_types=base.capabilities.tool_choice_types | {"provider"},
         provider_tools=frozenset({image_generation}),
     ),
-    provider_tool_registry=ResponsesProviderToolRegistry(
-        (ResponsesImageGenerationTool(tool=image_generation),)
+    provider_tool_registry=OpenAIResponsesProviderToolRegistry(
+        (OpenAIResponsesImageGenerationTool(tool=image_generation),)
     ),
 )
 model = OpenAIResponsesModel(
@@ -296,20 +306,20 @@ DeepSeek factories configure one of the concrete adapters:
 ```python
 import os
 
-from jharness.models.deepseek import deepseek_openai_chat_profile
-from jharness.models.openai import OpenAIChatCompletionsModel
+from jharness.models.deepseek import deepseek_chat_profile
+from jharness.models.openai import OpenAIChatModel
 
-model = OpenAIChatCompletionsModel(
+model = OpenAIChatModel(
     base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
     api_key=os.environ["DEEPSEEK_API_KEY"],
     model=os.environ["DEEPSEEK_MODEL"],
-    profile=deepseek_openai_chat_profile(thinking=True, effort="high"),
+    profile=deepseek_chat_profile(thinking=True, effort="high"),
 )
 ```
 
-`deepseek_anthropic_profile` configures `AnthropicModel` instead. Both factories
-require an explicit `thinking` value; `effort` accepts `"high"` or `"max"` only when
-thinking is enabled.
+`deepseek_messages_profile` configures `AnthropicMessagesModel` instead. Both factories
+default to non-thinking mode; set `thinking=True` explicitly to enable thinking.
+`effort` accepts `"high"` or `"max"` only when thinking is enabled.
 
 DeepSeek's native Responses endpoint uses the Responses adapter with its own strict
 profile:
@@ -317,14 +327,14 @@ profile:
 ```python
 import os
 
-from jharness.models.deepseek import deepseek_openai_responses_profile
+from jharness.models.deepseek import deepseek_responses_profile
 from jharness.models.openai import OpenAIResponsesModel
 
 model = OpenAIResponsesModel(
     base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
     api_key=os.environ["DEEPSEEK_API_KEY"],
     model="deepseek-v4-flash",
-    profile=deepseek_openai_responses_profile(effort="none"),
+    profile=deepseek_responses_profile(effort="none"),
 )
 ```
 

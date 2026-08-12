@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import subprocess
 import sys
+from importlib.util import find_spec
+from typing import get_args
 
 import conformance
 import jharness.kernel as kernel
@@ -102,16 +104,103 @@ def test_kernel_root_contains_the_documented_protocol_families() -> None:
 def test_only_documented_model_namespaces_are_public() -> None:
     decorators = importlib.import_module("jharness.models.decorators")
     assert set(decorators.__all__) == {"FallbackModel", "RetryingModel"}
-    for namespace in (
-        "jharness.models.openai",
-        "jharness.models.anthropic",
-        "jharness.models.deepseek",
-    ):
+    expected_exports = {
+        "jharness.models.openai": {
+            "OpenAIChatCodec",
+            "OpenAIChatError",
+            "OpenAIChatModel",
+            "OpenAIChatProfile",
+            "OpenAIResponsesCodec",
+            "OpenAIResponsesError",
+            "OpenAIResponsesModel",
+            "OpenAIResponsesProfile",
+            "OpenAIResponsesProviderToolStreamUpdate",
+            "OpenAIResponsesArtifactStore",
+            "OpenAIResponsesImageGenerationTool",
+            "OpenAIResponsesProviderToolCodec",
+            "OpenAIResponsesProviderToolRegistry",
+            "OpenAIResponsesWebSearchTool",
+        },
+        "jharness.models.anthropic": {
+            "AnthropicMessagesCodec",
+            "AnthropicMessagesError",
+            "AnthropicMessagesModel",
+            "AnthropicMessagesProfile",
+            "AnthropicMessagesServerToolCodec",
+            "AnthropicMessagesServerToolRegistry",
+            "anthropic_messages_web_search_codec",
+        },
+        "jharness.models.deepseek": {
+            "DEEPSEEK_MESSAGES_WEB_SEARCH",
+            "DEEPSEEK_RESPONSES_WEB_SEARCH",
+            "DeepSeekResponsesEffort",
+            "DeepSeekThinkingEffort",
+            "deepseek_chat_profile",
+            "deepseek_messages_profile",
+            "deepseek_messages_web_search",
+            "deepseek_responses_profile",
+            "deepseek_responses_web_search",
+        },
+    }
+    for namespace, expected in expected_exports.items():
         module = importlib.import_module(namespace)
-        assert module.__all__
-        assert all(hasattr(module, name) for name in module.__all__)
+        assert set(module.__all__) == expected
+        assert all(hasattr(module, name) for name in expected)
+
+    deepseek = importlib.import_module("jharness.models.deepseek")
+    assert frozenset(get_args(deepseek.DeepSeekThinkingEffort)) == frozenset({"high", "max"})
+    assert frozenset(get_args(deepseek.DeepSeekResponsesEffort)) == frozenset(
+        {"none", "low", "high", "xhigh", "max"}
+    )
+
+    legacy_exports = {
+        "jharness.models.openai": {
+            "ProviderStreamUpdate",
+            "ResponsesArtifactStore",
+            "ResponsesImageGenerationTool",
+            "ResponsesProviderToolCodec",
+            "ResponsesProviderToolRegistry",
+            "ResponsesWebSearchTool",
+            "OpenAIChatCompletionsCodec",
+            "OpenAIChatCompletionsError",
+            "OpenAIChatCompletionsModel",
+            "OpenAIChatCompletionsProfile",
+        },
+        "jharness.models.anthropic": {
+            "AnthropicCodec",
+            "AnthropicError",
+            "AnthropicModel",
+            "AnthropicProfile",
+            "AnthropicServerToolCodec",
+            "AnthropicServerToolRegistry",
+            "anthropic_web_search_codec",
+        },
+        "jharness.models.deepseek": {
+            "DEEPSEEK_ANTHROPIC_WEB_SEARCH",
+            "deepseek_anthropic_profile",
+            "deepseek_anthropic_web_search",
+            "deepseek_openai_chat_profile",
+            "deepseek_openai_responses_profile",
+        },
+    }
+    for namespace, legacy in legacy_exports.items():
+        module = importlib.import_module(namespace)
+        assert all(not hasattr(module, name) for name in legacy)
+
     for implementation in (
-        "jharness.models.openai.chat_completions",
-        "jharness.models.anthropic.messages_api",
+        "jharness.models.anthropic.messages",
+        "jharness.models.openai.chat",
+        "jharness.models.openai.responses",
     ):
         assert importlib.import_module(implementation).__all__ == []
+
+    for legacy_module in (
+        "jharness.models.anthropic.errors",
+        "jharness.models.anthropic.messages_api",
+        "jharness.models.anthropic.profiles",
+        "jharness.models.openai.chat_completions",
+        "jharness.models.openai.errors",
+        "jharness.models.openai.profiles",
+        "jharness.models.openai.responses_api",
+    ):
+        assert find_spec(legacy_module) is None
