@@ -62,6 +62,7 @@
         "result": "completed",
         "part_count": 1,
         "tool_call_ids": [],
+        "provider_turn_pending": false,
         "finish_reason": "end_turn",
         "usage": null,
         "limit_reason": null

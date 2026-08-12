@@ -8,7 +8,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from jharness.kernel import ToolCall, ToolContext, ToolExecution, ToolResult, ToolRisk, ToolSpec
+from jharness.kernel import (
+    StructuredToolCall,
+    StructuredToolSpec,
+    ToolContext,
+    ToolExecution,
+    ToolResult,
+    ToolRisk,
+)
 from jharness.tools.filesystem._common import (
     FilesystemFailure,
     OperationCancelled,
@@ -41,7 +48,7 @@ class LsTool:
     max_limit: int
     max_search_seconds: float
     max_scanned_entries: int
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(
         self,
@@ -69,7 +76,7 @@ class LsTool:
     def root(self) -> Path:
         return self.workspace.root
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         path = cast(str, call.arguments.get("path", "."))
         limit = cast(int, call.arguments.get("limit", self.default_limit))
         try:
@@ -128,7 +135,7 @@ class LsTool:
                 yield f"{entry.name}{suffix}"
 
 
-def _spec(default_limit: int, max_limit: int) -> ToolSpec:
+def _spec(default_limit: int, max_limit: int) -> StructuredToolSpec:
     output = {
         "type": "object",
         "required": ["path", "entries", "truncated"],
@@ -139,7 +146,7 @@ def _spec(default_limit: int, max_limit: int) -> ToolSpec:
         },
         "additionalProperties": False,
     }
-    return ToolSpec(
+    return StructuredToolSpec(
         name="Ls",
         description=(
             "List direct children of a directory within the configured workspace. "

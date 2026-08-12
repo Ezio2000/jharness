@@ -44,7 +44,7 @@
       "state": {
         "kind": "suspended",
         "resume_to": {
-          "kind": "planning"
+          "kind": "planning", "provider_turn_pending": false
         },
         "suspension": {
           "reason": "host_pause",

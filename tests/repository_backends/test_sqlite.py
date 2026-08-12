@@ -48,7 +48,7 @@ async def test_sqlite_context_closes_after_initialization_failure(tmp_path: Path
     await repository.close()
 
 
-async def test_sqlite_is_lazy_and_persists_split_v2_state(tmp_path: Path) -> None:
+async def test_sqlite_is_lazy_and_persists_split_v3_state(tmp_path: Path) -> None:
     database = tmp_path / "runs.sqlite3"
     first = started("run-a", "cp-0")
     advanced = append_external(first.checkpoint, "cp-1")
@@ -73,10 +73,30 @@ async def test_sqlite_is_lazy_and_persists_split_v2_state(tmp_path: Path) -> Non
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
     assert tables == {
-        "jharness_v2_run_heads",
-        "jharness_v2_checkpoint_ledger",
-        "jharness_v2_history_chunks",
+        "jharness_v3_run_heads",
+        "jharness_v3_checkpoint_ledger",
+        "jharness_v3_history_chunks",
     }
+
+
+async def test_sqlite_v3_namespace_ignores_obsolete_v2_tables(tmp_path: Path) -> None:
+    database = tmp_path / "upgraded.sqlite3"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE jharness_v2_run_heads (marker TEXT NOT NULL)")
+        connection.execute("INSERT INTO jharness_v2_run_heads VALUES ('obsolete')")
+        connection.commit()
+
+    async with SQLiteRunRepository(database) as repository:
+        assert await repository.get_head("run-a") is None
+        await repository.commit(started("run-a", "cp-0"))
+        head = await repository.get_head("run-a")
+        assert head is not None and head.id == "cp-0"
+
+    with closing(sqlite3.connect(database)) as connection:
+        marker = connection.execute("SELECT marker FROM jharness_v2_run_heads").fetchone()
+        v3_count = connection.execute("SELECT COUNT(*) FROM jharness_v3_run_heads").fetchone()
+    assert marker == ("obsolete",)
+    assert v3_count == (1,)
 
 
 async def test_sqlite_idempotency_is_scoped_per_run_and_precedes_cas(
@@ -158,7 +178,7 @@ async def test_sqlite_rewrite_writes_only_new_generation_chunks(tmp_path: Path) 
         generations = connection.execute(
             """
             SELECT history_generation, COUNT(*), SUM(message_count)
-            FROM jharness_v2_history_chunks
+            FROM jharness_v3_history_chunks
             WHERE run_id = 'run-a'
             GROUP BY history_generation
             ORDER BY history_generation
@@ -174,7 +194,7 @@ async def test_sqlite_rejects_orphaned_ledger_and_corrupt_core(tmp_path: Path) -
         await repository.commit(first)
 
     with closing(sqlite3.connect(database)) as connection:
-        connection.execute("DELETE FROM jharness_v2_run_heads WHERE run_id = 'run-a'")
+        connection.execute("DELETE FROM jharness_v3_run_heads WHERE run_id = 'run-a'")
         connection.commit()
     async with SQLiteRunRepository(database) as repository:
         with pytest.raises(RepositoryError, match="orphaned"):
@@ -187,7 +207,7 @@ async def test_sqlite_rejects_orphaned_ledger_and_corrupt_core(tmp_path: Path) -
     with closing(sqlite3.connect(database)) as connection:
         connection.execute(
             """
-            UPDATE jharness_v2_run_heads
+            UPDATE jharness_v3_run_heads
             SET checkpoint_core = ?, checkpoint_core_digest = ?
             WHERE run_id = 'run-a'
             """,
@@ -211,7 +231,7 @@ async def test_sqlite_detects_corrupt_history_when_materialized(tmp_path: Path) 
     with closing(sqlite3.connect(database)) as connection:
         connection.execute(
             """
-            UPDATE jharness_v2_history_chunks
+            UPDATE jharness_v3_history_chunks
             SET chunk_payload = ?, chunk_digest = ?
             WHERE run_id = 'run-a' AND history_generation = 0 AND chunk_index = 0
             """,

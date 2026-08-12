@@ -25,6 +25,7 @@ from jharness.models._http import (
 )
 from jharness.models.openai.errors import OpenAIResponsesError
 from jharness.models.openai.profiles import OpenAIResponsesProfile
+from jharness.models.openai.responses_api.artifacts import ResponsesArtifactStore
 from jharness.models.openai.responses_api.codec import OpenAIResponsesCodec
 from jharness.models.openai.responses_api.stream import OpenAIResponsesStreamDecoder
 
@@ -34,6 +35,7 @@ _REQUEST_ID_HEADERS = ("x-request-id", "request-id", "x-ds-request-id")
 
 class _OpenAIResponsesModelOptions(TypedDict, total=False):
     profile: OpenAIResponsesProfile | None
+    artifact_store: ResponsesArtifactStore | None
     timeout: float | httpx.Timeout | None
     headers: Mapping[str, str] | None
     client: httpx.AsyncClient | None
@@ -54,6 +56,12 @@ class OpenAIResponsesModel:
         **options: Unpack[_OpenAIResponsesModelOptions],
     ) -> None:
         transport_options: dict[str, Any] = dict(options)
+        artifact_store = transport_options.pop("artifact_store", None)
+        if artifact_store is not None and (
+            isinstance(artifact_store, type)
+            or not isinstance(artifact_store, ResponsesArtifactStore)
+        ):
+            raise TypeError("artifact_store must implement ResponsesArtifactStore")
         transport_options.setdefault(
             "max_response_body_bytes",
             _DEFAULT_IMAGE_RESPONSE_LIMIT,
@@ -79,6 +87,7 @@ class OpenAIResponsesModel:
         self._max_sse_event_bytes = config.max_sse_event_bytes
         self._headers = dict(config.headers)
         self._client = config.client
+        self._artifact_store = artifact_store
         self._errors = ModelErrorPolicy(
             provider=config.profile.name,
             codec_error=OpenAIResponsesError,
@@ -101,21 +110,35 @@ class OpenAIResponsesModel:
     ) -> ModelResponse:
         if not stream and emit_delta is not None:
             raise ValueError("emit_delta requires stream=True")
+        artifact_store = self._artifact_store
+        registry = self.profile.provider_tool_registry
+        needs_artifacts = registry.request_requires_artifact_store(
+            request
+        ) or registry.history_requires_artifact_store(request.messages)
+        if artifact_store is None and needs_artifacts:
+            raise ValueError("Responses provider artifacts require a ResponsesArtifactStore")
+        wire_request = (
+            request
+            if artifact_store is None
+            else await registry.hydrate_artifact_history(request, artifact_store, context)
+        )
         if stream:
             decoder = OpenAIResponsesStreamDecoder(self.codec, self.profile)
-            return await invoke_sse_model(
+            response = await invoke_sse_model(
                 client=self._client,
                 timeout=self._timeout,
                 context=context,
                 url=self._responses_url(),
-                payload=lambda: self.codec.encode_request(request, stream=True),
+                payload=lambda: self.codec.encode_request(wire_request, stream=True),
                 headers=lambda _payload: self._request_headers(),
                 decode_frame=lambda event, data: self._decode_sse_data(
                     event,
                     data,
                     decoder,
                 ),
-                completed_response=decoder.completed_response,
+                completed_response=lambda: self._require_safe_artifacts(
+                    decoder.completed_response()
+                ),
                 emit_delta=emit_delta,
                 errors=self._errors,
                 incomplete_error="Responses stream ended before a terminal response event",
@@ -123,19 +146,36 @@ class OpenAIResponsesModel:
                 max_sse_line_bytes=self._max_sse_line_bytes,
                 max_sse_event_bytes=self._max_sse_event_bytes,
             )
-        return await invoke_json_model(
-            client=self._client,
-            timeout=self._timeout,
-            context=context,
-            url=self._responses_url(),
-            payload=lambda: self.codec.encode_request(request, stream=False),
-            headers=lambda _payload: self._request_headers(),
-            decode=self.codec.decode_response,
-            errors=self._errors,
-            response_shape_error="Responses response must be an object",
-            body_error_predicate=_is_transport_error_body,
-            max_response_body_bytes=self._max_response_body_bytes,
-        )
+        else:
+            response = await invoke_json_model(
+                client=self._client,
+                timeout=self._timeout,
+                context=context,
+                url=self._responses_url(),
+                payload=lambda: self.codec.encode_request(wire_request, stream=False),
+                headers=lambda _payload: self._request_headers(),
+                decode=self._decode_response,
+                errors=self._errors,
+                response_shape_error="Responses response must be an object",
+                body_error_predicate=_is_transport_error_body,
+                max_response_body_bytes=self._max_response_body_bytes,
+            )
+        if artifact_store is None:
+            return response
+        return await registry.externalize_artifacts(response, artifact_store, context)
+
+    def _decode_response(self, value: Mapping[str, Any]) -> ModelResponse:
+        return self._require_safe_artifacts(self.codec.decode_response(value))
+
+    def _require_safe_artifacts(self, response: ModelResponse) -> ModelResponse:
+        if (
+            self._artifact_store is None
+            and self.profile.provider_tool_registry.response_requires_artifact_store(response)
+        ):
+            raise OpenAIResponsesError(
+                "Responses returned inline provider artifact data without a ResponsesArtifactStore"
+            )
+        return response
 
     def _decode_sse_data(
         self,

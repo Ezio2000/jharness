@@ -16,10 +16,10 @@ from jharness.kernel import (
     Message,
     Planning,
     Runtime,
+    StructuredToolCall,
     Suspended,
     SuspensionSelector,
     ToolBatchFact,
-    ToolCall,
     ToolOutcomeKind,
     ToolWaiting,
     freeze_json_value,
@@ -718,7 +718,7 @@ def _validate_numeric_value(
 def _current_waiting_outcome(
     checkpoint: Checkpoint,
     tool_call_id: str,
-) -> tuple[ToolWaiting, ToolCall]:
+) -> tuple[ToolWaiting, StructuredToolCall]:
     fact = checkpoint.fact
     if not isinstance(fact, ToolBatchFact):
         raise ValueError("AskQuestion checkpoint must end at its waiting tool batch")
@@ -735,7 +735,11 @@ def _current_waiting_outcome(
     if assistant_message.role != "assistant" or len(calls) != 1:
         raise ValueError("AskQuestion checkpoint has no matching assistant tool call")
     assistant_call = calls[0]
-    if assistant_call.id != tool_call_id or assistant_call.name != "AskQuestion":
+    if (
+        not isinstance(assistant_call, StructuredToolCall)
+        or assistant_call.id != tool_call_id
+        or assistant_call.name != "AskQuestion"
+    ):
         raise ValueError("AskQuestion checkpoint assistant call has the wrong identity")
     outcome = tool_message.outcome
     if not isinstance(outcome, ToolWaiting):

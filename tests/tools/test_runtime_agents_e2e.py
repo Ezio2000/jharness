@@ -20,9 +20,9 @@ from jharness.kernel import (
     RunContext,
     RunLimits,
     Runtime,
+    StructuredToolCall,
     Suspended,
     ToolAccepted,
-    ToolCall,
     ToolChoice,
     ToolSuccess,
     ToolWaiting,
@@ -107,7 +107,9 @@ class _EndToEndModel(Model):
             except asyncio.CancelledError:
                 self.child_model_cancelled = True
                 raise
-            return ModelResponse((ToolCall("child-read", "Read", {"file_path": "evidence.txt"}),))
+            return ModelResponse(
+                (StructuredToolCall("child-read", "Read", {"file_path": "evidence.txt"}),)
+            )
 
         outcome = tool_messages[-1].outcome
         assert isinstance(outcome, ToolSuccess)
@@ -140,7 +142,7 @@ class _EndToEndModel(Model):
         if not tool_messages:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "delegate-child",
                         "Agent",
                         {
@@ -176,13 +178,17 @@ class _EndToEndModel(Model):
         agent_id: str,
     ) -> ModelResponse:
         if len(tool_messages) == 1:
-            return ModelResponse((ToolCall("get-child", "AgentGet", {"agent_id": agent_id}),))
+            return ModelResponse(
+                (StructuredToolCall("get-child", "AgentGet", {"agent_id": agent_id}),)
+            )
         assert len(tool_messages) == 2
         get_outcome = tool_messages[-1].outcome
         assert isinstance(get_outcome, ToolSuccess)
         payload = thaw_json_value(get_outcome.structured_content)
         assert isinstance(payload, dict) and payload["status"] == "running"
-        return ModelResponse((ToolCall("wait-child", "AgentWait", {"agent_id": agent_id}),))
+        return ModelResponse(
+            (StructuredToolCall("wait-child", "AgentWait", {"agent_id": agent_id}),)
+        )
 
     def _cancel_step(
         self,
@@ -190,7 +196,9 @@ class _EndToEndModel(Model):
         agent_id: str,
     ) -> ModelResponse:
         if len(tool_messages) == 1:
-            return ModelResponse((ToolCall("cancel-child", "AgentCancel", {"agent_id": agent_id}),))
+            return ModelResponse(
+                (StructuredToolCall("cancel-child", "AgentCancel", {"agent_id": agent_id}),)
+            )
         cancel_outcome = tool_messages[-1].outcome
         assert isinstance(cancel_outcome, ToolSuccess)
         payload = thaw_json_value(cancel_outcome.structured_content)
@@ -231,7 +239,7 @@ def _harness(tmp_path: Path, mode: _Mode) -> _Harness:
         seed=7,
         metadata={"profile": "parent-runtime"},
     )
-    tool_choice = ToolChoice(allow_parallel_tool_calls=False)
+    tool_choice = ToolChoice(allow_parallel_runtime_tool_calls=False)
     limits = RunLimits(
         max_planning_steps=8,
         max_tool_calls=8,

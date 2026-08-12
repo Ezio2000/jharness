@@ -34,7 +34,7 @@ from jharness.kernel import (
     RunContext,
     RunLimits,
     Runtime,
-    ToolCall,
+    StructuredToolCall,
     ToolFailure,
     ToolSuccess,
     thaw_json_value,
@@ -205,7 +205,7 @@ def test_runtime_model_calls_bash_and_observes_result_before_final_response(
         if turn == 0:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "bash-call",
                         "Bash",
                         {
@@ -258,7 +258,7 @@ def test_runtime_bash_approval_deny_never_starts_or_changes_workspace(tmp_path: 
         if turn == 0:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "denied-bash",
                         "Bash",
                         {
@@ -300,7 +300,7 @@ def test_runtime_two_bash_calls_execute_strictly_serially(tmp_path: Path) -> Non
         if turn == 0:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "bash-first",
                         "Bash",
                         {
@@ -312,7 +312,7 @@ def test_runtime_two_bash_calls_execute_strictly_serially(tmp_path: Path) -> Non
                             "working_directory": ".",
                         },
                     ),
-                    ToolCall(
+                    StructuredToolCall(
                         "bash-second",
                         "Bash",
                         {
@@ -376,7 +376,7 @@ def test_runtime_active_cancel_cleans_up_bash_descendants(tmp_path: Path) -> Non
         if turn == 0:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "cancel-bash",
                         "Bash",
                         {
@@ -442,7 +442,7 @@ def test_runtime_bash_root_exit_cleans_up_background_descendant(tmp_path: Path) 
         if turn == 0:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "root-exit-bash",
                         "Bash",
                         {
@@ -492,7 +492,7 @@ def test_runtime_deadline_cleans_up_bash_descendants_before_return(tmp_path: Pat
         if turn == 0:
             return ModelResponse(
                 (
-                    ToolCall(
+                    StructuredToolCall(
                         "deadline-bash",
                         "Bash",
                         {

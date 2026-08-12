@@ -10,7 +10,14 @@ from threading import Lock
 from time import monotonic
 from typing import cast
 
-from jharness.kernel import SettledResult, ToolCall, ToolContext, ToolFailure, ToolResult, ToolSpec
+from jharness.kernel import (
+    SettledResult,
+    StructuredToolCall,
+    StructuredToolSpec,
+    ToolContext,
+    ToolFailure,
+    ToolResult,
+)
 from jharness.toolkit.tool import Tool
 
 _CANCEL_POLL_SECONDS = 0.05
@@ -80,10 +87,10 @@ class RetryingTool:
             raise ValueError("jitter_ratio must be between 0 and 1")
 
     @property
-    def spec(self) -> ToolSpec:
+    def spec(self) -> StructuredToolSpec:
         return self.tool.spec
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         errors: list[Exception] = []
         backoff = self.backoff_initial_seconds
         for attempt in range(1, self.max_attempts + 1):
@@ -125,10 +132,10 @@ class CircuitBreakingTool:
         _positive_float(self.recovery_timeout_seconds, "recovery_timeout_seconds")
 
     @property
-    def spec(self) -> ToolSpec:
+    def spec(self) -> StructuredToolSpec:
         return self.tool.spec
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         probe = self._admit()
         if probe is None:
             return SettledResult(ToolFailure.from_error("circuit_open", "tool circuit is open"))

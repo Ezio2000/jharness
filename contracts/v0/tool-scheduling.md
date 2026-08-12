@@ -75,7 +75,8 @@ the suspension. All batch messages remain committed. `resume_to` is
 `ToolsPending` when calls remain and `Planning` otherwise.
 
 Without waiting, the next state is `ToolsPending` when calls remain and
-`Planning` otherwise.
+`Planning` otherwise. Both states preserve the incoming
+`provider_turn_pending` value unchanged.
 
 ## Interruption
 

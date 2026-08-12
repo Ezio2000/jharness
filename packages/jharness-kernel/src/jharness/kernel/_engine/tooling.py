@@ -26,7 +26,7 @@ from jharness.kernel.control import CancelTool, ControlInbox, Insert, Pause, dra
 from jharness.kernel.errors import ToolError
 from jharness.kernel.events import EventKind
 from jharness.kernel.limits import LimitReason, RunLimits
-from jharness.kernel.messages import ToolCall
+from jharness.kernel.messages import RuntimeToolCall, StructuredToolCall
 from jharness.kernel.snapshot import RunSnapshot
 from jharness.kernel.state import PendingToolCalls, Planning, Suspended, Suspension, ToolsPending
 from jharness.kernel.tools import (
@@ -49,7 +49,7 @@ class Emit(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Prepared:
-    call: ToolCall
+    call: RuntimeToolCall
     binding: ToolBinding | None = None
     result: ToolResult | None = None
 
@@ -124,7 +124,7 @@ class ToolStep:
         deferred.extend(inserts)
         return _outcome(pending, batch, results, boundary_pause, deferred)
 
-    def _select(self, selectable: Sequence[ToolCall]) -> ToolBatch:
+    def _select(self, selectable: Sequence[RuntimeToolCall]) -> ToolBatch:
         batch = self._policy.select(selectable, self._catalog, self._limits)
         if not isinstance(cast(object, batch), ToolBatch):
             raise ToolError("batch policy returned an invalid batch")
@@ -490,7 +490,11 @@ def _outcome(
     deferred: list[Insert],
 ) -> ToolStepOutcome:
     remaining = pending.pending.advance(len(batch.calls))
-    next_active = ToolsPending(remaining) if remaining is not None else Planning()
+    next_active = (
+        ToolsPending(remaining, pending.provider_turn_pending)
+        if remaining is not None
+        else Planning(pending.provider_turn_pending)
+    )
     waiting = next((result for result in results if isinstance(result, WaitingResult)), None)
     suspension = (
         waiting.suspension if waiting is not None else (pause.suspension if pause else None)
@@ -548,8 +552,20 @@ async def _await_deadline(awaitable: Awaitable[Any], deadline: Deadline) -> Any:
         raise WorkDeadlineReached from exc
 
 
-def call_data(call: ToolCall) -> Mapping[str, Any]:
-    return {"id": call.id, "name": call.name, "arguments": call.arguments}
+def call_data(call: RuntimeToolCall) -> Mapping[str, Any]:
+    if isinstance(call, StructuredToolCall):
+        return {
+            "id": call.id,
+            "name": call.name,
+            "input_kind": "structured",
+            "arguments": call.arguments,
+        }
+    return {
+        "id": call.id,
+        "name": call.name,
+        "input_kind": "freeform",
+        "input": call.input,
+    }
 
 
 def approval_request_data(request: ApprovalRequest) -> Mapping[str, Any]:

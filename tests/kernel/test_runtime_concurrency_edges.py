@@ -21,15 +21,16 @@ from jharness.kernel import (
     RunHistory,
     RunSnapshot,
     Runtime,
+    RuntimeToolCall,
     SettledResult,
+    StructuredToolCall,
+    StructuredToolSpec,
     Suspended,
     Suspension,
     ToolBinding,
-    ToolCall,
     ToolCatalog,
     ToolContext,
     ToolExecution,
-    ToolSpec,
     ToolSuccess,
 )
 
@@ -59,14 +60,14 @@ def _final() -> ModelResponse:
 
 
 class _EmptyCatalog(ToolCatalog):
-    def specs(self) -> tuple[ToolSpec, ...]:
+    def specs(self) -> tuple[StructuredToolSpec, ...]:
         return ()
 
-    def spec(self, name: str) -> ToolSpec | None:
+    def spec(self, name: str) -> StructuredToolSpec | None:
         del name
         return None
 
-    def bind(self, call: ToolCall) -> ToolBinding:
+    def bind(self, call: RuntimeToolCall) -> ToolBinding:
         del call
         raise AssertionError("empty catalog cannot bind")
 
@@ -127,8 +128,8 @@ async def test_pause_interrupts_catalog_initialization_without_leaking_work() ->
 class _ImmediateBinding(ToolBinding):
     def __init__(
         self,
-        call: ToolCall,
-        spec: ToolSpec,
+        call: StructuredToolCall,
+        spec: StructuredToolSpec,
         settlements: list[str],
     ) -> None:
         self._call = call
@@ -136,11 +137,11 @@ class _ImmediateBinding(ToolBinding):
         self._settlements = settlements
 
     @property
-    def call(self) -> ToolCall:
+    def call(self) -> StructuredToolCall:
         return self._call
 
     @property
-    def spec(self) -> ToolSpec:
+    def spec(self) -> StructuredToolSpec:
         return self._spec
 
     async def invoke(self, context: ToolContext) -> SettledResult:
@@ -152,20 +153,22 @@ class _ImmediateBinding(ToolBinding):
 class _ParallelCatalog(ToolCatalog):
     def __init__(self, settlements: list[str]) -> None:
         self._settlements = settlements
-        self._spec = ToolSpec(
+        self._spec = StructuredToolSpec(
             "lookup",
             "lookup",
             {"type": "object"},
             execution=ToolExecution("parallel", read_only=True, idempotent=True),
         )
 
-    def specs(self) -> tuple[ToolSpec, ...]:
+    def specs(self) -> tuple[StructuredToolSpec, ...]:
         return (self._spec,)
 
-    def spec(self, name: str) -> ToolSpec | None:
+    def spec(self, name: str) -> StructuredToolSpec | None:
         return self._spec if name == self._spec.name else None
 
-    def bind(self, call: ToolCall) -> ToolBinding:
+    def bind(self, call: RuntimeToolCall) -> ToolBinding:
+        if not isinstance(call, StructuredToolCall):
+            raise TypeError("test catalog accepts structured calls only")
         return _ImmediateBinding(call, self._spec, self._settlements)
 
 
@@ -178,17 +181,19 @@ class _StaticProvider:
 
 
 class _CancellationBinding(ToolBinding):
-    def __init__(self, call: ToolCall, spec: ToolSpec, observed: asyncio.Event) -> None:
+    def __init__(
+        self, call: StructuredToolCall, spec: StructuredToolSpec, observed: asyncio.Event
+    ) -> None:
         self._call = call
         self._spec = spec
         self._observed = observed
 
     @property
-    def call(self) -> ToolCall:
+    def call(self) -> StructuredToolCall:
         return self._call
 
     @property
-    def spec(self) -> ToolSpec:
+    def spec(self) -> StructuredToolSpec:
         return self._spec
 
     async def invoke(self, context: ToolContext) -> SettledResult:
@@ -201,15 +206,17 @@ class _CancellationBinding(ToolBinding):
 class _CancellationCatalog(ToolCatalog):
     def __init__(self, observed: asyncio.Event) -> None:
         self._observed = observed
-        self._spec = ToolSpec("lookup", "lookup", {"type": "object"})
+        self._spec = StructuredToolSpec("lookup", "lookup", {"type": "object"})
 
-    def specs(self) -> tuple[ToolSpec, ...]:
+    def specs(self) -> tuple[StructuredToolSpec, ...]:
         return (self._spec,)
 
-    def spec(self, name: str) -> ToolSpec | None:
+    def spec(self, name: str) -> StructuredToolSpec | None:
         return self._spec if name == self._spec.name else None
 
-    def bind(self, call: ToolCall) -> ToolBinding:
+    def bind(self, call: RuntimeToolCall) -> ToolBinding:
+        if not isinstance(call, StructuredToolCall):
+            raise TypeError("test catalog accepts structured calls only")
         return _CancellationBinding(call, self._spec, self._observed)
 
 
@@ -223,7 +230,7 @@ async def _collect(invocation: Invocation) -> tuple[Checkpoint, list[Event]]:
 async def test_parallel_tool_finished_events_follow_physical_settlement_order() -> None:
     for _ in range(20):
         settlements: list[str] = []
-        calls = (ToolCall("a", "lookup"), ToolCall("b", "lookup"))
+        calls = (StructuredToolCall("a", "lookup"), StructuredToolCall("b", "lookup"))
         model = _ScriptModel((ModelResponse(calls), _final()))
         checkpoint, events = await _collect(
             Runtime(model=model, tools=_StaticProvider(_ParallelCatalog(settlements))).start(
@@ -244,7 +251,7 @@ async def test_parallel_tool_finished_events_follow_physical_settlement_order() 
 
 async def test_cooperative_cancellation_is_observed_only_after_its_event() -> None:
     observed = asyncio.Event()
-    call = ToolCall("call-1", "lookup")
+    call = StructuredToolCall("call-1", "lookup")
     model = _ScriptModel((ModelResponse((call,)), _final()))
     invocation = Runtime(
         model=model,

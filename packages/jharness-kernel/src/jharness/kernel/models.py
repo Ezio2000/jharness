@@ -26,11 +26,12 @@ from jharness.kernel.messages import (
     ProviderToolCall,
     ProviderToolId,
     ProviderToolStatus,
-    ToolCall,
+    RuntimeToolCall,
+    RuntimeToolKind,
 )
 
 if TYPE_CHECKING:
-    from jharness.kernel.tools import ToolSpec
+    from jharness.kernel.tools import RuntimeToolSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +71,7 @@ class ToolChoice:
     type: str = "auto"
     name: str | None = None
     provider_tool: ProviderToolId | None = None
-    allow_parallel_tool_calls: bool = True
+    allow_parallel_runtime_tool_calls: bool = True
 
     def __post_init__(self) -> None:
         choice_type = expect_str(self.type, "tool choice type")
@@ -89,7 +90,7 @@ class ToolChoice:
             expect_instance(self.provider_tool, ProviderToolId, "tool choice provider_tool")
         elif self.name is not None or self.provider_tool is not None:
             raise ValueError("only targeted tool choice may carry a target")
-        expect_bool(self.allow_parallel_tool_calls, "allow_parallel_tool_calls")
+        expect_bool(self.allow_parallel_runtime_tool_calls, "allow_parallel_runtime_tool_calls")
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,9 +192,8 @@ class ModelUsage:
 
 _BOOLEAN_CAPABILITY_FIELDS = (
     "streaming",
-    "runtime_tools",
-    "parallel_tool_calls",
-    "parallel_tool_call_control",
+    "parallel_runtime_tool_calls",
+    "parallel_runtime_tool_call_control",
     "structured_output",
     "json_mode",
     "seed",
@@ -214,11 +214,60 @@ def _modality_set(value: object, label: str) -> frozenset[str]:
     return cast(frozenset[str], modalities)
 
 
+def _runtime_tool_kind_set(value: object) -> frozenset[RuntimeToolKind]:
+    if not isinstance(value, frozenset):
+        raise TypeError("model runtime_tool_kinds must be a frozenset")
+    kinds = cast(frozenset[object], value)
+    if any(not isinstance(item, RuntimeToolKind) for item in kinds):
+        raise TypeError("model runtime_tool_kinds must contain RuntimeToolKind values")
+    return cast(frozenset[RuntimeToolKind], kinds)
+
+
+def _tool_choice_type_set(value: object) -> frozenset[str]:
+    if not isinstance(value, frozenset):
+        raise TypeError("model tool_choice_types must be a frozenset")
+    choices = cast(frozenset[object], value)
+    if any(not isinstance(item, str) or not item for item in choices):
+        raise ValueError("model tool_choice_types must contain non-empty strings")
+    unsupported = choices.difference(_TOOL_CHOICE_TYPES)
+    if unsupported:
+        choice = min(cast(frozenset[str], unsupported))
+        raise ValueError(f"unsupported model tool choice type: {choice}")
+    typed_choices = cast(frozenset[str], choices)
+    if "auto" not in typed_choices:
+        raise ValueError("model tool_choice_types must include auto")
+    return typed_choices
+
+
+def _provider_tool_set(value: object) -> frozenset[ProviderToolId]:
+    if not isinstance(value, frozenset):
+        raise TypeError("model provider_tools must be a frozenset")
+    tools = cast(frozenset[object], value)
+    if any(not isinstance(item, ProviderToolId) for item in tools):
+        raise TypeError("model provider_tools must contain ProviderToolId values")
+    return cast(frozenset[ProviderToolId], tools)
+
+
+def _validate_tool_choice_capabilities(
+    choices: frozenset[str],
+    runtime_kinds: frozenset[RuntimeToolKind],
+    provider_tools: frozenset[ProviderToolId],
+) -> None:
+    if not runtime_kinds and "runtime" in choices:
+        raise ValueError(
+            "model tool_choice_types cannot include runtime without runtime tool kinds"
+        )
+    if not provider_tools and "provider" in choices:
+        raise ValueError("model tool_choice_types cannot include provider without provider_tools")
+
+
 def _model_output(value: object, label: str) -> tuple[ModelOutputItem, ...]:
     if not isinstance(value, tuple):
         raise TypeError(f"{label} must be a tuple")
     items = cast(tuple[object, ...], value)
-    if any(not isinstance(item, ContentPart | ToolCall | ProviderToolCall) for item in items):
+    if any(
+        not isinstance(item, ContentPart | RuntimeToolCall | ProviderToolCall) for item in items
+    ):
         raise TypeError(f"{label} contains an unsupported item")
     return cast(tuple[ModelOutputItem, ...], items)
 
@@ -228,12 +277,14 @@ class ModelCapabilities:
     """Immutable advertised model capabilities."""
 
     streaming: bool = False
-    runtime_tools: bool = True
+    runtime_tool_kinds: frozenset[RuntimeToolKind] = field(
+        default_factory=lambda: frozenset({RuntimeToolKind.STRUCTURED})
+    )
     tool_choice_types: frozenset[str] = field(
         default_factory=lambda: frozenset({"auto", "none", "required", "runtime"})
     )
-    parallel_tool_calls: bool = True
-    parallel_tool_call_control: bool = True
+    parallel_runtime_tool_calls: bool = True
+    parallel_runtime_tool_call_control: bool = True
     input_modalities: frozenset[str] = field(default_factory=lambda: frozenset({"text"}))
     output_modalities: frozenset[str] = field(default_factory=lambda: frozenset({"text"}))
     provider_tools: frozenset[ProviderToolId] = field(
@@ -257,39 +308,17 @@ class ModelCapabilities:
             "output_modalities",
             _modality_set(self.output_modalities, "model output modalities"),
         )
-        raw_tool_choice_types = cast(object, self.tool_choice_types)
-        if not isinstance(raw_tool_choice_types, frozenset):
-            raise TypeError("model tool_choice_types must be a frozenset")
-        tool_choice_types = cast(frozenset[object], raw_tool_choice_types)
-        if any(not isinstance(item, str) or not item for item in tool_choice_types):
-            raise ValueError("model tool_choice_types must contain non-empty strings")
-        unsupported_choices = tool_choice_types.difference(_TOOL_CHOICE_TYPES)
-        if unsupported_choices:
-            choice = min(cast(frozenset[str], unsupported_choices))
-            raise ValueError(f"unsupported model tool choice type: {choice}")
-        if "auto" not in tool_choice_types:
-            raise ValueError("model tool_choice_types must include auto")
-        if not self.runtime_tools and "runtime" in tool_choice_types:
-            raise ValueError(
-                "model tool_choice_types cannot include runtime when runtime_tools is false"
-            )
-        object.__setattr__(
-            self,
-            "tool_choice_types",
-            cast(frozenset[str], tool_choice_types),
+        runtime_tool_kinds = _runtime_tool_kind_set(self.runtime_tool_kinds)
+        tool_choice_types = _tool_choice_type_set(self.tool_choice_types)
+        provider_tools = _provider_tool_set(self.provider_tools)
+        _validate_tool_choice_capabilities(
+            tool_choice_types,
+            runtime_tool_kinds,
+            provider_tools,
         )
-        raw_provider_tools = cast(object, self.provider_tools)
-        if not isinstance(raw_provider_tools, frozenset):
-            raise TypeError("model provider_tools must be a frozenset")
-        provider_tools = cast(frozenset[object], raw_provider_tools)
-        if any(not isinstance(item, ProviderToolId) for item in provider_tools):
-            raise TypeError("model provider_tools must contain ProviderToolId values")
-        typed_provider_tools = cast(frozenset[ProviderToolId], provider_tools)
-        if not typed_provider_tools and "provider" in tool_choice_types:
-            raise ValueError(
-                "model tool_choice_types cannot include provider without provider_tools"
-            )
-        object.__setattr__(self, "provider_tools", typed_provider_tools)
+        object.__setattr__(self, "runtime_tool_kinds", runtime_tool_kinds)
+        object.__setattr__(self, "tool_choice_types", tool_choice_types)
+        object.__setattr__(self, "provider_tools", provider_tools)
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,17 +342,23 @@ class ModelRequest:
     """Complete provider-neutral model input."""
 
     messages: tuple[Message, ...]
-    runtime_tools: tuple[ToolSpec, ...] = ()
+    runtime_tools: tuple[RuntimeToolSpec, ...] = ()
     provider_tools: tuple[ProviderToolSpec, ...] = ()
     options: ModelOptions = field(default_factory=ModelOptions)
     tool_choice: ToolChoice = field(default_factory=ToolChoice)
     response_format: ResponseFormat | None = None
 
     def __post_init__(self) -> None:
-        from jharness.kernel.tools import ToolSpec
+        from jharness.kernel.tools import RuntimeToolSpec
 
         messages = expect_instance_tuple(self.messages, Message, "model request messages")
-        tools = expect_instance_tuple(self.runtime_tools, ToolSpec, "model request runtime_tools")
+        raw_tools = cast(object, self.runtime_tools)
+        if not isinstance(raw_tools, tuple):
+            raise TypeError("model request runtime_tools must contain RuntimeToolSpec values")
+        tool_values = cast(tuple[object, ...], raw_tools)
+        if any(not isinstance(item, RuntimeToolSpec) for item in tool_values):
+            raise TypeError("model request runtime_tools must contain RuntimeToolSpec values")
+        tools = cast(tuple[RuntimeToolSpec, ...], raw_tools)
         provider_tools = expect_instance_tuple(
             self.provider_tools,
             ProviderToolSpec,
@@ -358,6 +393,25 @@ class ModelRequest:
         object.__setattr__(self, "runtime_tools", tools)
         object.__setattr__(self, "provider_tools", provider_tools)
 
+    @property
+    def may_return_runtime_tool_calls(self) -> bool:
+        """Whether this request permits the model to select a runtime-owned tool."""
+
+        return bool(self.runtime_tools) and self.tool_choice.type not in {"none", "provider"}
+
+    @property
+    def runtime_tool_kinds(self) -> frozenset[RuntimeToolKind]:
+        """Return the input kinds declared by this request's runtime tools."""
+
+        from jharness.kernel.tools import StructuredToolSpec
+
+        return frozenset(
+            RuntimeToolKind.STRUCTURED
+            if isinstance(spec, StructuredToolSpec)
+            else RuntimeToolKind.FREEFORM
+            for spec in self.runtime_tools
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ModelResponse:
@@ -368,13 +422,14 @@ class ModelResponse:
     usage: ModelUsage | None = None
     model_id: str | None = None
     response_id: str | None = None
+    provider_turn_pending: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
     def __post_init__(self) -> None:
         output = _model_output(self.output, "model response output")
         if not output:
             raise ValueError("model response requires output")
-        ids = [item.id for item in output if isinstance(item, ToolCall | ProviderToolCall)]
+        ids = [item.id for item in output if isinstance(item, RuntimeToolCall | ProviderToolCall)]
         if len(ids) != len(set(ids)):
             raise ValueError("model response tool call ids must be unique")
         if self.finish_reason is not None:
@@ -385,6 +440,15 @@ class ModelResponse:
             expect_str(self.model_id, "model_id")
         if self.response_id is not None:
             expect_str(self.response_id, "response_id")
+        expect_bool(self.provider_turn_pending, "provider_turn_pending")
+        if (
+            any(
+                isinstance(item, ProviderToolCall) and item.status is ProviderToolStatus.IN_PROGRESS
+                for item in output
+            )
+            and not self.provider_turn_pending
+        ):
+            raise ValueError("in-progress provider tool call requires a pending provider turn")
         object.__setattr__(self, "output", output)
         object.__setattr__(self, "metadata", freeze_mapping(self.metadata, "model metadata"))
 
@@ -393,10 +457,10 @@ class ModelResponse:
 
         return Message.assistant(self.output)
 
-    def runtime_tool_calls(self) -> tuple[ToolCall, ...]:
+    def runtime_tool_calls(self) -> tuple[RuntimeToolCall, ...]:
         """Return calls that the JHarness runtime must execute."""
 
-        return tuple(item for item in self.output if isinstance(item, ToolCall))
+        return tuple(item for item in self.output if isinstance(item, RuntimeToolCall))
 
     def provider_tool_calls(self) -> tuple[ProviderToolCall, ...]:
         """Return calls already owned by the remote provider."""
@@ -428,17 +492,19 @@ class ModelContentDelta:
 
 
 @dataclass(frozen=True, slots=True)
-class ModelToolCallDelta:
-    """Incremental JSON arguments and identity for one ordered tool call."""
+class ModelRuntimeToolCallDelta:
+    """Incremental input and identity for one ordered runtime tool call."""
 
     output_index: int
-    arguments_delta: str
+    input_kind: RuntimeToolKind
+    input_delta: str
     id: str | None = None
     name: str | None = None
 
     def __post_init__(self) -> None:
         expect_nonnegative_int(self.output_index, "tool call delta output_index")
-        expect_str(self.arguments_delta, "tool call arguments_delta")
+        expect_instance(self.input_kind, RuntimeToolKind, "tool call delta input_kind")
+        expect_str(self.input_delta, "tool call input_delta")
         if self.id is not None:
             expect_str(self.id, "tool call delta id")
         if self.name is not None:
@@ -495,7 +561,7 @@ class ModelUsageDelta:
 
 ModelDelta: TypeAlias = (
     ModelContentDelta
-    | ModelToolCallDelta
+    | ModelRuntimeToolCallDelta
     | ModelReasoningDelta
     | ModelProviderToolCallDelta
     | ModelUsageDelta

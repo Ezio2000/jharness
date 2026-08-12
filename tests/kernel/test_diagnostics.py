@@ -60,6 +60,7 @@ def _pending_state(*call_ids: str) -> dict[str, Any]:
         "kind": "tools_pending",
         "pending_count": len(call_ids),
         "call_id_digest": _call_id_digest(*call_ids),
+        "provider_turn_pending": False,
     }
 
 
@@ -119,6 +120,7 @@ def _completed_events(*, delta_count: int = 1) -> tuple[Event, ...]:
             ModelTurnResult.COMPLETED,
             1,
             (),
+            False,
             "end_turn",
             None,
             None,
@@ -206,6 +208,7 @@ def _provider_only_completed_events() -> tuple[Event, ...]:
             ModelTurnResult.COMPLETED,
             0,
             (),
+            False,
             "stop",
             None,
             None,
@@ -260,7 +263,7 @@ def _parallel_tool_events() -> tuple[Event, ...]:
         "revision": 3,
         "history_count": 4,
         "metrics": {"planning_steps": 1, "tool_calls": 2, "usage": dict(_USAGE)},
-        "state": {"kind": "planning"},
+        "state": {"kind": "planning", "provider_turn_pending": False},
     }
     return _events(
         [
@@ -936,13 +939,13 @@ def test_history_rewrite_fact_must_name_the_actual_before_count() -> None:
         "revision": 3,
         "history_count": 2,
         "metrics": {"planning_steps": 1, "tool_calls": 0, "usage": dict(_USAGE)},
-        "state": {"kind": "planning"},
+        "state": {"kind": "planning", "provider_turn_pending": False},
     }
     after: dict[str, Any] = {
         "revision": 4,
         "history_count": 1,
         "metrics": before["metrics"],
-        "state": {"kind": "planning"},
+        "state": {"kind": "planning", "provider_turn_pending": False},
     }
     fact: dict[str, Any] = {
         "kind": "history_rewrite",

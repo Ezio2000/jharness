@@ -51,6 +51,7 @@
             "output": [
               {
                 "kind": "runtime_tool_call",
+                "input_kind": "structured",
                 "id": "call-1",
                 "name": "echo",
                 "arguments": {
@@ -76,9 +77,10 @@
         "state": {
           "kind": "suspended",
           "resume_to": {
-            "kind": "tools_pending",
+            "kind": "tools_pending", "provider_turn_pending": false,
             "pending": [
               {
+                "input_kind": "structured",
                 "id": "call-1",
                 "name": "echo",
                 "arguments": {

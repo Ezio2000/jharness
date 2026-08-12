@@ -27,15 +27,15 @@ committed `Checkpoint`.
 The lifecycle has six states:
 
 - `Planning` invokes the configured model once.
-- `ToolsPending` executes a non-empty remaining suffix of runtime-owned `ToolCall` values.
+- `ToolsPending` executes a non-empty remaining suffix of runtime-owned `RuntimeToolCall` values.
 - `Suspended` preserves the exact active state for a later `resume`.
 - `Completed`, `Failed`, and `Limited` are terminal.
 
 Each model response has one ordered `output` sequence containing `ContentPart`,
-runtime-owned `ToolCall`, and provider-owned `ProviderToolCall` items. The runtime
-schedules only `ToolCall` values. A response with runtime calls enters `ToolsPending`;
-a response without them completes from its visible content, including content returned
-inside a completed provider tool call. A `ProviderToolCall` records work already run by
+runtime-owned `RuntimeToolCall`, and provider-owned `ProviderToolCall` items. The runtime
+schedules only `RuntimeToolCall` values. A response with runtime calls enters `ToolsPending`;
+a response without them completes from its visible content, including final or partial
+content returned by a terminal provider tool call. A `ProviderToolCall` records work already run by
 the remote provider and never enters the JHarness tool scheduler.
 
 Runtime tool results are committed in model order even when execution is concurrent.
@@ -56,9 +56,9 @@ The model abstraction separates three questions that provider APIs often combine
 | Question | Kernel representation | Execution owner | Boundary rule |
 | --- | --- | --- | --- |
 | What media can the model itself understand or produce? | Exact `ModelCapabilities.input_modalities` and `output_modalities`; `ContentPart` carries the data | The selected model | Modalities describe native media such as text, image, audio, video, and file. They do not imply a tool or describe the output of a provider-hosted tool. |
-| Which host functions can the model request? | `ModelRequest.runtime_tools`, `ToolChoice(type="runtime")`, and output `ToolCall` | JHarness `Runtime`, through the host-supplied `ToolCatalogProvider` | Only these calls enter `ToolsPending`, approval, batching, execution, and tool-result history. |
+| Which host functions can the model request? | `ModelRequest.runtime_tools`, `ToolChoice(type="runtime")`, and output `RuntimeToolCall` | JHarness `Runtime`, through the host-supplied `ToolCatalogProvider` | Only these calls enter `ToolsPending`, approval, batching, execution, and tool-result history. |
 | Which remote capabilities may the model invoke? | Namespaced `ProviderToolId`, `ProviderToolSpec`, `ToolChoice(type="provider")`, and output `ProviderToolCall` | The remote provider | The adapter validates provider-specific configuration and maps its wire events and result content. The runtime records the call but never executes it. |
-| Which tool-selection policies can the endpoint honor? | Exact `ModelCapabilities.tool_choice_types`, `parallel_tool_calls`, and `parallel_tool_call_control` | Kernel validates; adapter encodes | Unsupported selection types and requests to disable parallel calls are rejected before provider invocation. |
+| Which tool-selection policies can the endpoint honor? | Exact `ModelCapabilities.tool_choice_types`, `parallel_runtime_tool_calls`, and `parallel_runtime_tool_call_control` | Kernel validates; adapter encodes | Unsupported selection types and requests to disable parallel runtime-owned calls are rejected before provider invocation; provider-only selection is outside that control. |
 | What actually happened in the response? | Ordered `ModelResponse.output` and assistant `Message.output` | Kernel preserves; adapter maps | Content and both tool-call kinds remain interleaved in protocol order instead of being split into lossy parallel arrays. |
 | What happened while streaming? | Deltas addressed by `output_index` and, where needed, `content_index`; provider-tool progress uses `ModelProviderToolCallDelta` | Adapter decodes; host observes | Deltas are live-only observations. The terminal full `ModelResponse` is authoritative and is the value committed to history. |
 
@@ -67,7 +67,13 @@ model that natively emits images declares the `image` output modality. Image gen
 through a hosted tool is instead declared with a provider tool identity such as
 `ProviderToolId("openai.responses", "image_generation")`: OpenAI performs that
 operation, and its `ProviderToolCall.output` may contain an image even when the model's
-native output modality is text.
+native output modality is text. The Responses client externalizes generated image bytes
+through a host-owned artifact store before returning the response, so durable output
+contains an integrity-bearing `ArtifactRef`; inline base64 exists only in the provider
+transport and an invocation-local replay request. The store is a recovery dependency:
+it must durably and idempotently save before returning, remain available for the
+checkpoint lifetime, and garbage-collect saves that never become reachable after the
+subsequent checkpoint boundary.
 
 `ToolChoice` uses `auto`, `none`, or `required` for a general policy and `runtime` or
 `provider` for an exact target. Provider tool identifiers are namespaced because equal
@@ -90,7 +96,7 @@ in the kernel.
 | Host application | Credentials, authorization, runtime tool implementations, artifact persistence, HTTP client lifecycle, and deployment policy | Provider wire parsing or kernel state transitions |
 | `jharness.models` adapter | Endpoint URL shape, authentication headers, JSON/SSE codecs, provider error mapping, and immutable protocol profiles | Runtime tool execution, checkpoint persistence, lifecycle decisions, or supplier-name branching in shared codecs |
 | `jharness.kernel` model port | Portable requests, capabilities, ordered output, validation, streaming observations, and immutable history values | Supplier payload fields or remote tool execution |
-| JHarness runtime engine | Planning, scheduling only `ToolCall`, approval, limits, durable transitions, and terminal projection | Executing `ProviderToolCall` or interpreting its provider-specific configuration |
+| JHarness runtime engine | Planning, scheduling only `RuntimeToolCall`, approval, limits, durable transitions, and terminal projection | Executing `ProviderToolCall` or interpreting its provider-specific configuration |
 | Remote model provider | Model inference and any requested provider-hosted tools | Host runtime tools and JHarness durability |
 
 ## Durable Boundary

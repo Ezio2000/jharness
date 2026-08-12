@@ -13,7 +13,7 @@
     "runtime_tools": {
       "type": "array",
       "$comment": "Runtime tool names must be unique; SDK semantic validation enforces uniqueness by name.",
-      "items": { "$ref": "tools.schema.json#/$defs/tool_spec" }
+      "items": { "$ref": "tools.schema.json#/$defs/runtime_tool_spec" }
     },
     "provider_tools": {
       "type": "array",
@@ -56,30 +56,30 @@
       "oneOf": [
         {
           "type": "object",
-          "required": ["type", "allow_parallel_tool_calls"],
+          "required": ["type", "allow_parallel_runtime_tool_calls"],
           "properties": {
             "type": { "enum": ["auto", "none", "required"] },
-            "allow_parallel_tool_calls": { "type": "boolean" }
+            "allow_parallel_runtime_tool_calls": { "type": "boolean" }
           },
           "additionalProperties": false
         },
         {
           "type": "object",
-          "required": ["type", "name", "allow_parallel_tool_calls"],
+          "required": ["type", "name", "allow_parallel_runtime_tool_calls"],
           "properties": {
             "type": { "const": "runtime" },
             "name": { "type": "string", "minLength": 1 },
-            "allow_parallel_tool_calls": { "type": "boolean" }
+            "allow_parallel_runtime_tool_calls": { "type": "boolean" }
           },
           "additionalProperties": false
         },
         {
           "type": "object",
-          "required": ["type", "provider_tool", "allow_parallel_tool_calls"],
+          "required": ["type", "provider_tool", "allow_parallel_runtime_tool_calls"],
           "properties": {
             "type": { "const": "provider" },
             "provider_tool": { "$ref": "messages.schema.json#/$defs/provider_tool_id" },
-            "allow_parallel_tool_calls": { "type": "boolean" }
+            "allow_parallel_runtime_tool_calls": { "type": "boolean" }
           },
           "additionalProperties": false
         }

@@ -22,8 +22,8 @@ from jharness.kernel import (
     RunHistory,
     RunSnapshot,
     RunState,
+    RuntimeToolCall,
     Suspended,
-    ToolCall,
     ToolsPending,
     checkpoint_digest,
 )
@@ -162,7 +162,7 @@ def encode_core(identity: CommitIdentity) -> EncodedCore:
     checkpoint = identity.commit.checkpoint
     snapshot = checkpoint.snapshot
     document = {
-        "storage_version": "v2",
+        "storage_version": "v3",
         "id": identity.checkpoint_id,
         "parent_checkpoint_id": identity.parent_checkpoint_id,
         "revision": identity.revision,
@@ -206,7 +206,7 @@ def decode_core(payload: bytes, digest: bytes) -> DecodedCore:
         data = cast(dict[str, object], document)
         if set(data) != _CORE_FIELDS:
             raise ValueError("checkpoint core fields differ")
-        if data["storage_version"] != "v2":
+        if data["storage_version"] != "v3":
             raise ValueError("checkpoint core storage version differs")
         checkpoint_id = _non_empty_text(data["id"], "checkpoint id")
         raw_parent = data["parent_checkpoint_id"]
@@ -379,8 +379,8 @@ def _decode_pending_state(
     return ToolsPending(pending)
 
 
-def _unresolved_tool_calls(history: RunHistory) -> tuple[ToolCall, ...]:
-    pending: tuple[ToolCall, ...] = ()
+def _unresolved_tool_calls(history: RunHistory) -> tuple[RuntimeToolCall, ...]:
+    pending: tuple[RuntimeToolCall, ...] = ()
     cursor = 0
     for message in history:
         if cursor < len(pending):

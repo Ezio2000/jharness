@@ -10,9 +10,10 @@ from jharness.kernel import (
     ModelDelta,
     ModelReasoningDelta,
     ModelResponse,
-    ModelToolCallDelta,
+    ModelRuntimeToolCallDelta,
     ModelUsage,
     ModelUsageDelta,
+    RuntimeToolKind,
 )
 from jharness.models._stream import DeltaAccumulator
 from jharness.models.openai.chat_completions.codec import decode_usage
@@ -248,8 +249,6 @@ class OpenAIChatStreamDecoder:
             raise OpenAIChatCompletionsError(
                 "chat completion stream emitted content after tool calls"
             )
-        if self._profile.reasoning_content_mode == "live_only":
-            return 0
         rank = _CONTENT_PART_RANK[part_type]
         if rank < self._last_content_part_rank:
             raise OpenAIChatCompletionsError(
@@ -263,7 +262,7 @@ class OpenAIChatStreamDecoder:
         self._last_content_part_rank = rank
         return index
 
-    def _tool_call_events(self, value: object) -> list[ModelToolCallDelta]:
+    def _tool_call_events(self, value: object) -> list[ModelRuntimeToolCallDelta]:
         if value is None:
             return []
         if not isinstance(value, list):
@@ -271,7 +270,7 @@ class OpenAIChatStreamDecoder:
         decoded = (self._tool_call_event(raw_call) for raw_call in cast(list[object], value))
         return [event for event in decoded if event is not None]
 
-    def _tool_call_event(self, value: object) -> ModelToolCallDelta | None:
+    def _tool_call_event(self, value: object) -> ModelRuntimeToolCallDelta | None:
         call = OPENAI_JSON.mapping(value, "chat completion stream tool call")
         call_type = call.get("type")
         if call_type is not None and call_type != "function":
@@ -279,8 +278,6 @@ class OpenAIChatStreamDecoder:
                 f"unsupported chat completion stream tool call type: {call_type}"
             )
         call_index = _tool_call_index(call)
-        if self._tool_output_offset is None:
-            self._tool_output_offset = len(self._content_part_indexes)
         function = call.get("function")
         function_mapping = (
             OPENAI_JSON.mapping(function, "chat completion stream tool function")
@@ -292,11 +289,14 @@ class OpenAIChatStreamDecoder:
         arguments_delta = OPENAI_JSON.optional_string(function_mapping.get("arguments"))
         if call_id is None and name is None and arguments_delta is None:
             return None
-        return ModelToolCallDelta(
+        if self._tool_output_offset is None:
+            self._tool_output_offset = len(self._content_part_indexes)
+        return ModelRuntimeToolCallDelta(
             output_index=self._tool_output_offset + call_index,
+            input_kind=RuntimeToolKind.STRUCTURED,
             id=call_id,
             name=name,
-            arguments_delta=arguments_delta or "",
+            input_delta=arguments_delta or "",
         )
 
 

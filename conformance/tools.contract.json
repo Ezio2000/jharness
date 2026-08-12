@@ -3,6 +3,26 @@
   "tools": [
     {
       "spec": {
+        "kind": "freeform",
+        "name": "freeform_echo",
+        "description": "Return uninterpreted string input.",
+        "output_schema": null,
+        "execution": {
+          "concurrency": "serial",
+          "read_only": true,
+          "idempotent": true
+        },
+        "risk": {}
+      },
+      "behavior": "freeform_echo",
+      "defaults": {},
+      "required_arguments": [],
+      "cancellation": "none",
+      "covered_by": ["freeform_tool_then_final"]
+    },
+    {
+      "spec": {
+        "kind": "structured",
         "name": "echo",
         "description": "Return input text.",
         "input_schema": {
@@ -35,6 +55,7 @@
     },
     {
       "spec": {
+        "kind": "structured",
         "name": "delayed_echo",
         "description": "Return input text after a deterministic delay.",
         "input_schema": {
@@ -70,6 +91,7 @@
     },
     {
       "spec": {
+        "kind": "structured",
         "name": "fail",
         "description": "Raise a deterministic implementation error.",
         "input_schema": {
@@ -93,6 +115,7 @@
     },
     {
       "spec": {
+        "kind": "structured",
         "name": "accept",
         "description": "Accept host-owned background work.",
         "input_schema": {
@@ -122,6 +145,7 @@
     },
     {
       "spec": {
+        "kind": "structured",
         "name": "wait",
         "description": "Return a waiting result for host-owned work.",
         "input_schema": {
@@ -158,6 +182,7 @@
     },
     {
       "spec": {
+        "kind": "structured",
         "name": "parallel_wait",
         "description": "Return a read-only waiting result after a delay.",
         "input_schema": {
@@ -193,6 +218,7 @@
     },
     {
       "spec": {
+        "kind": "structured",
         "name": "progress",
         "description": "Emit deterministic progress records.",
         "input_schema": {
@@ -233,6 +259,7 @@
     },
     {
       "spec": {
+        "kind": "structured",
         "name": "strict_count",
         "description": "Require and echo an integer count.",
         "input_schema": {
@@ -259,6 +286,7 @@
     },
     {
       "spec": {
+        "kind": "structured",
         "name": "invalid_output",
         "description": "Return data that violates the declared output schema.",
         "input_schema": {

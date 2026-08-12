@@ -22,6 +22,7 @@
         "output": [
           {
             "kind": "runtime_tool_call",
+            "input_kind": "structured",
             "id": "call-1",
             "name": "lookup",
             "arguments": {}

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, TypeAlias, runtime_checkable
+from typing import Protocol, TypeAlias, cast, runtime_checkable
 
 from jharness.kernel._validation import expect_instance, expect_int, expect_non_empty_str
-from jharness.kernel.messages import ToolCall
+from jharness.kernel.messages import RuntimeToolCall
 from jharness.kernel.state import Suspension
 from jharness.kernel.tools import ToolRisk
 
@@ -15,14 +15,15 @@ from jharness.kernel.tools import ToolRisk
 class ApprovalRequest:
     batch_id: str
     index: int
-    call: ToolCall
+    call: RuntimeToolCall
     risk: ToolRisk
 
     def __post_init__(self) -> None:
         expect_non_empty_str(self.batch_id, "approval batch_id")
         if expect_int(self.index, "approval index") < 0:
             raise ValueError("approval index must be >= 0")
-        expect_instance(self.call, ToolCall, "approval call")
+        if not isinstance(cast(object, self.call), RuntimeToolCall):
+            raise TypeError("approval call must be a RuntimeToolCall")
         expect_instance(self.risk, ToolRisk, "approval risk")
 
 

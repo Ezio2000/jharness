@@ -4,7 +4,7 @@
   "kind": "validation",
   "target": "state",
   "value": {
-    "kind": "tools_pending",
+    "kind": "tools_pending", "provider_turn_pending": false,
     "pending": []
   },
   "expected_valid": false,

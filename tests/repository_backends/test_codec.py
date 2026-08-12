@@ -16,10 +16,10 @@ from jharness.kernel import (
     PendingToolCalls,
     RunHistory,
     RunSnapshot,
+    StructuredToolCall,
     Suspended,
     SuspendedControl,
     Suspension,
-    ToolCall,
     ToolsPending,
 )
 from jharness.repository import _codec
@@ -29,7 +29,7 @@ from tests.repository_backends.support import started
 def _pending_commit(call_count: int) -> tuple[DurableCommit, DurableCommit]:
     initial = started("run-a", "cp-0")
     calls = tuple(
-        ToolCall(f"call-{index}", "tool", {"index": index}) for index in range(call_count)
+        StructuredToolCall(f"call-{index}", "tool", {"index": index}) for index in range(call_count)
     )
     assistant = Message.assistant(calls)
     before = initial.checkpoint.snapshot.history
@@ -49,6 +49,7 @@ def _pending_commit(call_count: int) -> tuple[DurableCommit, DurableCommit]:
             result=ModelTurnResult.TOOLS_PENDING,
             part_count=0,
             tool_call_ids=tuple(call.id for call in calls),
+            provider_turn_pending=False,
             finish_reason="tool_calls",
             usage=None,
             limit_reason=None,

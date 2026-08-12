@@ -22,6 +22,9 @@ Memory and SQLite require no optional driver. MySQL and Redis load only the sele
 extra when that backend initializes. All implementations consume atomic
 `DurableCommit` values and expose `get_head(run_id)` for complete recovery.
 
+Persistent backends use the `v3` physical namespace for ordered assistant-output
+history. Obsolete `v1` and `v2` runs are intentionally not read or migrated.
+
 Backend selection, lifecycle, MySQL TLS, and Redis Cluster setup are documented in the
 [repository guide](https://github.com/Ezio2000/jharness/blob/main/docs/repositories.md).
 Installing this distribution installs the exact matching `jharness-kernel` version.

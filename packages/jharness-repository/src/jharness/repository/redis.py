@@ -48,7 +48,7 @@ _HEAD_FIELDS = (
 _READ_CHUNK_BATCH = 128
 _SETTLEMENT_INITIAL_DELAY = 0.05
 _SETTLEMENT_MAX_DELAY = 1.0
-_CHAIN_DOMAIN = b"jharness.repository.redis.history.v2"
+_CHAIN_DOMAIN = b"jharness.repository.redis.history.v3"
 _EMPTY_CHAIN_SHA1 = sha1(_CHAIN_DOMAIN, usedforsecurity=False).hexdigest()
 
 _LUA_HELPERS = r"""
@@ -333,7 +333,7 @@ local generation = ARGV[4]
 local first_index = '0'
 local total_chunks = ARGV[14]
 local message_count = '0'
-local chain = redis.sha1hex('jharness.repository.redis.history.v2')
+local chain = redis.sha1hex('jharness.repository.redis.history.v3')
 
 if not head then
     if ARGV[4] ~= '0' or kind ~= 'initial'
@@ -780,7 +780,7 @@ class RedisRunRepository:
 
     def _run_keys(self, run_id: str) -> tuple[str, str, str]:
         run_hash = sha256(run_id.encode("utf-8")).hexdigest()
-        base = f"jharness:v2:{{{self._namespace}:{run_hash}}}"
+        base = f"jharness:v3:{{{self._namespace}:{run_hash}}}"
         return f"{base}:head", f"{base}:ledger", f"{base}:history"
 
 

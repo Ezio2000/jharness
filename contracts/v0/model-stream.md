@@ -12,8 +12,10 @@ Model.invoke(request, context, *, stream, emit_delta) -> ModelResponse
 Every `ModelRequest` carries the complete durable message history plus two
 disjoint tool declarations:
 
-- `runtime_tools` are functions that the JHarness runtime may bind, approve,
-  schedule, and execute;
+- `runtime_tools` are host-executed declarations that the JHarness runtime may
+  bind, approve, schedule, and execute. A `structured` declaration accepts a
+  JSON object under its input schema; a `freeform` declaration accepts an
+  uninterpreted string;
 - `provider_tools` are namespaced provider capabilities that the remote model
   service executes. Each declaration contains a `ProviderToolId(namespace,
   type)` and provider-owned configuration.
@@ -21,7 +23,7 @@ disjoint tool declarations:
 `tool_choice.type` is `auto`, `none`, `required`, `runtime`, or `provider`.
 `runtime` targets one declared runtime tool by name; `provider` targets one
 declared provider tool by `ProviderToolId`. `required` accepts either ownership
-class. `allow_parallel_tool_calls` constrains runtime-owned calls returned for
+class. `allow_parallel_runtime_tool_calls` constrains runtime-owned calls returned for
 host scheduling; the count and order of provider-owned items do not prove how
 the remote provider executed them.
 
@@ -29,15 +31,21 @@ Every complete `ModelResponse` contains one non-empty ordered `output`. Its
 items are exactly:
 
 - `content`, carrying one `ContentPart`;
-- `runtime_tool_call`, carrying id, name, and JSON arguments;
+- `runtime_tool_call`, carrying id, name, `input_kind`, and either structured
+  JSON `arguments` or freeform string `input`;
 - `provider_tool_call`, carrying id, namespaced tool identity, status,
   arguments, provider-produced content, optional failure, and metadata.
 
 The adapter preserves the provider's semantically observable item order.
 Runtime and provider tool-call ids are unique across one output. Provider tool
 status is `in_progress`, `completed`, `incomplete`, or `failed`; a failed call
-has an error, and an in-progress call has no final output. Provider-specific wire payloads
-and versioned tool names are adapter concerns, not portable message shapes.
+has an error, and an in-progress call has no final output. An in-progress call
+is valid only when `ModelResponse.provider_turn_pending=true`. The flag means
+the provider owns unfinished work and the next durable action is another model
+invocation with the just-committed assistant output kept adjacent in history.
+It is never inferred from a provider finish-reason string. Provider-specific
+wire payloads and versioned tool names are adapter concerns, not portable
+message shapes.
 
 An assistant message persists that same ordered output without splitting
 content from calls. Only `runtime_tool_call` creates `ToolsPending` work.
@@ -52,7 +60,7 @@ sink. When `stream=true`, `emit_delta` may receive only five provider-neutral
 delta variants:
 
 - `content`
-- `tool_call`
+- `runtime_tool_call`
 - `reasoning`
 - `provider_tool_call`
 - `usage`
@@ -64,8 +72,9 @@ they are not values in the model stream.
 The provider adapter owns stream assembly and always returns one complete
 `ModelResponse`. Every non-usage delta carries a zero-based `output_index` into
 the ordered provider response. Content and reasoning deltas additionally carry
-`content_index`; runtime tool-call deltas accumulate id, name, and JSON
-arguments at their output position. Provider-tool deltas carry id,
+`content_index`; runtime tool-call deltas carry `input_kind` and accumulate
+`input_delta` at their output position, interpreting it as JSON text for
+`structured` calls and literal text for `freeform` calls. Provider-tool deltas carry id,
 `ProviderToolId`, optional normalized status, optional provider event name, and
 opaque event data. Usage deltas merge field by field; an omitted value does not
 clear a value already reported. There is no tool invocation mode.

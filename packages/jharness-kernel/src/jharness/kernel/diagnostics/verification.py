@@ -736,6 +736,12 @@ def _state_kind(entry: TraceEntry, view: RunView) -> str:
     kind = _string(entry, _required(entry, state, "kind"), "state kind")
     if kind not in _ACTIVE_STATES | _CLOSED_STATES:
         _fail(entry, "invalid_entry", "state kind is unsupported")
+    if kind in _ACTIVE_STATES:
+        _boolean(
+            entry,
+            _required(entry, state, "provider_turn_pending"),
+            "provider_turn_pending",
+        )
     if kind == "tools_pending":
         _integer(
             entry,

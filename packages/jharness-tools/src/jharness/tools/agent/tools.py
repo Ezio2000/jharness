@@ -9,16 +9,16 @@ from typing import cast
 from jharness.kernel import (
     ContentPart,
     SettledResult,
+    StructuredToolCall,
+    StructuredToolSpec,
     Suspension,
     TaskRef,
     ToolAccepted,
-    ToolCall,
     ToolContext,
     ToolExecution,
     ToolFailure,
     ToolResult,
     ToolRisk,
-    ToolSpec,
     ToolSuccess,
     ToolWaiting,
     WaitingResult,
@@ -114,7 +114,7 @@ class AgentTool:
     max_error_code_chars: int
     max_error_message_chars: int
     _limits: _OutputLimits = field(repr=False)
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(
         self,
@@ -144,7 +144,7 @@ class AgentTool:
             _agent_spec(limits, max_prompt_chars=max_prompt_chars),
         )
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         if context.cancel_requested:
             return _failure("cancelled", "Agent was cancelled before it started.")
         try:
@@ -204,7 +204,7 @@ class AgentGetTool:
     max_error_code_chars: int
     max_error_message_chars: int
     _limits: _OutputLimits = field(repr=False)
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(
         self,
@@ -227,7 +227,7 @@ class AgentGetTool:
         _set_common(self, backend, limits)
         object.__setattr__(self, "spec", _get_spec(limits))
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         if context.cancel_requested:
             return _failure("cancelled", "AgentGet was cancelled.")
         agent_id = _agent_id(call, self.max_agent_id_chars)
@@ -253,7 +253,7 @@ class AgentWaitTool:
     max_error_code_chars: int
     max_error_message_chars: int
     _limits: _OutputLimits = field(repr=False)
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(
         self,
@@ -276,7 +276,7 @@ class AgentWaitTool:
         _set_common(self, backend, limits)
         object.__setattr__(self, "spec", _wait_spec(limits))
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         if context.cancel_requested:
             return _failure("cancelled", "AgentWait was cancelled.")
         agent_id = _agent_id(call, self.max_agent_id_chars)
@@ -326,7 +326,7 @@ class AgentCancelTool:
     max_error_code_chars: int
     max_error_message_chars: int
     _limits: _OutputLimits = field(repr=False)
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(
         self,
@@ -349,7 +349,7 @@ class AgentCancelTool:
         _set_common(self, backend, limits)
         object.__setattr__(self, "spec", _cancel_spec(limits))
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         if context.cancel_requested:
             return _failure("cancelled", "AgentCancel was cancelled.")
         agent_id = _agent_id(call, self.max_agent_id_chars)
@@ -396,7 +396,7 @@ def _backend(value: object) -> AgentBackend:
     return value
 
 
-def _agent_id(call: ToolCall, maximum: int) -> str | SettledResult:
+def _agent_id(call: StructuredToolCall, maximum: int) -> str | SettledResult:
     try:
         return normalize_agent_id(
             thaw_json_value(call.arguments, label=f"{call.name} arguments"),
@@ -458,7 +458,7 @@ def _waiting_result(
     payload: dict[str, object],
     *,
     source: str,
-    call: ToolCall,
+    call: StructuredToolCall,
     context: ToolContext,
     limits: _OutputLimits,
 ) -> WaitingResult:
@@ -526,8 +526,8 @@ def _backend_failure(operation: str) -> SettledResult:
     )
 
 
-def _agent_spec(limits: _OutputLimits, *, max_prompt_chars: int) -> ToolSpec:
-    return ToolSpec(
+def _agent_spec(limits: _OutputLimits, *, max_prompt_chars: int) -> StructuredToolSpec:
+    return StructuredToolSpec(
         name="Agent",
         description=(
             "Delegate a self-contained task to a Host-owned child Agent. The child inherits "
@@ -548,8 +548,8 @@ def _agent_spec(limits: _OutputLimits, *, max_prompt_chars: int) -> ToolSpec:
     )
 
 
-def _get_spec(limits: _OutputLimits) -> ToolSpec:
-    return ToolSpec(
+def _get_spec(limits: _OutputLimits) -> StructuredToolSpec:
+    return StructuredToolSpec(
         name="AgentGet",
         description=(
             "Return the latest snapshot for an Agent without waiting. Use AgentWait when the "
@@ -562,8 +562,8 @@ def _get_spec(limits: _OutputLimits) -> ToolSpec:
     )
 
 
-def _wait_spec(limits: _OutputLimits) -> ToolSpec:
-    return ToolSpec(
+def _wait_spec(limits: _OutputLimits) -> StructuredToolSpec:
+    return StructuredToolSpec(
         name="AgentWait",
         description=(
             "Wait durably for a background Agent. If it is still active, this must be the only "
@@ -577,8 +577,8 @@ def _wait_spec(limits: _OutputLimits) -> ToolSpec:
     )
 
 
-def _cancel_spec(limits: _OutputLimits) -> ToolSpec:
-    return ToolSpec(
+def _cancel_spec(limits: _OutputLimits) -> StructuredToolSpec:
+    return StructuredToolSpec(
         name="AgentCancel",
         description=(
             "Idempotently request cancellation of an Agent. A non-terminal returned snapshot "

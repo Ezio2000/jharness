@@ -16,9 +16,9 @@ from jharness.kernel import (
     ErrorInfo,
     RunContext,
     SettledResult,
+    StructuredToolCall,
     TaskRef,
     ToolAccepted,
-    ToolCall,
     ToolContext,
     ToolError,
     ToolFailure,
@@ -199,7 +199,7 @@ def _invoke(
     through_registry: bool = False,
 ) -> ToolResult:
     async def invoke() -> ToolResult:
-        call = ToolCall(call_id, tool.spec.name, arguments)
+        call = StructuredToolCall(call_id, tool.spec.name, arguments)
         context = _context(run_id=run_id, cancelled=cancelled)
         if through_registry:
             catalog = await ToolRegistry((tool,)).open_catalog()
@@ -1314,7 +1314,7 @@ def test_registry_rejects_invalid_arguments_before_any_backend_call() -> None:
         )
         for index, arguments in enumerate(invalid_agent):
             with pytest.raises(ToolError, match="do not match input_schema"):
-                catalog.bind(ToolCall(f"agent-{index}", "Agent", arguments))
+                catalog.bind(StructuredToolCall(f"agent-{index}", "Agent", arguments))
         invalid_id: tuple[Mapping[str, Any], ...] = (
             {},
             {"agent_id": ""},
@@ -1325,7 +1325,7 @@ def test_registry_rejects_invalid_arguments_before_any_backend_call() -> None:
         for name in ("AgentGet", "AgentWait", "AgentCancel"):
             for index, arguments in enumerate(invalid_id):
                 with pytest.raises(ToolError, match="do not match input_schema"):
-                    catalog.bind(ToolCall(f"{name}-{index}", name, arguments))
+                    catalog.bind(StructuredToolCall(f"{name}-{index}", name, arguments))
 
     asyncio.run(validate())
     assert backend.start_calls == []

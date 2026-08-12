@@ -18,19 +18,25 @@ from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012, Schema, SchemaRegistry, SchemaResource
 
 from jharness.kernel import (
+    FreeformToolCall,
+    FreeformToolSpec,
+    RuntimeToolCall,
+    RuntimeToolSpec,
     SettledResult,
+    StructuredToolCall,
+    StructuredToolSpec,
     ToolBinding,
-    ToolCall,
     ToolCatalog,
     ToolContext,
     ToolError,
     ToolFailure,
     ToolResult,
-    ToolSpec,
     WaitingResult,
     thaw_json_value,
 )
-from jharness.toolkit.tool import Tool
+from jharness.toolkit.tool import FreeformTool, Tool
+
+RegisteredTool = Tool | FreeformTool
 
 
 def _is_lexical_integer(_checker: object, value: object) -> bool:
@@ -52,9 +58,9 @@ StrictDraft202012Validator: type[Draft202012Validator] = _extend_validator(
 
 @dataclass(frozen=True, slots=True)
 class _Registered:
-    tool: Tool
-    spec: ToolSpec
-    input_validator: Validator
+    tool: RegisteredTool
+    spec: RuntimeToolSpec
+    input_validator: Validator | None
     output_validator: Validator | None
 
 
@@ -63,19 +69,23 @@ class ToolRegistry:
 
     __slots__ = ("_entries", "_lock")
 
-    def __init__(self, tools: Sequence[Tool] = ()) -> None:
+    def __init__(self, tools: Sequence[RegisteredTool] = ()) -> None:
         self._lock = Lock()
         self._entries: dict[str, _Registered] = {}
         for tool in tools:
             self.register(tool)
 
-    def register(self, tool: Tool) -> None:
+    def register(self, tool: RegisteredTool) -> None:
         _validate_tool(tool)
         spec = tool.spec
         registered = _Registered(
             tool,
             spec,
-            _compile_schema(spec.input_schema, f"tool {spec.name} input_schema"),
+            (
+                _compile_schema(spec.input_schema, f"tool {spec.name} input_schema")
+                if isinstance(spec, StructuredToolSpec)
+                else None
+            ),
             (
                 None
                 if spec.output_schema is None
@@ -102,39 +112,50 @@ class _Catalog:
         self._entries = MappingProxyType(dict(entries))
         self._specs = tuple(entry.spec for entry in self._entries.values())
 
-    def specs(self) -> tuple[ToolSpec, ...]:
+    def specs(self) -> tuple[RuntimeToolSpec, ...]:
         return self._specs
 
-    def spec(self, name: str) -> ToolSpec | None:
+    def spec(self, name: str) -> RuntimeToolSpec | None:
         entry = self._entries.get(name)
         return None if entry is None else entry.spec
 
-    def bind(self, call: ToolCall) -> ToolBinding:
+    def bind(self, call: RuntimeToolCall) -> ToolBinding:
         entry = self._entries.get(call.name)
         if entry is None:
             raise ToolError(f"unknown tool: {call.name}")
-        try:
-            entry.input_validator.validate(thaw_json_value(call.arguments))
-        except ValidationError as exc:
-            raise ToolError(
-                f"tool {call.name} arguments do not match input_schema: {exc.message}"
-            ) from exc
-        except Unresolvable as exc:
-            raise ToolError(f"tool {call.name} input_schema reference cannot be resolved") from exc
+        if isinstance(call, StructuredToolCall) and isinstance(entry.spec, StructuredToolSpec):
+            validator = cast(Validator, entry.input_validator)
+            try:
+                validator.validate(thaw_json_value(call.arguments))
+            except ValidationError as exc:
+                raise ToolError(
+                    f"tool {call.name} arguments do not match input_schema: {exc.message}"
+                ) from exc
+            except Unresolvable as exc:
+                raise ToolError(
+                    f"tool {call.name} input_schema reference cannot be resolved"
+                ) from exc
+        elif not isinstance(call, FreeformToolCall) or not isinstance(entry.spec, FreeformToolSpec):
+            raise ToolError(f"tool {call.name} does not accept this runtime input kind")
         return _Binding(call, entry)
 
 
 @dataclass(frozen=True, slots=True)
 class _Binding:
-    call: ToolCall
+    call: RuntimeToolCall
     _entry: _Registered
 
     @property
-    def spec(self) -> ToolSpec:
+    def spec(self) -> RuntimeToolSpec:
         return self._entry.spec
 
     async def invoke(self, context: ToolContext) -> ToolResult:
-        result = _ensure_result(await self._entry.tool.invoke(self.call, context))
+        if isinstance(self.call, StructuredToolCall):
+            tool = cast(Tool, self._entry.tool)
+            result = _ensure_result(await tool.invoke(self.call, context))
+        else:
+            tool = cast(FreeformTool, self._entry.tool)
+            result = _ensure_result(await tool.invoke(self.call, context))
         validator = self._entry.output_validator
         if validator is not None and not isinstance(result.outcome, ToolFailure):
             try:
@@ -185,10 +206,10 @@ def _ensure_result(value: object) -> ToolResult:
 
 
 def _validate_tool(value: object) -> None:
-    if not isinstance(value, Tool):
+    if not isinstance(value, Tool | FreeformTool):
         raise TypeError("registered tool must implement Tool")
-    if not isinstance(cast(object, value.spec), ToolSpec):
-        raise TypeError("registered tool spec must be ToolSpec")
+    if not isinstance(cast(object, value.spec), RuntimeToolSpec):
+        raise TypeError("registered tool spec must be RuntimeToolSpec")
     if not iscoroutinefunction(value.invoke):
         raise TypeError("registered tool invoke must be async")
 

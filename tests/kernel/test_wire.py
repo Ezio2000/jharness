@@ -37,12 +37,13 @@ from jharness.kernel.messages import (
     ArtifactRef,
     ContentPart,
     ErrorInfo,
+    FreeformToolCall,
     Message,
     ProviderToolCall,
     ProviderToolId,
     ProviderToolStatus,
+    StructuredToolCall,
     TaskRef,
-    ToolCall,
 )
 from jharness.kernel.models import ModelResponse, ModelUsage
 from jharness.kernel.snapshot import RunSnapshot
@@ -59,13 +60,14 @@ from jharness.kernel.state import (
     ToolsPending,
 )
 from jharness.kernel.tools import (
+    FreeformToolSpec,
     SettledResult,
+    StructuredToolSpec,
     ToolAccepted,
     ToolExecution,
     ToolFailure,
     ToolOutcome,
     ToolRisk,
-    ToolSpec,
     ToolSuccess,
     ToolWaiting,
     WaitingResult,
@@ -87,13 +89,13 @@ from jharness.kernel.wire import (
     decode_model_usage,
     decode_run_request,
     decode_run_view,
+    decode_runtime_tool_call,
+    decode_runtime_tool_spec,
     decode_snapshot,
     decode_state,
     decode_suspension,
-    decode_tool_call,
     decode_tool_outcome,
     decode_tool_result,
-    decode_tool_spec,
     decode_trace,
     encode_checkpoint,
     encode_content_part,
@@ -103,11 +105,12 @@ from jharness.kernel.wire import (
     encode_message,
     encode_model_response,
     encode_run_request,
+    encode_runtime_tool_call,
+    encode_runtime_tool_spec,
     encode_snapshot,
     encode_state,
     encode_tool_outcome,
     encode_tool_result,
-    encode_tool_spec,
     encode_trace,
 )
 from jharness.kernel.wire._helpers import number, optional_number
@@ -121,7 +124,7 @@ def _history(*messages: Message) -> RunHistory:
     return RunHistory(messages)
 
 
-def _pending(*calls: ToolCall) -> PendingToolCalls:
+def _pending(*calls: StructuredToolCall) -> PendingToolCalls:
     return PendingToolCalls(calls)
 
 
@@ -136,7 +139,7 @@ def _suspended(*, pending: bool = False) -> Checkpoint:
     history: RunHistory
     resume_to: Planning | ToolsPending
     if pending:
-        call = ToolCall("call-1", "lookup", {"q": "x"})
+        call = StructuredToolCall("call-1", "lookup", {"q": "x"})
         history = _history(Message.user("go"), Message.assistant((call,)))
         resume_to = ToolsPending(_pending(call))
     else:
@@ -240,7 +243,7 @@ def test_model_tool_spec_and_result_round_trips() -> None:
         Message.assistant((incomplete_call,))
     )
 
-    spec = ToolSpec(
+    spec = StructuredToolSpec(
         "lookup",
         "Lookup a value",
         {"type": "object"},
@@ -248,9 +251,29 @@ def test_model_tool_spec_and_result_round_trips() -> None:
         execution=ToolExecution("parallel", read_only=True, idempotent=True),
         risk=ToolRisk(network="read", requires_approval=True, extra={"zone": "public"}),
     )
-    encoded_spec = encode_tool_spec(spec)
+    encoded_spec = encode_runtime_tool_spec(spec)
     _assert_json(encoded_spec)
-    assert decode_tool_spec(encoded_spec) == spec
+    assert decode_runtime_tool_spec(encoded_spec) == spec
+
+    freeform_spec = FreeformToolSpec(
+        "apply_patch",
+        "Apply a patch",
+        output_schema={"type": "object"},
+    )
+    encoded_freeform_spec = encode_runtime_tool_spec(freeform_spec)
+    assert encoded_freeform_spec["kind"] == "freeform"
+    assert "input_schema" not in encoded_freeform_spec
+    assert decode_runtime_tool_spec(encoded_freeform_spec) == freeform_spec
+
+    freeform_call = FreeformToolCall("patch-1", "apply_patch", "raw patch")
+    encoded_freeform_call = encode_runtime_tool_call(freeform_call)
+    assert encoded_freeform_call == {
+        "input_kind": "freeform",
+        "id": "patch-1",
+        "name": "apply_patch",
+        "input": "raw patch",
+    }
+    assert decode_runtime_tool_call(encoded_freeform_call) == freeform_call
 
     success = SettledResult(ToolSuccess((ContentPart.text_part("ok"),), {"ok": True}))
     waiting = WaitingResult(
@@ -264,7 +287,7 @@ def test_model_tool_spec_and_result_round_trips() -> None:
 
 
 def test_all_flat_states_round_trip() -> None:
-    call = ToolCall("call-1", "lookup")
+    call = StructuredToolCall("call-1", "lookup")
     suspension = Suspension("pause", "host")
     states: tuple[RunState, ...] = (
         Planning(),
@@ -296,6 +319,7 @@ def test_snapshot_checkpoint_and_fact_round_trips() -> None:
             ModelTurnResult.COMPLETED,
             1,
             (),
+            False,
             "stop",
             ModelUsage(total_tokens=2),
             None,
@@ -353,7 +377,7 @@ def test_run_request_round_trips_and_enforces_cross_fields() -> None:
         decode_run_request(selector_mismatch)
     assert selector_error.value.code == "suspension_mismatch"
 
-    call = ToolCall("call-1", "lookup")
+    call = StructuredToolCall("call-1", "lookup")
     with pytest.raises(ValueError, match="unresolved"):
         StartRequest(_history(Message.user("go"), Message.assistant((call,))))
 
@@ -374,7 +398,7 @@ def test_checkpoint_rejects_fact_snapshot_message_mismatches() -> None:
             ControlFact(2.0, SuspendedControl("other", "host", None, ("ticket",))),
         )
 
-    call = ToolCall("call-1", "lookup")
+    call = StructuredToolCall("call-1", "lookup")
     outcome = ToolSuccess((ContentPart.text_part("ok"),))
     tool_history = _history(
         Message.user("go"),
@@ -471,6 +495,7 @@ def test_checkpoint_rejects_fact_snapshot_message_mismatches() -> None:
         ModelTurnResult.LIMITED,
         1,
         (call.id,),
+        False,
         "length",
         ModelUsage(total_tokens=10),
         LimitReason.MAX_TOTAL_TOKENS,
@@ -485,6 +510,7 @@ def test_checkpoint_rejects_fact_snapshot_message_mismatches() -> None:
                 ModelTurnResult.LIMITED,
                 0,
                 (call.id,),
+                False,
                 "length",
                 ModelUsage(total_tokens=10),
                 LimitReason.MAX_TOTAL_TOKENS,
@@ -506,7 +532,7 @@ def _event_wire(kind: str, data: Mapping[str, Any], *, sequence: int = 1) -> dic
 
 def test_every_event_data_shape_round_trips() -> None:
     checkpoint = _started()
-    call = ToolCall("call-1", "lookup", {"q": "x"})
+    call = StructuredToolCall("call-1", "lookup", {"q": "x"})
     usage = {
         "input_tokens": 1,
         "output_tokens": 2,
@@ -547,7 +573,8 @@ def test_every_event_data_shape_round_trips() -> None:
                 "output_index": 1,
                 "id": "call-1",
                 "name": "lookup",
-                "arguments_delta": "{}",
+                "input_kind": "structured",
+                "input_delta": "{}",
             },
         ),
         (
@@ -608,7 +635,12 @@ def test_every_event_data_shape_round_trips() -> None:
             {
                 "batch_id": "batch-1",
                 "index": 0,
-                "call": {"id": call.id, "name": call.name, "arguments": {"q": "x"}},
+                "call": {
+                    "input_kind": "structured",
+                    "id": call.id,
+                    "name": call.name,
+                    "arguments": {"q": "x"},
+                },
                 "risk": {"network": "read"},
             },
         ),
@@ -635,7 +667,12 @@ def test_every_event_data_shape_round_trips() -> None:
             {
                 "batch_id": "batch-1",
                 "index": 0,
-                "call": {"id": call.id, "name": call.name, "arguments": {"q": "x"}},
+                "call": {
+                    "input_kind": "structured",
+                    "id": call.id,
+                    "name": call.name,
+                    "arguments": {"q": "x"},
+                },
                 "parallel": False,
             },
         ),
@@ -711,7 +748,10 @@ _INVALID_PORTABLE_VALUES: tuple[tuple[Callable[[object], object], dict[str, Any]
             "metadata": {},
         },
     ),
-    (decode_state, {"kind": "tools_pending", "pending": []}),
+    (
+        decode_state,
+        {"kind": "tools_pending", "pending": [], "provider_turn_pending": False},
+    ),
     (
         decode_run_view,
         {
@@ -733,12 +773,14 @@ _INVALID_PORTABLE_VALUES: tuple[tuple[Callable[[object], object], dict[str, Any]
                 "kind": "tools_pending",
                 "pending_count": 0,
                 "call_id_digest": "00" * 32,
+                "provider_turn_pending": False,
             },
         },
     ),
     (
-        decode_tool_spec,
+        decode_runtime_tool_spec,
         {
+            "kind": "structured",
             "name": "x",
             "description": "",
             "input_schema": {},
@@ -887,6 +929,7 @@ def test_wire_scalar_and_container_guards_report_the_boundary_field() -> None:
         "cache_write_tokens": None,
     }
     valid_spec: dict[str, object] = {
+        "kind": "structured",
         "name": "lookup",
         "description": "lookup",
         "input_schema": {},
@@ -913,7 +956,7 @@ def test_wire_scalar_and_container_guards_report_the_boundary_field() -> None:
             {"role": "user", "parts": "not-an-array", "metadata": {}},
             "must be an array",
         ),
-        invalid_case(decode_tool_spec, {**valid_spec, "name": ""}, "must not be empty"),
+        invalid_case(decode_runtime_tool_spec, {**valid_spec, "name": ""}, "must not be empty"),
         invalid_case(decode_model_usage, {**usage, "input_tokens": -1}, "must be >= 0"),
         invalid_case(
             decode_context,
@@ -922,7 +965,7 @@ def test_wire_scalar_and_container_guards_report_the_boundary_field() -> None:
         ),
         invalid_case(decode_context, {**valid_context, "started_at": -1}, "must be >= 0"),
         invalid_case(
-            decode_tool_spec,
+            decode_runtime_tool_spec,
             {
                 **valid_spec,
                 "execution": {
@@ -1049,6 +1092,7 @@ def test_fact_and_run_view_codecs_reject_empty_or_illegal_variants() -> None:
                     "kind": "tools_pending",
                     "pending_count": 1,
                     "call_id_digest": "AB" * 32,
+                    "provider_turn_pending": False,
                 },
             }
         )
@@ -1059,7 +1103,7 @@ def test_fact_and_run_view_codecs_reject_empty_or_illegal_variants() -> None:
         {"kind": "limited", "reason": "deadline"},
         {
             "kind": "suspended",
-            "resume_to": {"kind": "planning"},
+            "resume_to": {"kind": "planning", "provider_turn_pending": False},
             "suspension": {
                 "reason": "pause",
                 "source": "host",
@@ -1115,7 +1159,17 @@ def test_event_codec_rejects_missing_discriminators_and_starting_evidence() -> N
 
 def test_public_wire_decoders_cover_nested_values_and_empty_documents() -> None:
     assert decode_content_part({"type": "text", "text": "x", "metadata": {}}).text == "x"
-    assert decode_tool_call({"id": "call-1", "name": "lookup", "arguments": {}}).id == "call-1"
+    assert (
+        decode_runtime_tool_call(
+            {
+                "input_kind": "structured",
+                "id": "call-1",
+                "name": "lookup",
+                "arguments": {},
+            }
+        ).id
+        == "call-1"
+    )
     assert decode_error_info({"code": "bad", "message": "failed"}).code == "bad"
     assert (
         decode_model_usage(

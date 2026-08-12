@@ -127,9 +127,16 @@ class ContentPart:
         )
 
 
+class RuntimeToolKind(StrEnum):
+    """Portable input representation for a runtime-executed tool."""
+
+    STRUCTURED = "structured"
+    FREEFORM = "freeform"
+
+
 @dataclass(frozen=True, slots=True)
-class ToolCall:
-    """One model-requested invocation that the JHarness runtime must execute."""
+class StructuredToolCall:
+    """One runtime-owned invocation whose input is a JSON object."""
 
     id: str
     name: str
@@ -139,6 +146,23 @@ class ToolCall:
         expect_non_empty_str(self.id, "tool call id")
         expect_non_empty_str(self.name, "tool call name")
         object.__setattr__(self, "arguments", freeze_mapping(self.arguments, "tool arguments"))
+
+
+@dataclass(frozen=True, slots=True)
+class FreeformToolCall:
+    """One runtime-owned invocation whose input is an uninterpreted string."""
+
+    id: str
+    name: str
+    input: str
+
+    def __post_init__(self) -> None:
+        expect_non_empty_str(self.id, "tool call id")
+        expect_non_empty_str(self.name, "tool call name")
+        expect_str(self.input, "tool input")
+
+
+RuntimeToolCall: TypeAlias = StructuredToolCall | FreeformToolCall
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +250,7 @@ class ProviderToolCall:
         )
 
 
-ModelOutputItem: TypeAlias = ContentPart | ToolCall | ProviderToolCall
+ModelOutputItem: TypeAlias = ContentPart | RuntimeToolCall | ProviderToolCall
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,10 +349,10 @@ class Message:
             metadata={} if metadata is None else metadata,
         )
 
-    def runtime_tool_calls(self) -> tuple[ToolCall, ...]:
+    def runtime_tool_calls(self) -> tuple[RuntimeToolCall, ...]:
         """Return model-ordered calls that the JHarness runtime must execute."""
 
-        return tuple(item for item in self.output if isinstance(item, ToolCall))
+        return tuple(item for item in self.output if isinstance(item, RuntimeToolCall))
 
     def provider_tool_calls(self) -> tuple[ProviderToolCall, ...]:
         """Return model-ordered calls executed by the provider."""
@@ -336,7 +360,7 @@ class Message:
         return tuple(item for item in self.output if isinstance(item, ProviderToolCall))
 
     def visible_parts(self) -> tuple[ContentPart, ...]:
-        """Project model-visible content from ordered assistant output."""
+        """Project direct content and all terminal provider-tool output in order."""
 
         parts: list[ContentPart] = []
         for item in self.output:
@@ -380,7 +404,7 @@ def _validate_assistant_message(
         raise ValueError("assistant message requires output")
     if tool_call_id is not None or outcome is not None:
         raise ValueError("assistant message cannot carry tool outcome fields")
-    ids = [item.id for item in output if isinstance(item, ToolCall | ProviderToolCall)]
+    ids = [item.id for item in output if isinstance(item, RuntimeToolCall | ProviderToolCall)]
     if len(ids) != len(set(ids)):
         raise ValueError("assistant tool call ids must be unique")
 
@@ -404,6 +428,8 @@ def _expect_model_output(value: object, label: str) -> tuple[ModelOutputItem, ..
     if not isinstance(value, tuple):
         raise TypeError(f"{label} must be a tuple")
     items = cast(tuple[object, ...], value)
-    if any(not isinstance(item, ContentPart | ToolCall | ProviderToolCall) for item in items):
+    if any(
+        not isinstance(item, ContentPart | RuntimeToolCall | ProviderToolCall) for item in items
+    ):
         raise TypeError(f"{label} contains an unsupported item")
     return cast(tuple[ModelOutputItem, ...], items)

@@ -25,7 +25,7 @@ from jharness.kernel.wire.checkpoint import (
     encode_fact,
     encode_run_view,
 )
-from jharness.kernel.wire.messages import decode_tool_call_value, encode_tool_call
+from jharness.kernel.wire.messages import decode_runtime_tool_call_value, encode_runtime_tool_call
 from jharness.kernel.wire.models import decode_model_usage_value, encode_model_usage
 from jharness.kernel.wire.state import decode_suspension_value, encode_suspension
 from jharness.kernel.wire.tools import decode_risk_value, encode_risk_value
@@ -232,7 +232,12 @@ def _decode_model_delta(value: object) -> dict[str, Any]:
         data = object_fields(
             raw,
             "tool call delta",
-            frozenset({"kind", "output_index", "id", "name", "arguments_delta"}),
+            frozenset({"kind", "output_index", "id", "name", "input_kind", "input_delta"}),
+        )
+        input_kind = enum_string(
+            data["input_kind"],
+            "tool call delta input_kind",
+            frozenset({"structured", "freeform"}),
         )
         return {
             "kind": "tool_call",
@@ -243,7 +248,8 @@ def _decode_model_delta(value: object) -> dict[str, Any]:
             ),
             "id": optional_string(data["id"], "tool call delta id", non_empty=True),
             "name": optional_string(data["name"], "tool call delta name", non_empty=True),
-            "arguments_delta": string(data["arguments_delta"], "arguments_delta"),
+            "input_kind": input_kind,
+            "input_delta": string(data["input_delta"], "input_delta"),
         }
     if kind == "reasoning":
         data = object_fields(
@@ -361,7 +367,7 @@ def _decode_approval_requested(value: object) -> dict[str, Any]:
     return {
         "batch_id": string(data["batch_id"], "approval batch_id", non_empty=True),
         "index": integer(data["index"], "approval index", minimum=0),
-        "call": encode_tool_call(decode_tool_call_value(data["call"])),
+        "call": encode_runtime_tool_call(decode_runtime_tool_call_value(data["call"])),
         "risk": encode_risk_value(decode_risk_value(data["risk"])),
     }
 
@@ -402,7 +408,7 @@ def _decode_tool_started(value: object) -> dict[str, Any]:
     return {
         "batch_id": string(data["batch_id"], "tool batch_id", non_empty=True),
         "index": integer(data["index"], "tool index", minimum=0),
-        "call": encode_tool_call(decode_tool_call_value(data["call"])),
+        "call": encode_runtime_tool_call(decode_runtime_tool_call_value(data["call"])),
         "parallel": boolean(data["parallel"], "tool parallel"),
     }
 

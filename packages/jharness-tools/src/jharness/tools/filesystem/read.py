@@ -8,7 +8,14 @@ from io import StringIO
 from pathlib import Path
 from typing import cast
 
-from jharness.kernel import ToolCall, ToolContext, ToolExecution, ToolResult, ToolRisk, ToolSpec
+from jharness.kernel import (
+    StructuredToolCall,
+    StructuredToolSpec,
+    ToolContext,
+    ToolExecution,
+    ToolResult,
+    ToolRisk,
+)
 from jharness.tools.filesystem._common import (
     FilesystemFailure,
     OperationCancelled,
@@ -38,7 +45,7 @@ class ReadTool:
     default_limit: int
     max_limit: int
     max_file_bytes: int
-    spec: ToolSpec = field(repr=False)
+    spec: StructuredToolSpec = field(repr=False)
 
     def __init__(
         self,
@@ -63,7 +70,7 @@ class ReadTool:
     def root(self) -> Path:
         return self.workspace.root
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         file_path = cast(str, call.arguments["file_path"])
         offset = cast(int, call.arguments.get("offset", 1))
         limit = cast(int, call.arguments.get("limit", self.default_limit))
@@ -144,7 +151,7 @@ class ReadTool:
         )
 
 
-def _spec(default_limit: int, max_limit: int) -> ToolSpec:
+def _spec(default_limit: int, max_limit: int) -> StructuredToolSpec:
     output = {
         "type": "object",
         "required": [
@@ -167,7 +174,7 @@ def _spec(default_limit: int, max_limit: int) -> ToolSpec:
         },
         "additionalProperties": False,
     }
-    return ToolSpec(
+    return StructuredToolSpec(
         name="Read",
         description=(
             "Read a UTF-8 text file within the configured workspace. "

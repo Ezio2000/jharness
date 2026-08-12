@@ -89,8 +89,39 @@ reuse with different content. `await repository.get_head(run_id)` returns the co
 recovery checkpoint.
 
 Persistent backends store explicit history deltas while preserving complete recovery.
-Their physical namespace is version `v2`; obsolete `v1` data is not read or migrated.
+Their physical namespace is version `v3`; obsolete `v1` and `v2` data is not read or
+migrated. Version `v3` isolates the ordered assistant-output history format and its
+history-digest domain from earlier releases.
 See the normative [repository contract](../contracts/v0/repository.md).
+
+### Retire Obsolete Physical Namespaces
+
+A `v3` deployment starts with no readable runs from earlier namespaces. Before cleanup,
+stop writers, back up the backend, verify that rollback to an older JHarness release is
+not required, and retain any old data needed for audit or export. Cleanup is an explicit
+operator action; repository initialization never deletes old data.
+
+For SQLite, remove the old tables from each database after the checks above:
+
+```sql
+DROP TABLE IF EXISTS jharness_v2_history_chunks;
+DROP TABLE IF EXISTS jharness_v2_checkpoint_ledger;
+DROP TABLE IF EXISTS jharness_v2_run_heads;
+DROP TABLE IF EXISTS jharness_v1_checkpoint_ids;
+DROP TABLE IF EXISTS jharness_v1_run_heads;
+```
+
+MySQL uses the same suffixes with the configured `table_prefix`, for example
+`jharness_v2_run_heads`. Drop the history and checkpoint-id/ledger tables before their
+corresponding run-head table. Confirm the selected database and expanded table names
+instead of applying a wildcard drop.
+
+Redis derives `<namespace>` as the lowercase SHA-256 hex digest of `key_prefix`. The old
+key shapes are `jharness:{<namespace>}:v1:state` and
+`jharness:v2:{<namespace>:<run-hash>}:head|ledger|history`. Enumerate only those patterns
+with incremental `SCAN`, review the resulting keys, and remove them with `UNLINK`; do
+not use blocking `KEYS` or delete the `jharness:v3:` namespace. In Redis Cluster, scan
+each primary node because no single node owns the complete keyspace.
 
 Database repositories initialize lazily, so an explicit `await initialize()` call is
 optional. Prefer an async context manager, or call `await close()` after the last

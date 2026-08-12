@@ -70,6 +70,12 @@ offline within this directory. Only versioned top-level envelopes carry
   ordered output of content, runtime tool calls, and provider tool calls.
 - Only runtime tool calls enter `ToolsPending`; provider tool calls are executed
   remotely and remain ordered assistant output.
+- Runtime tools have an explicit `structured` JSON-object or `freeform` string
+  input kind; specifications, calls, and deltas preserve that kind.
+- Active states preserve `provider_turn_pending`; while true, provider
+  continuation history remains adjacent and cannot be rewritten or interrupted
+  by appended messages. Live inserts are durably applied after the continuation
+  clears and before the next model turn.
 - Parallel tool execution requires parallel, read-only, and idempotent execution
   facts; durable results remain in model order.
 - Only `checkpoint_committed` advances durable trace state. Other events are live

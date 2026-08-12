@@ -18,12 +18,13 @@ from jharness.kernel import (
     ModelReasoningDelta,
     ModelRequest,
     ModelResponse,
-    ModelToolCallDelta,
+    ModelRuntimeToolCallDelta,
     ModelUsageDelta,
     ProtocolError,
     ProviderToolId,
     ProviderToolStatus,
     RunContext,
+    RuntimeToolKind,
 )
 from jharness.kernel.wire import decode_model_response, decode_model_usage
 
@@ -45,6 +46,7 @@ class CaseModel:
         modalities = frozenset({"text", "image", "audio", "video", "file"})
         self.capabilities = ModelCapabilities(
             streaming=self.streaming,
+            runtime_tool_kinds=frozenset(RuntimeToolKind),
             input_modalities=modalities,
             output_modalities=modalities,
             provider_tools=frozenset(provider_tools),
@@ -135,9 +137,10 @@ def _delta(value: Mapping[str, Any]) -> ModelDelta:
             data=mapping(value["data"], "content delta data"),
         )
     if kind == "tool_call":
-        return ModelToolCallDelta(
+        return ModelRuntimeToolCallDelta(
             output_index=integer(value["output_index"], "tool call delta output_index"),
-            arguments_delta=string(value["arguments_delta"], "tool call arguments delta"),
+            input_kind=RuntimeToolKind(string(value["input_kind"], "tool call delta input kind")),
+            input_delta=string(value["input_delta"], "tool call input delta"),
             id=_optional_string(value["id"], "tool call delta id"),
             name=_optional_string(value["name"], "tool call delta name"),
         )

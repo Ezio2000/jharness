@@ -19,7 +19,7 @@ import jharness.tools as tools
 from jharness.kernel import (
     RunContext,
     SettledResult,
-    ToolCall,
+    StructuredToolCall,
     ToolContext,
     ToolError,
     ToolFailure,
@@ -61,7 +61,7 @@ def _invoke(
             _emit_progress,
             is_cancelled,
         )
-        result = await tool.invoke(ToolCall("call-1", tool.spec.name, arguments), context)
+        result = await tool.invoke(StructuredToolCall("call-1", tool.spec.name, arguments), context)
         assert isinstance(result, SettledResult)
         assert isinstance(result.outcome, ToolSuccess | ToolFailure)
         return result.outcome
@@ -158,30 +158,32 @@ def test_registry_validates_inputs_and_all_output_branches(tmp_path: Path) -> No
             lambda: False,
         )
         calls = (
-            ToolCall("read", "Read", {"file_path": "app.py"}),
-            ToolCall("glob", "Glob", {"pattern": "*.py"}),
-            ToolCall("ls", "Ls", {}),
-            ToolCall("grep", "Grep", {"pattern": "needle"}),
-            ToolCall(
+            StructuredToolCall("read", "Read", {"file_path": "app.py"}),
+            StructuredToolCall("glob", "Glob", {"pattern": "*.py"}),
+            StructuredToolCall("ls", "Ls", {}),
+            StructuredToolCall("grep", "Grep", {"pattern": "needle"}),
+            StructuredToolCall(
                 "grep-content",
                 "Grep",
                 {"pattern": "needle", "output_mode": "content"},
             ),
-            ToolCall(
+            StructuredToolCall(
                 "grep-count",
                 "Grep",
                 {"pattern": "needle", "output_mode": "count"},
             ),
-            ToolCall("failure", "Read", {"file_path": "missing.py"}),
+            StructuredToolCall("failure", "Read", {"file_path": "missing.py"}),
         )
         outcomes: list[str] = []
         for call in calls:
             result = await catalog.bind(call).invoke(context)
             outcomes.append(result.outcome.kind)
         with pytest.raises(ToolError, match="do not match input_schema"):
-            catalog.bind(ToolCall("invalid", "Read", {"file_path": "app.py", "offset": 0}))
+            catalog.bind(
+                StructuredToolCall("invalid", "Read", {"file_path": "app.py", "offset": 0})
+            )
         with pytest.raises(ToolError, match="do not match input_schema"):
-            catalog.bind(ToolCall("invalid-ls", "Ls", {"limit": 0}))
+            catalog.bind(StructuredToolCall("invalid-ls", "Ls", {"limit": 0}))
         return outcomes
 
     assert asyncio.run(invoke_through_registry()) == [

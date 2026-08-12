@@ -19,7 +19,13 @@ from jharness.kernel.context import RunContext
 from jharness.kernel.errors import ToolError
 from jharness.kernel.json_values import FrozenJsonValue, freeze_json_value
 from jharness.kernel.limits import RunLimits
-from jharness.kernel.messages import ContentPart, ErrorInfo, Message, TaskRef, ToolCall
+from jharness.kernel.messages import (
+    ContentPart,
+    ErrorInfo,
+    Message,
+    RuntimeToolCall,
+    TaskRef,
+)
 
 if TYPE_CHECKING:
     from jharness.kernel.state import Suspension
@@ -104,8 +110,8 @@ class ToolRisk:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolSpec:
-    """Immutable declaration for a tool executed by the JHarness runtime."""
+class StructuredToolSpec:
+    """Immutable runtime-tool declaration with JSON object input."""
 
     name: str
     description: str
@@ -130,6 +136,36 @@ class ToolSpec:
     @property
     def parallel_safe(self) -> bool:
         return self.execution.concurrency == "parallel"
+
+
+@dataclass(frozen=True, slots=True)
+class FreeformToolSpec:
+    """Immutable runtime-tool declaration with uninterpreted string input."""
+
+    name: str
+    description: str
+    output_schema: Mapping[str, Any] | bool | None = None
+    execution: ToolExecution = field(default_factory=ToolExecution)
+    risk: ToolRisk = field(default_factory=ToolRisk)
+
+    def __post_init__(self) -> None:
+        expect_non_empty_str(self.name, "tool name")
+        expect_str(self.description, "tool description")
+        if self.output_schema is not None:
+            object.__setattr__(
+                self,
+                "output_schema",
+                _freeze_schema(self.output_schema, "output schema"),
+            )
+        expect_instance(self.execution, ToolExecution, "tool execution")
+        expect_instance(self.risk, ToolRisk, "tool risk")
+
+    @property
+    def parallel_safe(self) -> bool:
+        return self.execution.concurrency == "parallel"
+
+
+RuntimeToolSpec: TypeAlias = StructuredToolSpec | FreeformToolSpec
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -277,10 +313,11 @@ class WaitingResult:
 ToolResult: TypeAlias = SettledResult | WaitingResult
 
 
-def tool_message(call: ToolCall, result: ToolResult) -> Message:
+def tool_message(call: RuntimeToolCall, result: ToolResult) -> Message:
     """Construct the durable model-visible message for one invocation result."""
 
-    expect_instance(call, ToolCall, "tool message call")
+    if not isinstance(cast(object, call), RuntimeToolCall):
+        raise TypeError("tool message call must be a RuntimeToolCall")
     if not isinstance(cast(object, result), ToolResult):
         raise TypeError("tool message result must be a ToolResult")
     return Message.tool(call.id, result.outcome)
@@ -318,10 +355,10 @@ class ToolBinding(Protocol):
     """Validated immutable call-to-implementation binding."""
 
     @property
-    def call(self) -> ToolCall: ...
+    def call(self) -> RuntimeToolCall: ...
 
     @property
-    def spec(self) -> ToolSpec: ...
+    def spec(self) -> RuntimeToolSpec: ...
 
     async def invoke(self, context: ToolContext) -> ToolResult: ...
 
@@ -330,11 +367,11 @@ class ToolBinding(Protocol):
 class ToolCatalog(Protocol):
     """Immutable invocation-local tool catalog."""
 
-    def specs(self) -> tuple[ToolSpec, ...]: ...
+    def specs(self) -> tuple[RuntimeToolSpec, ...]: ...
 
-    def spec(self, name: str) -> ToolSpec | None: ...
+    def spec(self, name: str) -> RuntimeToolSpec | None: ...
 
-    def bind(self, call: ToolCall) -> ToolBinding: ...
+    def bind(self, call: RuntimeToolCall) -> ToolBinding: ...
 
 
 @runtime_checkable
@@ -349,12 +386,18 @@ class ToolBatch:
     """One selected pending prefix and atomic commit unit."""
 
     id: str
-    calls: tuple[ToolCall, ...]
+    calls: tuple[RuntimeToolCall, ...]
     parallel: bool = False
 
     def __post_init__(self) -> None:
         expect_non_empty_str(self.id, "tool batch id")
-        calls = expect_instance_tuple(self.calls, ToolCall, "tool batch calls")
+        raw_value = cast(object, self.calls)
+        if not isinstance(raw_value, tuple):
+            raise TypeError("tool batch calls must contain RuntimeToolCall values")
+        raw_calls = cast(tuple[object, ...], raw_value)
+        if any(not isinstance(call, RuntimeToolCall) for call in raw_calls):
+            raise TypeError("tool batch calls must contain RuntimeToolCall values")
+        calls = cast(tuple[RuntimeToolCall, ...], raw_calls)
         parallel = expect_bool(self.parallel, "tool batch parallel")
         if not calls:
             raise ValueError("tool batch requires calls")
@@ -372,7 +415,7 @@ class BatchPolicy(Protocol):
 
     def select(
         self,
-        pending: Sequence[ToolCall],
+        pending: Sequence[RuntimeToolCall],
         catalog: ToolCatalog,
         limits: RunLimits,
     ) -> ToolBatch: ...
@@ -385,7 +428,7 @@ class DefaultBatchPolicy:
 
     def select(
         self,
-        pending: Sequence[ToolCall],
+        pending: Sequence[RuntimeToolCall],
         catalog: ToolCatalog,
         limits: RunLimits,
     ) -> ToolBatch:
@@ -412,13 +455,13 @@ class EmptyToolCatalog:
 
     __slots__ = ()
 
-    def specs(self) -> tuple[ToolSpec, ...]:
+    def specs(self) -> tuple[RuntimeToolSpec, ...]:
         return ()
 
-    def spec(self, name: str) -> ToolSpec | None:
+    def spec(self, name: str) -> RuntimeToolSpec | None:
         return None
 
-    def bind(self, call: ToolCall) -> ToolBinding:
+    def bind(self, call: RuntimeToolCall) -> ToolBinding:
         raise ToolError(f"unknown tool: {call.name}")
 
 

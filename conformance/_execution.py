@@ -50,7 +50,7 @@ from jharness.kernel.wire import (
     encode_checkpoint,
     encode_event,
     encode_message,
-    encode_tool_spec,
+    encode_runtime_tool_spec,
     encode_trace,
 )
 from jharness.toolkit import ToolRegistry
@@ -536,7 +536,7 @@ def _encode_model_request(request: ModelRequest) -> dict[str, Any]:
     choice = request.tool_choice
     choice_wire: dict[str, Any] = {
         "type": choice.type,
-        "allow_parallel_tool_calls": choice.allow_parallel_tool_calls,
+        "allow_parallel_runtime_tool_calls": choice.allow_parallel_runtime_tool_calls,
     }
     if choice.name is not None:
         choice_wire["name"] = choice.name
@@ -555,7 +555,7 @@ def _encode_model_request(request: ModelRequest) -> dict[str, Any]:
         response_wire = {"type": response.type}
     return {
         "messages": [encode_message(message) for message in request.messages],
-        "runtime_tools": [encode_tool_spec(tool) for tool in request.runtime_tools],
+        "runtime_tools": [encode_runtime_tool_spec(tool) for tool in request.runtime_tools],
         "provider_tools": [_encode_provider_tool_spec(tool) for tool in request.provider_tools],
         "options": {
             "model": options.model,

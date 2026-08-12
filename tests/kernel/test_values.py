@@ -25,6 +25,8 @@ from jharness.kernel import (
     ErrorInfo,
     Failed,
     FailedControl,
+    FreeformToolCall,
+    FreeformToolSpec,
     HistoryAppend,
     HistoryReplace,
     HistoryRewriteFact,
@@ -53,8 +55,11 @@ from jharness.kernel import (
     RunHistory,
     RunMetrics,
     RunSnapshot,
+    RuntimeToolKind,
     SettledResult,
     StartedFact,
+    StructuredToolCall,
+    StructuredToolSpec,
     Suspended,
     SuspendedControl,
     Suspension,
@@ -62,13 +67,11 @@ from jharness.kernel import (
     TaskRef,
     ToolAccepted,
     ToolBatchFact,
-    ToolCall,
     ToolChoice,
     ToolExecution,
     ToolFailure,
     ToolOutcomeKind,
     ToolRisk,
-    ToolSpec,
     ToolsPending,
     ToolSuccess,
     ToolWaiting,
@@ -92,7 +95,7 @@ def history(*messages: Message) -> RunHistory:
     return RunHistory(messages)
 
 
-def pending_calls(*calls: ToolCall) -> PendingToolCalls:
+def pending_calls(*calls: StructuredToolCall) -> PendingToolCalls:
     return PendingToolCalls(calls)
 
 
@@ -130,7 +133,7 @@ def started_with_metadata(metadata: dict[str, object]) -> Checkpoint:
 
 def tool_checkpoints() -> tuple[Checkpoint, Checkpoint, Checkpoint]:
     first = started()
-    call = ToolCall("call-1", "lookup", {"key": "value"})
+    call = StructuredToolCall("call-1", "lookup", {"key": "value"})
     pending = reduce_change(
         first.snapshot,
         Change(
@@ -139,6 +142,7 @@ def tool_checkpoints() -> tuple[Checkpoint, Checkpoint, Checkpoint]:
                 ModelTurnResult.TOOLS_PENDING,
                 0,
                 (call.id,),
+                False,
                 None,
                 None,
                 None,
@@ -173,7 +177,7 @@ def tool_checkpoints() -> tuple[Checkpoint, Checkpoint, Checkpoint]:
 def test_message_content_and_tool_result_have_one_authoritative_shape() -> None:
     artifact = ArtifactRef("artifact:1", media_type="text/plain")
     assert ContentPart.artifact_part(artifact).artifact is artifact
-    call = ToolCall("call-1", "search", {"q": "x"})
+    call = StructuredToolCall("call-1", "search", {"q": "x"})
     assistant = Message.assistant((call,))
     success = ToolSuccess((ContentPart.text_part("ok"),), {"count": 1})
     result = SettledResult(success)
@@ -206,7 +210,7 @@ def test_closed_tool_results_and_approval_decisions() -> None:
 
 
 def test_flat_state_and_selector_invariants() -> None:
-    call = ToolCall("c", "tool")
+    call = StructuredToolCall("c", "tool")
     pending_state = ToolsPending(pending_calls(call))
     suspension = Suspension("approval", "policy", metadata={"ticket": 7})
     state = Suspended(pending_state, suspension)
@@ -228,7 +232,7 @@ def test_model_tool_and_limit_values_are_strict() -> None:
     assert ModelCapabilities(streaming=True).streaming
     assert ModelOptions(max_output_tokens=1).max_output_tokens == 1
     assert ResponseFormat("json_schema", {"type": "object"}, True).strict
-    spec = ToolSpec(
+    spec = StructuredToolSpec(
         "lookup",
         "Lookup",
         {"type": "object"},
@@ -250,7 +254,7 @@ def test_model_capabilities_validate_exact_tool_choice_inventory() -> None:
         ModelCapabilities(tool_choice_types=frozenset({"auto", "other"}))
     with pytest.raises(ValueError, match="cannot include runtime"):
         ModelCapabilities(
-            runtime_tools=False,
+            runtime_tool_kinds=frozenset(),
             tool_choice_types=frozenset({"auto", "runtime"}),
         )
     with pytest.raises(ValueError, match="cannot include provider"):
@@ -261,6 +265,37 @@ def test_model_capabilities_validate_exact_tool_choice_inventory() -> None:
         provider_tools=frozenset({provider_tool}),
     )
     assert capabilities.tool_choice_types == frozenset({"auto", "provider"})
+
+
+def test_runtime_tool_input_kinds_are_explicit_and_orthogonal() -> None:
+    structured = StructuredToolSpec("lookup", "Lookup", {"type": "object"})
+    freeform = FreeformToolSpec("apply_patch", "Apply a patch")
+    request = ModelRequest(
+        messages=(Message.user("work"),),
+        runtime_tools=(structured, freeform),
+    )
+    structured_call = StructuredToolCall("lookup-1", "lookup", {"query": "value"})
+    freeform_call = FreeformToolCall("patch-1", "apply_patch", "raw patch")
+    response = ModelResponse((structured_call, freeform_call))
+
+    assert request.runtime_tool_kinds == frozenset(
+        {RuntimeToolKind.STRUCTURED, RuntimeToolKind.FREEFORM}
+    )
+    assert response.runtime_tool_calls() == (structured_call, freeform_call)
+    assert ModelCapabilities(
+        runtime_tool_kinds=frozenset({RuntimeToolKind.FREEFORM})
+    ).runtime_tool_kinds == frozenset({RuntimeToolKind.FREEFORM})
+
+
+def test_in_progress_provider_call_requires_pending_response() -> None:
+    call = ProviderToolCall(
+        "provider-1",
+        ProviderToolId("fixture.provider", "search"),
+        ProviderToolStatus.IN_PROGRESS,
+    )
+    with pytest.raises(ValueError, match="requires a pending provider turn"):
+        ModelResponse((call,))
+    assert ModelResponse((call,), provider_turn_pending=True).provider_turn_pending
 
 
 def test_ordered_model_output_separates_runtime_and_provider_tool_ownership() -> None:
@@ -277,7 +312,7 @@ def test_ordered_model_output_separates_runtime_and_provider_tool_ownership() ->
         {"prompt": "draw a lighthouse"},
         (image,),
     )
-    runtime_call = ToolCall("runtime-1", "persist_result", {"name": "lighthouse.png"})
+    runtime_call = StructuredToolCall("runtime-1", "persist_result", {"name": "lighthouse.png"})
     response = ModelResponse((ContentPart.text_part("creating"), provider_call, runtime_call))
 
     assert response.output == (
@@ -305,7 +340,37 @@ def test_ordered_model_output_separates_runtime_and_provider_tool_ownership() ->
             tool_choice=ToolChoice("provider", provider_tool=provider_id),
         )
     with pytest.raises(ValueError, match="ids must be unique"):
-        ModelResponse((provider_call, ToolCall(provider_call.id, "duplicate")))
+        ModelResponse((provider_call, StructuredToolCall(provider_call.id, "duplicate")))
+
+
+def test_model_request_identifies_when_runtime_tool_calls_are_possible() -> None:
+    runtime_tool = StructuredToolSpec("persist", "persist", {"type": "object"})
+    provider_tool = ProviderToolId("test", "search")
+
+    def request(tool_choice: ToolChoice | None = None) -> ModelRequest:
+        return ModelRequest(
+            messages=(Message.user("work"),),
+            runtime_tools=(runtime_tool,),
+            provider_tools=(ProviderToolSpec(provider_tool),),
+            tool_choice=ToolChoice() if tool_choice is None else tool_choice,
+        )
+
+    assert request().may_return_runtime_tool_calls is True
+    assert (
+        request(ToolChoice("runtime", name=runtime_tool.name)).may_return_runtime_tool_calls is True
+    )
+    assert (
+        request(ToolChoice("provider", provider_tool=provider_tool)).may_return_runtime_tool_calls
+        is False
+    )
+    assert request(ToolChoice("none")).may_return_runtime_tool_calls is False
+    assert (
+        ModelRequest(
+            messages=(Message.user("search"),),
+            provider_tools=(ProviderToolSpec(provider_tool),),
+        ).may_return_runtime_tool_calls
+        is False
+    )
 
 
 def test_provider_tool_incomplete_is_terminal_without_becoming_failure() -> None:
@@ -319,6 +384,7 @@ def test_provider_tool_incomplete_is_terminal_without_becoming_failure() -> None
 
     assert call.output == (partial,)
     assert call.error is None
+    assert Message.assistant((call,)).visible_parts() == (partial,)
 
     with pytest.raises(ValueError, match="in-progress"):
         ProviderToolCall(
@@ -330,7 +396,7 @@ def test_provider_tool_incomplete_is_terminal_without_becoming_failure() -> None
 
 
 def test_snapshot_validates_history_against_flat_state() -> None:
-    call = ToolCall("c", "tool")
+    call = StructuredToolCall("c", "tool")
     messages = history(Message.user("go"), Message.assistant((call,)))
     snapshot = RunSnapshot(1, context(), messages, RunMetrics(), ToolsPending(pending_calls(call)))
     assert snapshot.status == "tools_pending"
@@ -436,7 +502,7 @@ def test_run_history_tail_never_locates_a_window_or_visits_older_digits(
 
 
 def test_pending_tool_calls_advance_shares_backing_and_composes_suffix_digest() -> None:
-    calls = tuple(ToolCall(f"call-{index}", "lookup") for index in range(100))
+    calls = tuple(StructuredToolCall(f"call-{index}", "lookup") for index in range(100))
     pending = PendingToolCalls(calls)
     advanced = pending.advance(37)
     assert advanced is not None
@@ -464,20 +530,20 @@ def test_pending_tool_calls_advance_shares_backing_and_composes_suffix_digest() 
 def test_recovered_pending_proof_canonicalizes_once_then_advances_without_scans(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    history_calls = tuple(ToolCall(f"call-{index}", "lookup") for index in range(40))
-    state_calls = tuple(ToolCall(call.id, call.name) for call in history_calls)
+    history_calls = tuple(StructuredToolCall(f"call-{index}", "lookup") for index in range(40))
+    state_calls = tuple(StructuredToolCall(call.id, call.name) for call in history_calls)
     pending = PendingToolCalls(state_calls)
     state = ToolsPending(pending)
 
-    original_call_equality = ToolCall.__eq__
+    original_call_equality = StructuredToolCall.__eq__
     comparisons = 0
 
-    def counted_call_equality(left: ToolCall, right: object) -> bool:
+    def counted_call_equality(left: StructuredToolCall, right: object) -> bool:
         nonlocal comparisons
         comparisons += 1
         return original_call_equality(left, right)
 
-    monkeypatch.setattr(ToolCall, "__eq__", counted_call_equality)
+    monkeypatch.setattr(StructuredToolCall, "__eq__", counted_call_equality)
     snapshot = RunSnapshot(
         1,
         context(),
@@ -489,7 +555,7 @@ def test_recovered_pending_proof_canonicalizes_once_then_advances_without_scans(
     proof = object.__getattribute__(snapshot, "_history_proof")
     assert proof.unresolved is pending
 
-    monkeypatch.setattr(ToolCall, "__eq__", original_call_equality)
+    monkeypatch.setattr(StructuredToolCall, "__eq__", original_call_equality)
 
     def fail_pending_iteration(_: PendingToolCalls) -> object:
         raise AssertionError("incremental pending validation scanned the remaining suffix")
@@ -594,7 +660,7 @@ def test_change_append_uses_incremental_proof_and_rejects_old_tool_call_id(
         raise AssertionError("internal append must not analyze full history")
 
     monkeypatch.setattr("jharness.kernel._history.analyze_history", reject_full_analysis)
-    reused = ToolCall("call-1", "lookup", {"key": "other"})
+    reused = StructuredToolCall("call-1", "lookup", {"key": "other"})
     with pytest.raises(ValueError, match="tool call id reused"):
         reduce_change(
             settled.snapshot,
@@ -604,6 +670,7 @@ def test_change_append_uses_incremental_proof_and_rejects_old_tool_call_id(
                     ModelTurnResult.TOOLS_PENDING,
                     0,
                     (reused.id,),
+                    False,
                     None,
                     None,
                     None,

@@ -22,23 +22,25 @@
     },
     "planning": {
       "type": "object",
-      "required": ["kind"],
+      "required": ["kind", "provider_turn_pending"],
       "properties": {
-        "kind": { "const": "planning" }
+        "kind": { "const": "planning" },
+        "provider_turn_pending": { "type": "boolean" }
       },
       "additionalProperties": false
     },
     "tools_pending": {
       "type": "object",
-      "required": ["kind", "pending"],
+      "required": ["kind", "pending", "provider_turn_pending"],
       "properties": {
         "kind": { "const": "tools_pending" },
         "pending": {
           "type": "array",
           "minItems": 1,
           "$comment": "Pending runtime call ids must be unique and preserve assistant output order. Provider tool calls never enter this state.",
-          "items": { "$ref": "messages.schema.json#/$defs/tool_call" }
-        }
+          "items": { "$ref": "messages.schema.json#/$defs/runtime_tool_call" }
+        },
+        "provider_turn_pending": { "type": "boolean" }
       },
       "additionalProperties": false
     },

@@ -7,6 +7,7 @@ from typing import Any
 from jharness.kernel.models import ModelResponse, ModelUsage
 from jharness.kernel.wire._helpers import (
     array,
+    boolean,
     decode_document,
     json_object,
     object_fields,
@@ -88,6 +89,7 @@ def encode_model_response(response: ModelResponse) -> dict[str, Any]:
         "usage": None if response.usage is None else encode_model_usage(response.usage),
         "model_id": response.model_id,
         "response_id": response.response_id,
+        "provider_turn_pending": response.provider_turn_pending,
         "metadata": thaw_object(response.metadata),
     }
 
@@ -108,6 +110,7 @@ def decode_model_response_value(value: object) -> ModelResponse:
             "usage",
             "model_id",
             "response_id",
+            "provider_turn_pending",
             "metadata",
         },
     )
@@ -121,5 +124,9 @@ def decode_model_response_value(value: object) -> ModelResponse:
         usage=None if raw_usage is None else decode_model_usage_value(raw_usage),
         model_id=optional_string(fields["model_id"], "model_id"),
         response_id=optional_string(fields["response_id"], "response_id"),
+        provider_turn_pending=boolean(
+            fields["provider_turn_pending"],
+            "provider_turn_pending",
+        ),
         metadata=json_object(fields["metadata"], "model response metadata"),
     )

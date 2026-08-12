@@ -17,7 +17,7 @@ import pytest
 from jharness.kernel import (
     RunContext,
     SettledResult,
-    ToolCall,
+    StructuredToolCall,
     ToolContext,
     ToolFailure,
     ToolSuccess,
@@ -56,7 +56,7 @@ def _invoke(
             _emit_progress,
             is_cancelled,
         )
-        call = ToolCall("mutation-call", tool.spec.name, arguments)
+        call = StructuredToolCall("mutation-call", tool.spec.name, arguments)
         if through_registry:
             catalog = await ToolRegistry((tool,)).open_catalog()
             result = await catalog.bind(call).invoke(context)

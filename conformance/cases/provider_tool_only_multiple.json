@@ -78,6 +78,7 @@
               "usage": null,
               "model_id": "deepseek-v4-flash",
               "response_id": "fixture-provider-only-response",
+              "provider_turn_pending": false,
               "metadata": {}
             }
           }

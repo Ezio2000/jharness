@@ -184,13 +184,13 @@ def test_redis_result_parsers_preserve_repository_semantics() -> None:
         _handle_commit_result([b"future_status"], identity)
 
 
-async def test_redis_uses_three_v2_keys_per_run_in_one_cluster_slot() -> None:
+async def test_redis_uses_three_v3_keys_per_run_in_one_cluster_slot() -> None:
     repository = RedisRunRepository(key_prefix="unit-prefix")
     try:
         first = repository._run_keys("run-a")  # pyright: ignore[reportPrivateUsage]
         second = repository._run_keys("run-b")  # pyright: ignore[reportPrivateUsage]
         assert len(first) == 3
-        assert all(key.startswith("jharness:v2:{") for key in first)
+        assert all(key.startswith("jharness:v3:{") for key in first)
         assert tuple(key.rsplit(":", 1)[1] for key in first) == (
             "head",
             "ledger",

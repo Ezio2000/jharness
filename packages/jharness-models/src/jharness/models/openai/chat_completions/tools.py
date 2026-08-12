@@ -6,7 +6,14 @@ import json
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, cast
 
-from jharness.kernel import ToolCall, ToolChoice, ToolSpec, thaw_json_value
+from jharness.kernel import (
+    RuntimeToolKind,
+    RuntimeToolSpec,
+    StructuredToolCall,
+    StructuredToolSpec,
+    ToolChoice,
+    thaw_json_value,
+)
 from jharness.models.openai.errors import OPENAI_JSON, OpenAIChatCompletionsError
 from jharness.models.openai.profiles import OpenAIChatCompletionsProfile
 
@@ -15,13 +22,16 @@ JsonObject = dict[str, JsonValue]
 
 
 def encode_tools(
-    tools: Sequence[ToolSpec],
+    tools: Sequence[RuntimeToolSpec],
     profile: OpenAIChatCompletionsProfile,
 ) -> list[JsonObject]:
     if not tools:
         return []
-    if not profile.capabilities.runtime_tools:
+    if RuntimeToolKind.STRUCTURED not in profile.capabilities.runtime_tool_kinds:
         raise OpenAIChatCompletionsError(f"{profile.name} does not support tools")
+    if any(not isinstance(tool, StructuredToolSpec) for tool in tools):
+        raise OpenAIChatCompletionsError(f"{profile.name} does not support freeform runtime tools")
+    structured_tools = cast(Sequence[StructuredToolSpec], tools)
     return [
         {
             "type": "function",
@@ -31,7 +41,7 @@ def encode_tools(
                 "parameters": thaw_json_value(tool.input_schema),
             },
         }
-        for tool in tools
+        for tool in structured_tools
     ]
 
 
@@ -62,7 +72,7 @@ def encode_tool_choice(
     return {"type": "function", "function": {"name": choice.name}}
 
 
-def encode_assistant_tool_calls(calls: Sequence[ToolCall]) -> list[JsonObject]:
+def encode_assistant_tool_calls(calls: Sequence[StructuredToolCall]) -> list[JsonObject]:
     return [
         {
             "id": call.id,
@@ -80,12 +90,12 @@ def encode_assistant_tool_calls(calls: Sequence[ToolCall]) -> list[JsonObject]:
     ]
 
 
-def decode_tool_calls(value: object) -> list[ToolCall]:
+def decode_tool_calls(value: object) -> list[StructuredToolCall]:
     if value is None:
         return []
     if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
         raise OpenAIChatCompletionsError("chat completion tool_calls must be an array")
-    calls: list[ToolCall] = []
+    calls: list[StructuredToolCall] = []
     for item in cast(Sequence[object], value):
         mapping = OPENAI_JSON.mapping(item, "chat completion tool call")
         call_type = mapping.get("type", "function")
@@ -95,7 +105,7 @@ def decode_tool_calls(value: object) -> list[ToolCall]:
             )
         function = OPENAI_JSON.mapping(mapping.get("function"), "chat completion tool function")
         calls.append(
-            ToolCall(
+            StructuredToolCall(
                 id=OPENAI_JSON.required_string(mapping.get("id"), "chat completion tool call id"),
                 name=OPENAI_JSON.required_string(
                     function.get("name"),

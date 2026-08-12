@@ -16,17 +16,17 @@ from jharness.kernel import (
     RunContext,
     Runtime,
     SettledResult,
-    ToolCall,
+    StructuredToolCall,
+    StructuredToolSpec,
     ToolContext,
     ToolResult,
-    ToolSpec,
     ToolSuccess,
 )
 from jharness.toolkit import ToolRegistry
 
 
 class EchoTool:
-    spec = ToolSpec(
+    spec = StructuredToolSpec(
         "echo",
         "Return the input text.",
         {
@@ -37,7 +37,7 @@ class EchoTool:
         },
     )
 
-    async def invoke(self, call: ToolCall, context: ToolContext) -> ToolResult:
+    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         del context
         text = str(call.arguments["text"])
         return SettledResult(ToolSuccess((ContentPart.text_part(text),), {"text": text}))
@@ -63,7 +63,7 @@ class DemoModel:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                (ToolCall("call-1", "echo", {"text": "hello"}),),
+                (StructuredToolCall("call-1", "echo", {"text": "hello"}),),
                 finish_reason="tool_calls",
             )
         outcome = request.messages[-1].outcome

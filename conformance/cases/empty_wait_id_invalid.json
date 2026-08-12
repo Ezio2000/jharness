@@ -5,7 +5,7 @@
   "target": "state",
   "value": {
     "kind": "suspended",
-    "resume_to": { "kind": "planning" },
+    "resume_to": { "kind": "planning", "provider_turn_pending": false },
     "suspension": {
       "reason": "waiting",
       "source": "tool",

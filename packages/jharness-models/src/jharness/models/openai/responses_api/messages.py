@@ -10,27 +10,17 @@ from typing import Any, cast
 
 from jharness.kernel import (
     ContentPart,
-    ErrorInfo,
+    FreeformToolCall,
     Message,
     ModelOutputItem,
-    ProviderToolCall,
-    ProviderToolId,
-    ProviderToolStatus,
-    ToolCall,
+    RuntimeToolKind,
+    StructuredToolCall,
     thaw_json_value,
 )
 from jharness.models.openai.errors import OPENAI_RESPONSES_JSON, OpenAIResponsesError
 from jharness.models.openai.profiles import OpenAIResponsesProfile
 
 JsonObject = dict[str, Any]
-
-_IN_PROGRESS_STATUSES = frozenset(
-    {
-        "generating",
-        "in_progress",
-        "searching",
-    }
-)
 
 
 def encode_responses_input(
@@ -40,10 +30,30 @@ def encode_responses_input(
     """Encode durable kernel history as ordered Responses input items."""
 
     items: list[JsonObject] = []
+    pending_calls: dict[str, RuntimeToolKind] = {}
     for message in messages:
         if message.role == "tool":
-            items.append(_encode_function_output(message, profile))
+            if message.tool_call_id is None:
+                raise OpenAIResponsesError("tool messages require tool_call_id")
+            try:
+                input_kind = pending_calls.pop(message.tool_call_id)
+            except KeyError as exc:
+                raise OpenAIResponsesError(
+                    "Responses tool output has no preceding runtime tool call"
+                ) from exc
+            items.append(_encode_runtime_tool_output(message, input_kind, profile))
         elif message.role == "assistant":
+            for item in message.output:
+                if isinstance(item, StructuredToolCall | FreeformToolCall):
+                    if item.id in pending_calls:
+                        raise OpenAIResponsesError(
+                            "Responses history contains duplicate pending tool call ids"
+                        )
+                    pending_calls[item.id] = (
+                        RuntimeToolKind.STRUCTURED
+                        if isinstance(item, StructuredToolCall)
+                        else RuntimeToolKind.FREEFORM
+                    )
             items.extend(_encode_assistant_output(message.output, profile))
         else:
             items.append(_encode_regular_message(message, profile))
@@ -54,7 +64,7 @@ def decode_output_items(
     value: object,
     profile: OpenAIResponsesProfile,
     *,
-    image_media_type: str | None = None,
+    response: Mapping[str, Any],
 ) -> list[ModelOutputItem]:
     """Decode the response output array without losing provider item order."""
 
@@ -67,37 +77,17 @@ def decode_output_items(
         if item_type == "message":
             output.extend(_decode_message_item(item))
         elif item_type == "reasoning":
-            output.append(_decode_reasoning_item(item))
+            output.append(_decode_reasoning_item(item, profile))
         elif item_type == "function_call":
-            output.append(_decode_function_call(item))
-        elif item_type == "image_generation_call":
-            output.append(
-                _decode_image_generation_call(
-                    item,
-                    profile,
-                    media_type=image_media_type,
-                )
-            )
-        elif item_type == "web_search_call":
-            output.append(_decode_web_search_call(item, profile))
+            output.append(_decode_structured_tool_call(item, profile))
+        elif item_type == "custom_tool_call":
+            output.append(_decode_freeform_tool_call(item, profile))
         else:
-            raise OpenAIResponsesError(f"unsupported Responses output item: {item_type}")
+            provider_call = profile.provider_tool_registry.decode_call(item, response)
+            if provider_call is None:
+                raise OpenAIResponsesError(f"unsupported Responses output item: {item_type}")
+            output.append(provider_call)
     return output
-
-
-def provider_status(value: object, *, label: str) -> ProviderToolStatus:
-    """Project one provider-specific lifecycle value into the kernel enum."""
-
-    status = OPENAI_RESPONSES_JSON.required_string(value, label)
-    if status == "completed":
-        return ProviderToolStatus.COMPLETED
-    if status == "incomplete":
-        return ProviderToolStatus.INCOMPLETE
-    if status == "failed":
-        return ProviderToolStatus.FAILED
-    if status in _IN_PROGRESS_STATUSES:
-        return ProviderToolStatus.IN_PROGRESS
-    raise OpenAIResponsesError(f"unsupported {label}: {status}")
 
 
 def _encode_regular_message(
@@ -114,8 +104,9 @@ def _encode_regular_message(
     }
 
 
-def _encode_function_output(
+def _encode_runtime_tool_output(
     message: Message,
+    input_kind: RuntimeToolKind,
     profile: OpenAIResponsesProfile,
 ) -> JsonObject:
     if message.tool_call_id is None or message.outcome is None:
@@ -125,8 +116,14 @@ def _encode_function_output(
         output: str | list[JsonObject] = "".join(part.text or "" for part in parts)
     else:
         output = [_encode_input_part(part, profile) for part in parts]
+    if input_kind is RuntimeToolKind.FREEFORM and not isinstance(output, str):
+        raise OpenAIResponsesError("Responses custom tool output supports text content only")
     return {
-        "type": "function_call_output",
+        "type": (
+            "function_call_output"
+            if input_kind is RuntimeToolKind.STRUCTURED
+            else "custom_tool_call_output"
+        ),
         "call_id": message.tool_call_id,
         "output": output,
     }
@@ -230,10 +227,12 @@ def _encode_assistant_output(
         flush_message()
         if isinstance(item, ContentPart):
             encoded.append(_encode_reasoning_part(item, profile))
-        elif isinstance(item, ToolCall):
-            encoded.append(_encode_function_call(item))
+        elif isinstance(item, StructuredToolCall):
+            encoded.append(_encode_structured_tool_call(item))
+        elif isinstance(item, FreeformToolCall):
+            encoded.append(_encode_freeform_tool_call(item))
         else:
-            encoded.append(_encode_provider_tool_call(item, profile))
+            encoded.append(profile.provider_tool_registry.encode_history(item))
     flush_message()
     return encoded
 
@@ -271,7 +270,12 @@ def _encode_reasoning_part(
     if raw is not None:
         if raw.get("type") != "reasoning":
             raise OpenAIResponsesError("Responses reasoning data must contain a reasoning item")
+        _validate_stateless_reasoning(raw, profile)
         return raw
+    if profile.store is False:
+        raise OpenAIResponsesError(
+            "store=False reasoning history requires provider encrypted_content"
+        )
     if part.text is None:
         raise OpenAIResponsesError("Responses reasoning content requires text or native data")
     if profile.reasoning_history_mode == "content":
@@ -285,7 +289,7 @@ def _encode_reasoning_part(
     }
 
 
-def _encode_function_call(call: ToolCall) -> JsonObject:
+def _encode_structured_tool_call(call: StructuredToolCall) -> JsonObject:
     return {
         "type": "function_call",
         "call_id": call.id,
@@ -299,28 +303,13 @@ def _encode_function_call(call: ToolCall) -> JsonObject:
     }
 
 
-def _encode_provider_tool_call(
-    call: ProviderToolCall,
-    profile: OpenAIResponsesProfile,
-) -> JsonObject:
-    _validate_provider_tool(call.tool, profile)
-    if call.tool.type == "image_generation":
-        return _encode_image_generation_history(call)
-    if call.tool.type != "web_search":
-        raise OpenAIResponsesError(f"unsupported Responses provider tool history: {call.tool.type}")
-    raw = _native_item(call.metadata)
-    if raw is not None:
-        if raw.get("type") != "web_search_call":
-            raise OpenAIResponsesError("Responses provider metadata has the wrong item type")
-        return raw
-    encoded: JsonObject = {
-        "type": "web_search_call",
-        "id": call.id,
-        "status": call.status.value,
+def _encode_freeform_tool_call(call: FreeformToolCall) -> JsonObject:
+    return {
+        "type": "custom_tool_call",
+        "call_id": call.id,
+        "name": call.name,
+        "input": call.input,
     }
-    if call.arguments:
-        encoded["action"] = thaw_json_value(call.arguments)
-    return encoded
 
 
 def _decode_message_item(item: Mapping[str, Any]) -> list[ContentPart]:
@@ -363,7 +352,11 @@ def _decode_message_item(item: Mapping[str, Any]) -> list[ContentPart]:
     return parts
 
 
-def _decode_reasoning_item(item: Mapping[str, Any]) -> ContentPart:
+def _decode_reasoning_item(
+    item: Mapping[str, Any],
+    profile: OpenAIResponsesProfile,
+) -> ContentPart:
+    _validate_stateless_reasoning(item, profile)
     chunks: list[str] = []
     for field, block_type in (("content", "reasoning_text"), ("summary", "summary_text")):
         raw_blocks = item.get(field)
@@ -385,7 +378,11 @@ def _decode_reasoning_item(item: Mapping[str, Any]) -> ContentPart:
     )
 
 
-def _decode_function_call(item: Mapping[str, Any]) -> ToolCall:
+def _decode_structured_tool_call(
+    item: Mapping[str, Any],
+    profile: OpenAIResponsesProfile,
+) -> StructuredToolCall:
+    _require_runtime_kind(profile, RuntimeToolKind.STRUCTURED)
     status = item.get("status")
     if status is not None:
         status = OPENAI_RESPONSES_JSON.required_string(
@@ -414,99 +411,38 @@ def _decode_function_call(item: Mapping[str, Any]) -> ToolCall:
         raise OpenAIResponsesError("Responses function call arguments must be valid JSON") from exc
     if not isinstance(arguments, Mapping):
         raise OpenAIResponsesError("Responses function call arguments must be an object")
-    return ToolCall(call_id, name, cast(Mapping[str, Any], arguments))
+    return StructuredToolCall(call_id, name, cast(Mapping[str, Any], arguments))
 
 
-def _decode_image_generation_call(
+def _decode_freeform_tool_call(
     item: Mapping[str, Any],
     profile: OpenAIResponsesProfile,
-    *,
-    media_type: str | None,
-) -> ProviderToolCall:
-    tool = _provider_tool(profile, "image_generation")
-    call_id = OPENAI_RESPONSES_JSON.required_string(
-        item.get("id"),
-        "Responses image generation call id",
-    )
-    status = provider_status(
-        item.get("status"),
-        label="Responses image generation status",
-    )
-    result = item.get("result")
-    output: tuple[ContentPart, ...] = ()
-    if result is not None:
-        image_base64 = OPENAI_RESPONSES_JSON.required_string(
-            result,
-            "Responses image generation result",
+) -> FreeformToolCall:
+    _require_runtime_kind(profile, RuntimeToolKind.FREEFORM)
+    status = item.get("status")
+    if status is not None:
+        status = OPENAI_RESPONSES_JSON.required_string(
+            status,
+            "Responses custom tool call status",
         )
-        if status is ProviderToolStatus.IN_PROGRESS:
+        if status != "completed":
             raise OpenAIResponsesError(
-                "in-progress Responses image generation cannot carry a final result"
+                "Responses custom tool call must be completed before runtime execution"
             )
-        output = (
-            ContentPart(
-                type="image",
-                data={"base64": image_base64},
-                media_type=_resolve_image_media_type(image_base64, media_type),
-            ),
-        )
-    elif status is ProviderToolStatus.COMPLETED:
-        raise OpenAIResponsesError("completed Responses image generation requires a result")
-    return ProviderToolCall(
-        id=call_id,
-        tool=tool,
-        status=status,
-        output=output,
-        error=_provider_error(item, "image_generation")
-        if status is ProviderToolStatus.FAILED
-        else None,
-        metadata={"responses": {"item": _without_result(item)}},
-    )
-
-
-def _decode_web_search_call(
-    item: Mapping[str, Any],
-    profile: OpenAIResponsesProfile,
-) -> ProviderToolCall:
-    tool = _provider_tool(profile, "web_search")
     call_id = OPENAI_RESPONSES_JSON.required_string(
-        item.get("id"),
-        "Responses web search call id",
+        item.get("call_id"),
+        "Responses custom tool call call_id",
     )
-    status = provider_status(item.get("status"), label="Responses web search status")
-    action = item.get("action")
-    if action is None:
-        arguments: Mapping[str, Any] = {}
-    elif isinstance(action, Mapping):
-        arguments = cast(Mapping[str, Any], action)
-    else:
-        raise OpenAIResponsesError("Responses web search action must be an object or null")
-    return ProviderToolCall(
-        id=call_id,
-        tool=tool,
-        status=status,
-        arguments=arguments,
-        error=_provider_error(item, "web_search") if status is ProviderToolStatus.FAILED else None,
-        metadata={"responses": {"item": dict(item)}},
+    name = OPENAI_RESPONSES_JSON.required_string(
+        item.get("name"),
+        "Responses custom tool call name",
     )
-
-
-def _provider_error(item: Mapping[str, Any], tool_type: str) -> ErrorInfo:
-    raw_error = item.get("error")
-    if isinstance(raw_error, Mapping):
-        error = cast(Mapping[str, object], raw_error)
-        code_value = error.get("code")
-        message_value = error.get("message")
-        code = code_value if isinstance(code_value, str) and code_value else f"{tool_type}_failed"
-        message = (
-            message_value
-            if isinstance(message_value, str) and message_value
-            else f"provider {tool_type} call failed"
-        )
-        return ErrorInfo(code, message)
-    if isinstance(raw_error, str) and raw_error:
-        return ErrorInfo(f"{tool_type}_failed", raw_error)
-    return ErrorInfo(f"{tool_type}_failed", f"provider {tool_type} call failed")
+    if not profile.allows_freeform_runtime_tool(name):
+        raise OpenAIResponsesError(f"{profile.name} does not support freeform runtime tool: {name}")
+    raw_input = item.get("input")
+    if not isinstance(raw_input, str):
+        raise OpenAIResponsesError("Responses custom tool call input must be a string")
+    return FreeformToolCall(call_id, name, raw_input)
 
 
 def _native_content_part(part: ContentPart) -> JsonObject | None:
@@ -517,33 +453,6 @@ def _native_content_part(part: ContentPart) -> JsonObject | None:
     if not isinstance(raw, Mapping):
         return None
     return cast(JsonObject, thaw_json_value(cast(Mapping[str, object], raw)))
-
-
-def _encode_image_generation_history(call: ProviderToolCall) -> JsonObject:
-    raw = _native_item(call.metadata)
-    encoded = {} if raw is None else raw
-    if raw is not None and raw.get("type") != "image_generation_call":
-        raise OpenAIResponsesError("Responses provider metadata has the wrong item type")
-    result: str | None = None
-    if call.output:
-        if len(call.output) != 1 or call.output[0].type != "image":
-            raise OpenAIResponsesError("image_generation history requires exactly one image output")
-        raw_base64 = call.output[0].data.get("base64")
-        if not isinstance(raw_base64, str) or not raw_base64:
-            raise OpenAIResponsesError(
-                "image_generation history image requires non-empty base64 data"
-            )
-        _resolve_image_media_type(raw_base64, call.output[0].media_type)
-        result = raw_base64
-    if call.status is ProviderToolStatus.COMPLETED and result is None:
-        raise OpenAIResponsesError("completed image_generation history requires an image output")
-    encoded.update(
-        type="image_generation_call",
-        id=call.id,
-        status=call.status.value,
-        result=result,
-    )
-    return encoded
 
 
 def _resolve_image_media_type(image_base64: str, configured: str | None) -> str:
@@ -597,28 +506,30 @@ def _native_item(container: Mapping[str, Any]) -> JsonObject | None:
     return cast(JsonObject, thaw_json_value(cast(Mapping[str, object], raw_item)))
 
 
-def _without_result(item: Mapping[str, Any]) -> JsonObject:
-    return {key: value for key, value in item.items() if key != "result"}
-
-
-def _validate_provider_tool(
-    tool: ProviderToolId,
+def _validate_stateless_reasoning(
+    item: Mapping[str, Any],
     profile: OpenAIResponsesProfile,
 ) -> None:
-    if tool not in profile.capabilities.provider_tools:
-        raise OpenAIResponsesError(f"{profile.name} does not support provider tool: {tool.type}")
-
-
-def _provider_tool(profile: OpenAIResponsesProfile, tool_type: str) -> ProviderToolId:
-    try:
-        return profile.provider_tool(tool_type)
-    except ValueError as exc:
-        raise OpenAIResponsesError(str(exc)) from exc
+    if profile.store is not False:
+        return
+    encrypted = item.get("encrypted_content")
+    if not isinstance(encrypted, str) or not encrypted:
+        raise OpenAIResponsesError(
+            "store=False reasoning items require non-empty encrypted_content"
+        )
 
 
 def _require_modality(profile: OpenAIResponsesProfile, modality: str) -> None:
     if modality not in profile.capabilities.input_modalities:
         raise OpenAIResponsesError(f"{profile.name} does not support {modality} input")
+
+
+def _require_runtime_kind(
+    profile: OpenAIResponsesProfile,
+    kind: RuntimeToolKind,
+) -> None:
+    if kind not in profile.capabilities.runtime_tool_kinds:
+        raise OpenAIResponsesError(f"{profile.name} does not support {kind.value} runtime tools")
 
 
 def _required_type(value: Mapping[str, Any], label: str) -> str:

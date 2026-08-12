@@ -33,12 +33,12 @@ from jharness.kernel import (
     RunSnapshot,
     SettledResult,
     StartedFact,
+    StructuredToolCall,
     Suspended,
     SuspendedControl,
     Suspension,
     ToolAccepted,
     ToolBatchFact,
-    ToolCall,
     ToolExecution,
     ToolFailure,
     ToolOutcomeKind,
@@ -117,7 +117,7 @@ def _suspended_checkpoint() -> Checkpoint:
 
 
 def test_closed_lifecycle_and_limit_vocabularies_match_state_schema() -> None:
-    call = ToolCall("call-1", "lookup")
+    call = StructuredToolCall("call-1", "lookup")
     states = (
         Planning(),
         ToolsPending(PendingToolCalls((call,))),
@@ -202,7 +202,7 @@ def test_event_request_approval_tool_and_scheduling_vocabularies_match() -> None
 
 
 def test_message_roles_and_fact_payloads_match_contracts_exactly() -> None:
-    call = ToolCall("call-1", "lookup")
+    call = StructuredToolCall("call-1", "lookup")
     messages = (
         Message.system("system"),
         Message.user("user"),
@@ -243,6 +243,7 @@ def test_message_roles_and_fact_payloads_match_contracts_exactly() -> None:
             ModelTurnResult.COMPLETED,
             1,
             (),
+            False,
             "end_turn",
             None,
             None,

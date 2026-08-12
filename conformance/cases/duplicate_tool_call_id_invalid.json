@@ -8,12 +8,14 @@
     "output": [
       {
         "kind": "runtime_tool_call",
+        "input_kind": "structured",
         "id": "duplicate",
         "name": "echo",
         "arguments": {}
       },
       {
         "kind": "runtime_tool_call",
+        "input_kind": "structured",
         "id": "duplicate",
         "name": "echo",
         "arguments": {}

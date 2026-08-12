@@ -7,8 +7,15 @@ import binascii
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
-from jharness.kernel import ContentPart, Message, ModelOutputItem, ToolCall
+from jharness.kernel import (
+    ContentPart,
+    Message,
+    ModelOutputItem,
+    ProviderToolCall,
+    StructuredToolCall,
+)
 from jharness.models.anthropic.errors import ANTHROPIC_JSON, AnthropicError
+from jharness.models.anthropic.messages_api.server_tools import AnthropicServerToolCodec
 from jharness.models.anthropic.profiles import AnthropicProfile
 
 JsonValue = Any
@@ -171,23 +178,110 @@ def encode_tool_result_content(
     return [encode_user_content_part(part, profile) for part in parts]
 
 
-def decode_content_blocks(value: object) -> list[ModelOutputItem]:
+def decode_content_blocks(
+    value: object,
+    profile: AnthropicProfile,
+) -> list[ModelOutputItem]:
     if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
         raise AnthropicError("Anthropic response content must be an array")
-    output: list[ModelOutputItem] = []
-    for item in cast(Sequence[object], value):
-        block = ANTHROPIC_JSON.mapping(item, "Anthropic content block")
-        block_type = _content_block_type(block)
-        if block_type == "tool_use":
-            from jharness.models.anthropic.messages_api.tools import decode_tool_uses
+    blocks = [
+        ANTHROPIC_JSON.mapping(item, "Anthropic content block")
+        for item in cast(Sequence[object], value)
+    ]
+    results = _index_server_results(blocks, profile)
+    consumed_results: set[str] = set()
+    return [
+        decoded
+        for block in blocks
+        if (
+            decoded := _decode_content_block(
+                block,
+                profile,
+                results,
+                consumed_results,
+            )
+        )
+        is not None
+    ]
 
-            output.extend(decode_tool_uses((block,)))
+
+def _index_server_results(
+    blocks: Sequence[Mapping[str, Any]],
+    profile: AnthropicProfile,
+) -> dict[str, tuple[Mapping[str, Any], AnthropicServerToolCodec]]:
+    results: dict[str, tuple[Mapping[str, Any], AnthropicServerToolCodec]] = {}
+    for block in blocks:
+        block_type = _content_block_type(block)
+        codec = profile.server_tools.codec_for_result_type(block_type)
+        if codec is None:
             continue
-        decoder = _CONTENT_BLOCK_DECODERS.get(block_type)
-        if decoder is None:
-            raise AnthropicError(f"unsupported Anthropic assistant content block: {block_type}")
-        output.append(decoder(block))
-    return output
+        call_id = ANTHROPIC_JSON.required_string(
+            block.get("tool_use_id"),
+            "Anthropic server tool result tool_use_id",
+        )
+        if call_id in results:
+            raise AnthropicError(f"duplicate Anthropic server tool result: {call_id}")
+        results[call_id] = (block, codec)
+    return results
+
+
+def _decode_content_block(
+    block: Mapping[str, Any],
+    profile: AnthropicProfile,
+    results: Mapping[
+        str,
+        tuple[Mapping[str, Any], AnthropicServerToolCodec],
+    ],
+    consumed_results: set[str],
+) -> ModelOutputItem | None:
+    block_type = _content_block_type(block)
+    if block_type == "tool_use":
+        from jharness.models.anthropic.messages_api.tools import decode_tool_uses
+
+        return decode_tool_uses((block,))[0]
+    if block_type == "server_tool_use":
+        return _decode_server_use(block, profile, results, consumed_results)
+    result_codec = profile.server_tools.codec_for_result_type(block_type)
+    if result_codec is not None:
+        call_id = ANTHROPIC_JSON.required_string(
+            block.get("tool_use_id"),
+            "Anthropic server tool result tool_use_id",
+        )
+        return None if call_id in consumed_results else result_codec.decode_call(None, block)
+    decoder = _CONTENT_BLOCK_DECODERS.get(block_type)
+    if decoder is None:
+        raise AnthropicError(f"unsupported Anthropic assistant content block: {block_type}")
+    return decoder(block)
+
+
+def _decode_server_use(
+    block: Mapping[str, Any],
+    profile: AnthropicProfile,
+    results: Mapping[
+        str,
+        tuple[Mapping[str, Any], AnthropicServerToolCodec],
+    ],
+    consumed_results: set[str],
+) -> ProviderToolCall:
+    name = ANTHROPIC_JSON.required_string(
+        block.get("name"),
+        "Anthropic server tool use name",
+    )
+    codec = profile.server_tools.codec_for_call_name(name)
+    if codec is None:
+        raise AnthropicError(f"unsupported Anthropic server tool call: {name}")
+    call_id = ANTHROPIC_JSON.required_string(
+        block.get("id"),
+        "Anthropic server tool use id",
+    )
+    paired = results.get(call_id)
+    result = None
+    if paired is not None:
+        result, result_codec = paired
+        if result_codec is not codec:
+            raise AnthropicError("Anthropic server tool result belongs to a different tool")
+        consumed_results.add(call_id)
+    return codec.decode_call(block, result)
 
 
 def _encode_assistant_output(
@@ -199,14 +293,17 @@ def _encode_assistant_output(
         if isinstance(item, ContentPart):
             blocks.append(_encode_assistant_part(item, profile))
             continue
-        if isinstance(item, ToolCall):
+        if isinstance(item, StructuredToolCall):
             from jharness.models.anthropic.messages_api.tools import (
                 encode_assistant_tool_uses,
             )
 
             blocks.extend(encode_assistant_tool_uses((item,)))
             continue
-        raise AnthropicError("Anthropic provider tool history is not supported by this profile")
+        if isinstance(item, ProviderToolCall):
+            blocks.extend(profile.server_tools.encode_history(item))
+            continue
+        raise AnthropicError("Anthropic assistant history contains an unsupported output item")
     if not blocks:
         return ""
     if all(block.get("type") == "text" for block in blocks):
@@ -225,7 +322,11 @@ def _decode_text_block(block: Mapping[str, Any]) -> ContentPart:
     text = block.get("text")
     if not isinstance(text, str) or not text:
         raise AnthropicError("Anthropic text block requires non-empty text")
-    return ContentPart.text_part(text)
+    extra = {key: value for key, value in block.items() if key not in {"type", "text"}}
+    return ContentPart.text_part(
+        text,
+        metadata={"anthropic": {"extra": extra}} if extra else None,
+    )
 
 
 def _decode_thinking_block(block: Mapping[str, Any]) -> ContentPart:
@@ -294,7 +395,11 @@ def _encode_assistant_part(part: ContentPart, profile: AnthropicProfile) -> Json
     if wire_block is not None:
         return wire_block
     if part.type == "text":
-        return {"type": "text", "text": part.text or ""}
+        return {
+            "type": "text",
+            "text": part.text or "",
+            **_anthropic_text_extra(part),
+        }
     if part.type == "thinking":
         block: JsonObject = {"type": "thinking", "thinking": part.text or ""}
         signature = _anthropic_metadata_str(part, "signature")
@@ -375,6 +480,20 @@ def _anthropic_metadata_str(part: ContentPart, key: str) -> str | None:
     if not isinstance(value, str):
         raise AnthropicError(f"Anthropic metadata {key} must be a string")
     return value
+
+
+def _anthropic_text_extra(part: ContentPart) -> JsonObject:
+    metadata = part.metadata.get("anthropic")
+    if not isinstance(metadata, Mapping):
+        return {}
+    extra = cast(Mapping[str, object], metadata).get("extra")
+    if extra is None:
+        return {}
+    if not isinstance(extra, Mapping):
+        raise AnthropicError("Anthropic text metadata extra must be an object")
+    if "type" in extra or "text" in extra:
+        raise AnthropicError("Anthropic text metadata cannot replace type or text")
+    return dict(cast(Mapping[str, Any], extra))
 
 
 def _encode_media_source(part: ContentPart, label: str) -> JsonObject:

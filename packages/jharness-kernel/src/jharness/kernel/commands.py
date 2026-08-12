@@ -110,10 +110,12 @@ class ResumeRequest:
                     "resume selector does not match the suspended checkpoint",
                 )
         messages = expect_instance_tuple(self.append_messages, Message, "resume append_messages")
-        if messages and isinstance(state.resume_to, ToolsPending):
+        if messages and (
+            isinstance(state.resume_to, ToolsPending) or state.resume_to.provider_turn_pending
+        ):
             raise RequestError(
                 "messages_require_planning",
-                "resume messages require a planning continuation",
+                "resume messages require an interruptible planning continuation",
             )
         if any(message.role not in {"system", "user", "external"} for message in messages):
             raise ValueError("resume messages must use a regular role")

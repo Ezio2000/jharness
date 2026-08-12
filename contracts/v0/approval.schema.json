@@ -10,7 +10,7 @@
       "properties": {
         "batch_id": { "type": "string", "minLength": 1 },
         "index": { "type": "integer", "minimum": 0 },
-        "call": { "$ref": "messages.schema.json#/$defs/tool_call" },
+        "call": { "$ref": "messages.schema.json#/$defs/runtime_tool_call" },
         "risk": { "$ref": "tools.schema.json#/$defs/tool_risk" }
       },
       "additionalProperties": false

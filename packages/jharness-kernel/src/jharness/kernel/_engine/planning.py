@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from time import time
 from typing import Any, Protocol, cast
 
@@ -23,8 +23,9 @@ from jharness.kernel.messages import (
     ContentPart,
     Message,
     ProviderToolCall,
-    ProviderToolStatus,
-    ToolCall,
+    RuntimeToolCall,
+    RuntimeToolKind,
+    StructuredToolCall,
 )
 from jharness.kernel.models import (
     Model,
@@ -36,7 +37,7 @@ from jharness.kernel.models import (
     ModelReasoningDelta,
     ModelRequest,
     ModelResponse,
-    ModelToolCallDelta,
+    ModelRuntimeToolCallDelta,
     ModelUsage,
     ModelUsageDelta,
     ProviderToolSpec,
@@ -100,8 +101,14 @@ class PlanningStep:
         self._emit = emit
 
     async def run(
-        self, snapshot: RunSnapshot, *, deadline: Deadline, inbox: ControlInbox
+        self,
+        snapshot: RunSnapshot,
+        *,
+        deadline: Deadline,
+        inbox: ControlInbox,
+        defer_insert: Callable[[Insert], None] | None = None,
     ) -> Change:
+        state = expect_instance(snapshot.state, Planning, "planning state")
         try:
             request = ModelRequest(
                 messages=tuple(snapshot.history),
@@ -115,9 +122,15 @@ class PlanningStep:
                 EventKind.MODEL_STARTED,
                 {"planning_step": snapshot.metrics.planning_steps + 1},
             )
-            response = await self._invoke(request, snapshot, deadline, inbox)
+            response = await self._invoke(
+                request,
+                snapshot,
+                deadline,
+                inbox,
+                defer_insert,
+            )
         except EffectInterrupted as interrupted:
-            return _interrupted(interrupted)
+            return _interrupted(interrupted, state)
         except WorkDeadlineReached:
             return limited(LimitReason.DEADLINE)
         except ModelError as exc:
@@ -142,6 +155,7 @@ class PlanningStep:
         snapshot: RunSnapshot,
         deadline: Deadline,
         inbox: ControlInbox,
+        defer_insert: Callable[[Insert], None] | None,
     ) -> ModelResponse:
         _validate_request(request, self._capabilities)
         use_stream = self._stream and self._capabilities.streaming
@@ -158,6 +172,7 @@ class PlanningStep:
             ),
             deadline=deadline,
             inbox=inbox,
+            defer_insert=defer_insert,
         )
         response = expect_instance(response, ModelResponse, "model response")
         _validate_response(response, request, self._capabilities)
@@ -177,7 +192,9 @@ class PlanningStep:
         if over_tokens:
             state = Limited(LimitReason.MAX_TOTAL_TOKENS)
         elif calls:
-            state = ToolsPending(PendingToolCalls(calls))
+            state = ToolsPending(PendingToolCalls(calls), response.provider_turn_pending)
+        elif response.provider_turn_pending:
+            state = Planning(provider_turn_pending=True)
         else:
             state = Completed(parts)
         return Change(
@@ -186,6 +203,11 @@ class PlanningStep:
                 result=ModelTurnResult(state.kind),
                 part_count=len(parts),
                 tool_call_ids=tuple(call.id for call in calls),
+                provider_turn_pending=(
+                    state.provider_turn_pending
+                    if isinstance(state, Planning | ToolsPending)
+                    else False
+                ),
                 finish_reason=response.finish_reason,
                 usage=response.usage,
                 limit_reason=state.reason if isinstance(state, Limited) else None,
@@ -197,12 +219,12 @@ class PlanningStep:
         )
 
 
-def _interrupted(interrupted: EffectInterrupted) -> Change:
+def _interrupted(interrupted: EffectInterrupted, state: Planning) -> Change:
     control = interrupted.control
     if isinstance(control, Pause):
-        return suspend(Planning(), control.suspension)
+        return suspend(state, control.suspension)
     if isinstance(control, Insert):
-        return insert(control)
+        return insert(control, state)
     raise TypeError("unsupported planning interruption")
 
 
@@ -229,13 +251,14 @@ def delta_data(delta: ModelDelta) -> Mapping[str, Any]:
             "text_delta": delta.text_delta,
             "data": delta.data,
         }
-    if isinstance(delta, ModelToolCallDelta):
+    if isinstance(delta, ModelRuntimeToolCallDelta):
         return {
             "kind": "tool_call",
             "output_index": delta.output_index,
             "id": delta.id,
             "name": delta.name,
-            "arguments_delta": delta.arguments_delta,
+            "input_kind": delta.input_kind.value,
+            "input_delta": delta.input_delta,
         }
     if isinstance(delta, ModelReasoningDelta):
         return {
@@ -287,8 +310,9 @@ def _validate_request(request: ModelRequest, capabilities: ModelCapabilities) ->
 
 
 def _validate_request_tools(request: ModelRequest, capabilities: ModelCapabilities) -> None:
-    if request.runtime_tools and not capabilities.runtime_tools:
-        raise ValueError("model does not support runtime tools")
+    requested_runtime_kinds = request.runtime_tool_kinds
+    if not requested_runtime_kinds.issubset(capabilities.runtime_tool_kinds):
+        raise ValueError("model does not support requested runtime tool kinds")
     if request.provider_tools:
         unsupported = tuple(
             spec.tool
@@ -299,14 +323,13 @@ def _validate_request_tools(request: ModelRequest, capabilities: ModelCapabiliti
             raise ValueError("model does not support requested provider tools")
     if request.tool_choice.type not in capabilities.tool_choice_types:
         raise ValueError(f"model does not support tool_choice={request.tool_choice.type!r}")
-    has_tools = bool(request.runtime_tools or request.provider_tools)
     if (
-        has_tools
-        and request.tool_choice.type != "none"
-        and not request.tool_choice.allow_parallel_tool_calls
-        and not capabilities.parallel_tool_call_control
+        request.may_return_runtime_tool_calls
+        and capabilities.parallel_runtime_tool_calls
+        and not request.tool_choice.allow_parallel_runtime_tool_calls
+        and not capabilities.parallel_runtime_tool_call_control
     ):
-        raise ValueError("model cannot disable parallel tool calls")
+        raise ValueError("model cannot disable parallel runtime tool calls")
 
 
 def _validate_response(
@@ -323,29 +346,34 @@ def _validate_response(
 
 
 def _validate_response_tools(
-    calls: tuple[ToolCall, ...],
+    calls: tuple[RuntimeToolCall, ...],
     provider_calls: tuple[ProviderToolCall, ...],
     request: ModelRequest,
     capabilities: ModelCapabilities,
 ) -> None:
-    if calls and not capabilities.runtime_tools:
-        raise ValueError("model returned unsupported runtime tool calls")
+    returned_runtime_kinds = frozenset(
+        RuntimeToolKind.STRUCTURED
+        if isinstance(call, StructuredToolCall)
+        else RuntimeToolKind.FREEFORM
+        for call in calls
+    )
+    if not returned_runtime_kinds.issubset(capabilities.runtime_tool_kinds):
+        raise ValueError("model returned unsupported runtime tool call kinds")
     requested_provider_tools = {spec.tool for spec in request.provider_tools}
     if any(call.tool not in capabilities.provider_tools for call in provider_calls):
         raise ValueError("model returned an unsupported provider tool call")
     if any(call.tool not in requested_provider_tools for call in provider_calls):
         raise ValueError("model returned an unrequested provider tool call")
-    if any(call.status is ProviderToolStatus.IN_PROGRESS for call in provider_calls):
-        raise ValueError("terminal model response contains an in-progress provider tool call")
     if len(calls) > 1 and (
-        not capabilities.parallel_tool_calls or not request.tool_choice.allow_parallel_tool_calls
+        not capabilities.parallel_runtime_tool_calls
+        or not request.tool_choice.allow_parallel_runtime_tool_calls
     ):
         raise ValueError("model returned disallowed parallel runtime tool calls")
     _validate_response_tool_choice(calls, provider_calls, request.tool_choice)
 
 
 def _validate_response_tool_choice(
-    calls: tuple[ToolCall, ...],
+    calls: tuple[RuntimeToolCall, ...],
     provider_calls: tuple[ProviderToolCall, ...],
     choice: ToolChoice,
 ) -> None:

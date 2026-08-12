@@ -13,10 +13,10 @@ from jharness.kernel import (
     Message,
     Planning,
     Runtime,
+    StructuredToolCall,
     Suspended,
     SuspensionSelector,
     ToolBatchFact,
-    ToolCall,
     ToolOutcomeKind,
     ToolWaiting,
     thaw_json_value,
@@ -176,7 +176,7 @@ def _current_waiting_outcome(
     checkpoint: Checkpoint,
     tool_call_id: str,
     source: AgentWaitSource,
-) -> tuple[ToolWaiting, ToolCall]:
+) -> tuple[ToolWaiting, StructuredToolCall]:
     fact = checkpoint.fact
     if not isinstance(fact, ToolBatchFact):
         raise ValueError("Agent checkpoint must end at its waiting tool batch")
@@ -193,7 +193,11 @@ def _current_waiting_outcome(
     if assistant_message.role != "assistant" or len(calls) != 1:
         raise ValueError("Agent completion tools must be the only call in their assistant turn")
     assistant_call = calls[0]
-    if assistant_call.id != tool_call_id or assistant_call.name != source:
+    if (
+        not isinstance(assistant_call, StructuredToolCall)
+        or assistant_call.id != tool_call_id
+        or assistant_call.name != source
+    ):
         raise ValueError("Agent checkpoint assistant call has the wrong identity")
     outcome = tool_message.outcome
     if not isinstance(outcome, ToolWaiting):
@@ -245,7 +249,7 @@ def _suspension_contract(
 
 def _validate_waiting_identity(
     waiting: ToolWaiting,
-    assistant_call: ToolCall,
+    assistant_call: StructuredToolCall,
     snapshot: AgentSnapshot,
     suspension_agent_id: str,
 ) -> None:
@@ -262,7 +266,7 @@ def _validate_waiting_identity(
 
 
 def _validate_foreground_agent_call(
-    assistant_call: ToolCall,
+    assistant_call: StructuredToolCall,
     snapshot: AgentSnapshot,
 ) -> None:
     if frozenset(assistant_call.arguments) - {"description", "prompt", "background"}:
@@ -277,7 +281,7 @@ def _validate_foreground_agent_call(
 
 
 def _validate_agent_wait_call(
-    assistant_call: ToolCall,
+    assistant_call: StructuredToolCall,
     snapshot: AgentSnapshot,
 ) -> None:
     if frozenset(assistant_call.arguments) != frozenset({"agent_id"}):
