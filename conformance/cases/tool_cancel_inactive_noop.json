@@ -33,7 +33,8 @@
                   "name": "echo",
                   "arguments": {
                     "text": "first"
-                  }
+                  },
+                  "metadata": {}
                 },
                 {
                   "kind": "runtime_tool_call",
@@ -47,7 +48,8 @@
                     ],
                     "step_delay": 0.02,
                     "text": "second"
-                  }
+                  },
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

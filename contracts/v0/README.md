@@ -66,8 +66,9 @@ offline within this directory. Only versioned top-level envelopes carry
 - Model modalities describe what content the model accepts or directly emits;
   tool ownership independently determines whether the runtime or provider
   executes a call.
-- Assistant messages and complete model responses preserve one non-empty
-  ordered output of content, runtime tool calls, and provider tool calls.
+- Assistant messages and complete model responses preserve one ordered output
+  of content, runtime tool calls, and provider tool calls. The output may be
+  empty when the provider returns no assistant item.
 - Only runtime tool calls enter `ToolsPending`; provider tool calls are executed
   remotely and remain ordered assistant output.
 - Runtime tools have an explicit `structured` JSON-object or `freeform` string

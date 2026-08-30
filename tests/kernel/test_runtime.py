@@ -12,6 +12,7 @@ from jharness.kernel import (
     ApprovalPolicy,
     ApprovalRequest,
     ApprovalSuspend,
+    ArtifactRef,
     Checkpoint,
     CommitError,
     Completed,
@@ -246,6 +247,40 @@ async def test_model_request_receives_complete_history() -> None:
     assert model.requests[1].messages == tuple(checkpoint.snapshot.history)[:-1]
 
 
+async def test_invalid_raw_structured_tool_input_is_settled_without_catalog_binding() -> None:
+    class CountingCatalog(Catalog):
+        def __init__(self) -> None:
+            super().__init__(
+                {"lookup": (StructuredToolSpec("lookup", "Lookup", {"type": "object"}), success)}
+            )
+            self.bind_count = 0
+
+        def bind(self, call: RuntimeToolCall) -> ToolBinding:
+            self.bind_count += 1
+            return super().bind(call)
+
+    catalog = CountingCatalog()
+    model = ScriptModel(
+        [
+            ModelResponse(
+                (StructuredToolCall("bad", "lookup", arguments=None, raw_input="not-json"),),
+                finish_reason="tool_calls",
+            ),
+            final(),
+        ]
+    )
+    checkpoint = (
+        await Runtime(model=model, tools=CatalogProvider(catalog))
+        .start((Message.user("go"),))
+        .result()
+    )
+
+    assert catalog.bind_count == 0
+    outcome = checkpoint.snapshot.history[-2]
+    assert outcome.outcome is not None
+    assert outcome.outcome.kind == "failure"
+
+
 async def test_runtime_rejects_unsupported_exact_tool_choice_before_invocation() -> None:
     model = ScriptModel(
         [final()],
@@ -261,6 +296,25 @@ async def test_runtime_rejects_unsupported_exact_tool_choice_before_invocation()
     assert isinstance(checkpoint.snapshot.state, Failed)
     assert checkpoint.snapshot.state.error.message == "model does not support tool_choice='none'"
     assert model.requests == []
+
+
+async def test_runtime_preflight_uses_normalized_content_part_modalities() -> None:
+    model = ScriptModel(
+        [final()],
+        capabilities=ModelCapabilities(input_modalities=frozenset({"text", "image"})),
+    )
+    message = Message(
+        "user",
+        (
+            ContentPart.artifact_part(ArtifactRef("image-file", media_type="IMAGE/PNG")),
+            ContentPart("file", uri="data:image/gif;base64,AA=="),
+        ),
+    )
+
+    checkpoint = await Runtime(model=model).start((message,)).result()
+
+    assert checkpoint.snapshot.status == "completed"
+    assert model.requests[0].messages == (message,)
 
 
 async def test_runtime_rejects_unsupported_parallel_control_before_invocation() -> None:
@@ -311,7 +365,7 @@ async def test_runtime_accepts_serial_request_when_model_cannot_call_in_parallel
 
 
 async def test_provider_tool_selection_ignores_runtime_parallel_control() -> None:
-    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    provider_id = ProviderToolId("example.provider", "web_search")
     provider_call = ProviderToolCall(
         "search-1",
         provider_id,
@@ -348,7 +402,7 @@ async def test_provider_tool_selection_ignores_runtime_parallel_control() -> Non
 
 
 async def test_provider_only_request_ignores_runtime_parallel_control() -> None:
-    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    provider_id = ProviderToolId("example.provider", "web_search")
     model = ScriptModel(
         [final()],
         capabilities=ModelCapabilities(
@@ -393,7 +447,7 @@ async def test_runtime_rejects_unsupported_seed_before_invocation() -> None:
 
 
 async def test_provider_tool_call_is_observed_but_never_scheduled_by_runtime() -> None:
-    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    provider_id = ProviderToolId("example.provider", "web_search")
     provider_call = ProviderToolCall(
         "search-1",
         provider_id,
@@ -422,7 +476,7 @@ async def test_provider_tool_call_is_observed_but_never_scheduled_by_runtime() -
 
 
 async def test_provider_only_output_completes_with_empty_visible_projection() -> None:
-    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    provider_id = ProviderToolId("example.provider", "web_search")
     calls = tuple(
         ProviderToolCall(
             f"search-{index}",
@@ -459,6 +513,16 @@ async def test_provider_only_output_completes_with_empty_visible_projection() ->
         }
         for event in events
     )
+
+
+async def test_empty_model_output_completes_and_persists_assistant_turn() -> None:
+    response = ModelResponse((), finish_reason="content_filter", metadata={"provider": "test"})
+    checkpoint = (
+        await Runtime(model=ScriptModel([response])).start((Message.user("hello"),)).result()
+    )
+
+    assert checkpoint.snapshot.state == Completed(())
+    assert checkpoint.snapshot.history[-1] == Message.assistant((), metadata={"provider": "test"})
 
 
 async def test_provider_output_does_not_expand_direct_output_modalities() -> None:
@@ -500,7 +564,7 @@ async def test_provider_output_does_not_expand_direct_output_modalities() -> Non
 
 
 async def test_mixed_provider_and_runtime_calls_schedule_only_runtime_call() -> None:
-    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    provider_id = ProviderToolId("example.provider", "web_search")
     provider_call = ProviderToolCall(
         "search-1",
         provider_id,
@@ -545,7 +609,7 @@ async def test_invalid_dynamic_model_request_becomes_failed_checkpoint() -> None
 
 
 def test_runtime_rejects_invalid_static_provider_configuration() -> None:
-    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    provider_id = ProviderToolId("example.provider", "web_search")
     spec = ProviderToolSpec(provider_id)
     model = ScriptModel([final()])
 
@@ -559,7 +623,7 @@ def test_runtime_rejects_invalid_static_provider_configuration() -> None:
 
 
 async def test_pending_provider_turn_continues_with_adjacent_history() -> None:
-    provider_id = ProviderToolId("deepseek.responses", "web_search")
+    provider_id = ProviderToolId("example.provider", "web_search")
     call = ProviderToolCall("search-running", provider_id, ProviderToolStatus.IN_PROGRESS)
     model = ScriptModel(
         [

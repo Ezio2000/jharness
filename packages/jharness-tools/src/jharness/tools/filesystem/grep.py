@@ -160,13 +160,18 @@ class GrepTool:
         return self.workspace.root
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
-        pattern = cast(str, call.arguments["pattern"])
-        path = cast(str, call.arguments.get("path", "."))
-        glob = cast(str | None, call.arguments.get("glob"))
-        mode = cast(OutputMode, call.arguments.get("output_mode", "files_with_matches"))
-        case_insensitive = cast(bool, call.arguments.get("case_insensitive", False))
-        context_lines = cast(int, call.arguments.get("context", 0))
-        limit = cast(int, call.arguments.get("limit", self.default_limit))
+        arguments = call.arguments
+        if arguments is None:
+            return failure(
+                FilesystemFailure("invalid_arguments", "Grep requires JSON object arguments.")
+            )
+        pattern = cast(str, arguments["pattern"])
+        path = cast(str, arguments.get("path", "."))
+        glob = cast(str | None, arguments.get("glob"))
+        mode = cast(OutputMode, arguments.get("output_mode", "files_with_matches"))
+        case_insensitive = cast(bool, arguments.get("case_insensitive", False))
+        context_lines = cast(int, arguments.get("context", 0))
+        limit = cast(int, arguments.get("limit", self.default_limit))
         try:
             return await run_blocking(
                 lambda cancelled_check: self._grep(

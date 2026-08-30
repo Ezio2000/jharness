@@ -7,8 +7,7 @@
   "properties": {
     "output": {
       "type": "array",
-      "minItems": 1,
-      "$comment": "Items preserve provider response order; runtime and provider tool call ids must be unique across the output.",
+      "$comment": "Items preserve provider response order; runtime and provider tool call ids must be unique across the output. Empty output is a durable provider-neutral result when the provider emitted no assistant item.",
       "items": { "$ref": "messages.schema.json#/$defs/model_output_item" }
     },
     "finish_reason": { "type": ["string", "null"] },

@@ -33,7 +33,8 @@
                   "name": "strict_count",
                   "arguments": {
                     "count": "bad"
-                  }
+                  },
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

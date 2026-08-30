@@ -7,14 +7,9 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from jharness.kernel import ModelCapabilities, RuntimeToolKind
+from jharness.kernel import ModelCapabilities
 from jharness.models._http import model_client_config
 from jharness.models.anthropic import AnthropicMessagesModel, AnthropicMessagesProfile
-from jharness.models.deepseek import (
-    deepseek_chat_profile,
-    deepseek_messages_profile,
-    deepseek_responses_profile,
-)
 from jharness.models.openai import (
     OpenAIChatModel,
     OpenAIChatProfile,
@@ -100,27 +95,6 @@ def test_shared_transport_config_repr_redacts_api_key() -> None:
             "anthropic-messages",
             id="anthropic-messages",
         ),
-        pytest.param(deepseek_chat_profile, "deepseek-chat", id="deepseek-chat"),
-        pytest.param(
-            lambda: deepseek_chat_profile(thinking=True),
-            "deepseek-chat-thinking",
-            id="deepseek-chat-thinking",
-        ),
-        pytest.param(
-            deepseek_messages_profile,
-            "deepseek-messages",
-            id="deepseek-messages",
-        ),
-        pytest.param(
-            lambda: deepseek_messages_profile(thinking=True),
-            "deepseek-messages-thinking",
-            id="deepseek-messages-thinking",
-        ),
-        pytest.param(
-            deepseek_responses_profile,
-            "deepseek-responses",
-            id="deepseek-responses",
-        ),
     ),
 )
 def test_profile_names_are_short_and_protocol_consistent(
@@ -130,162 +104,49 @@ def test_profile_names_are_short_and_protocol_consistent(
     assert factory().name == expected_name
 
 
-def test_deepseek_profiles_drive_capabilities_without_runtime_special_cases() -> None:
-    thinking_profile = deepseek_chat_profile(thinking=True, effort="high")
-    plain_profile = deepseek_messages_profile()
-    chat_model = OpenAIChatModel(
-        base_url="https://provider.test",
-        api_key="secret",
-        model="deepseek",
-        profile=thinking_profile,
-    )
-    messages_model = AnthropicMessagesModel(
-        base_url="https://provider.test",
-        api_key="secret",
-        model="deepseek",
-        profile=plain_profile,
-    )
-
-    assert thinking_profile.extra_request_body["thinking"] == {"type": "enabled"}
-    assert thinking_profile.extra_request_body["reasoning_effort"] == "high"
-    assert thinking_profile.reasoning_content_mode == "required_with_tools"
-    assert thinking_profile.capabilities.seed is False
-    assert chat_model.capabilities is thinking_profile.capabilities
-    assert chat_model.capabilities.tool_choice_types == frozenset({"auto"})
-    assert chat_model.capabilities.input_modalities == frozenset({"text"})
-    assert chat_model.capabilities.output_modalities == frozenset({"text"})
-    assert plain_profile.redacted_thinking_mode == "reject"
-    assert messages_model.capabilities is plain_profile.capabilities
-    assert messages_model.capabilities.input_modalities == frozenset({"text"})
-    assert messages_model.capabilities.output_modalities == frozenset({"text"})
-
-
 def test_openai_chat_profile_validates_every_configuration_family() -> None:
-    profile = OpenAIChatProfile(finish_reason_map={"stop": "end_turn"})
-    assert profile.finish_reason(None) is None
-    assert profile.finish_reason("stop") == "end_turn"
-    assert profile.finish_reason("length") == "length"
-
     invalid: tuple[tuple[dict[str, Any], type[Exception], str], ...] = (
         ({"name": ""}, ValueError, "profile name"),
         ({"capabilities": 1}, TypeError, "must be ModelCapabilities"),
-        ({"automatic_tool_choice_mode": "other"}, ValueError, "automatic_tool_choice_mode"),
+        ({"json_schema_name": ""}, ValueError, "json_schema_name"),
         (
             {
                 "capabilities": replace(
                     OpenAIChatProfile().capabilities,
-                    tool_choice_types=frozenset({"auto", "none"}),
-                ),
-                "automatic_tool_choice_mode": "implicit",
+                    input_modalities=frozenset({"video"}),
+                )
             },
             ValueError,
-            "requires tool_choice_types",
+            "input modality",
         ),
-        ({"assistant_tool_call_content_mode": "other"}, ValueError, "content_mode"),
-        ({"reasoning_content_mode": "other"}, ValueError, "reasoning_content_mode"),
-        ({"max_tokens_field": "other"}, ValueError, "max_tokens_field"),
-        ({"system_content_mode": "other"}, ValueError, "system_content_mode"),
-        ({"stream_usage_mode": "other"}, ValueError, "stream_usage_mode"),
-        ({"json_schema_name": ""}, ValueError, "json_schema_name"),
-        ({"extra_request_body": 1}, TypeError, "must be a mapping"),
-        ({"extra_request_body": {"": 1}}, ValueError, "keys must be non-empty"),
-        ({"finish_reason_map": 1}, TypeError, "must be a mapping"),
-        ({"finish_reason_map": {"": "x"}}, ValueError, "keys"),
-        ({"finish_reason_map": {"x": ""}}, ValueError, "values"),
     )
     for keywords, error, pattern in invalid:
         with pytest.raises(error, match=pattern):
             OpenAIChatProfile(**cast(Any, keywords))
 
-    for finish_reason_map, message in (
-        ({"": "stop"}, "finish_reason_map keys must be non-empty strings"),
-        ({"stop": ""}, "finish_reason_map values must be non-empty strings"),
-    ):
-        with pytest.raises(ValueError) as caught:
-            OpenAIChatProfile(finish_reason_map=finish_reason_map)
-        assert str(caught.value) == message
-
 
 def test_anthropic_messages_profile_validates_every_configuration_family() -> None:
-    profile = AnthropicMessagesProfile(finish_reason_map={"end_turn": "stop"})
-    assert profile.finish_reason(None) is None
-    assert profile.finish_reason("end_turn") == "stop"
-    assert profile.finish_reason("max_tokens") == "max_tokens"
-
     invalid: tuple[tuple[dict[str, Any], type[Exception], str], ...] = (
         ({"name": ""}, ValueError, "profile name"),
         ({"anthropic_version": ""}, ValueError, "anthropic_version"),
         ({"capabilities": 1}, TypeError, "must be ModelCapabilities"),
-        ({"auth_scheme": "other"}, ValueError, "auth_scheme"),
-        ({"automatic_tool_choice_mode": "other"}, ValueError, "automatic_tool_choice_mode"),
-        ({"redacted_thinking_mode": "other"}, ValueError, "redacted_thinking_mode"),
-        ({"stream_usage_mode": "other"}, ValueError, "stream_usage_mode"),
-        ({"system_content_mode": "other"}, ValueError, "system_content_mode"),
-        ({"mid_conversation_system_mode": "other"}, ValueError, "mid_conversation"),
-        ({"default_max_tokens": True}, TypeError, "must be an integer"),
-        ({"default_max_tokens": 0}, ValueError, "must be >= 1"),
-        ({"seed_field": ""}, ValueError, "seed_field"),
         (
             {
-                "capabilities": replace(AnthropicMessagesProfile().capabilities, seed=True),
+                "capabilities": replace(
+                    AnthropicMessagesProfile().capabilities,
+                    seed=True,
+                )
             },
             ValueError,
-            "capabilities.seed",
+            "does not support seed",
         ),
-        ({"file_ref_beta_header": ""}, ValueError, "file_ref_beta_header"),
+        ({"default_max_tokens": True}, TypeError, "must be an integer"),
+        ({"default_max_tokens": 0}, ValueError, "must be >= 1"),
         ({"json_object_schema": 1}, TypeError, "must be a mapping"),
-        ({"extra_output_config": {"": 1}}, ValueError, "keys must be non-empty"),
-        ({"extra_headers": 1}, TypeError, "must be a mapping"),
-        ({"extra_headers": {"": "x"}}, ValueError, "keys"),
-        ({"extra_headers": {"x": ""}}, ValueError, "values"),
-        ({"finish_reason_map": 1}, TypeError, "must be a mapping"),
-        ({"finish_reason_map": {"": "x"}}, ValueError, "keys"),
-        ({"finish_reason_map": {"x": ""}}, ValueError, "values"),
     )
     for keywords, error, pattern in invalid:
         with pytest.raises(error, match=pattern):
             AnthropicMessagesProfile(**cast(Any, keywords))
-
-
-def test_deepseek_profiles_validate_thinking_and_effort_combinations() -> None:
-    plain = deepseek_chat_profile()
-    openai_thinking = deepseek_chat_profile(thinking=True, effort="high")
-    thinking = deepseek_messages_profile(thinking=True, effort="max")
-    assert plain.name == "deepseek-chat"
-    assert plain.extra_request_body["thinking"] == {"type": "disabled"}
-    assert plain.reasoning_content_mode == "live_only"
-    assert plain.capabilities.seed is False
-    assert plain.capabilities.runtime_tool_kinds == frozenset({RuntimeToolKind.STRUCTURED})
-    assert openai_thinking.extra_request_body == {
-        "thinking": {"type": "enabled"},
-        "reasoning_effort": "high",
-    }
-    assert openai_thinking.reasoning_content_mode == "required_with_tools"
-    assert openai_thinking.capabilities.runtime_tool_kinds == frozenset(
-        {RuntimeToolKind.STRUCTURED}
-    )
-    assert openai_thinking.capabilities.tool_choice_types == frozenset({"auto"})
-    assert openai_thinking.capabilities.parallel_runtime_tool_calls is True
-    assert openai_thinking.capabilities.parallel_runtime_tool_call_control is False
-    assert openai_thinking.assistant_tool_call_content_mode == "required"
-    assert openai_thinking.automatic_tool_choice_mode == "implicit"
-    assert thinking.name == "deepseek-messages-thinking"
-    assert thinking.extra_request_body == {"thinking": {"type": "enabled"}}
-    assert thinking.extra_output_config == {"effort": "max"}
-    assert thinking.redacted_thinking_mode == "reject"
-    with pytest.raises(ValueError, match="thinking must be a bool"):
-        deepseek_chat_profile(thinking=cast(Any, 1))
-    with pytest.raises(ValueError, match="effort must be one of"):
-        deepseek_chat_profile(thinking=True, effort=cast(Any, "low"))
-    for factory in (deepseek_chat_profile, deepseek_messages_profile):
-        with pytest.raises(ValueError, match="only valid"):
-            factory(thinking=False, effort="high")
-
-
-@pytest.mark.parametrize("effort", ["minimal", "medium"])
-def test_deepseek_responses_rejects_unsupported_effort(effort: str) -> None:
-    with pytest.raises(ValueError, match="effort must be one of"):
-        deepseek_responses_profile(effort=cast(Any, effort))
 
 
 def test_profiles_expose_only_the_new_capability_contract() -> None:

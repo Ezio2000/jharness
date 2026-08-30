@@ -212,7 +212,7 @@ def test_message_content_and_outcome_round_trips() -> None:
 def test_model_tool_spec_and_result_round_trips() -> None:
     provider_call = ProviderToolCall(
         "search-1",
-        ProviderToolId("deepseek.responses", "web_search"),
+        ProviderToolId("example.provider", "web_search"),
         ProviderToolStatus.COMPLETED,
         {"query": "JHarness"},
         (ContentPart.text_part("search result"),),
@@ -234,9 +234,17 @@ def test_model_tool_spec_and_result_round_trips() -> None:
     ]
     assert decode_model_response(encoded_response) == response
 
+    empty_response = ModelResponse(
+        (), finish_reason="content_filter", metadata={"provider": "test"}
+    )
+    assert decode_model_response(encode_model_response(empty_response)) == empty_response
+    assert decode_message(encode_message(empty_response.to_assistant_message())) == (
+        empty_response.to_assistant_message()
+    )
+
     incomplete_call = ProviderToolCall(
         "search-incomplete",
-        ProviderToolId("deepseek.responses", "web_search"),
+        ProviderToolId("example.provider", "web_search"),
         ProviderToolStatus.INCOMPLETE,
     )
     assert decode_message(encode_message(Message.assistant((incomplete_call,)))) == (
@@ -272,6 +280,7 @@ def test_model_tool_spec_and_result_round_trips() -> None:
         "id": "patch-1",
         "name": "apply_patch",
         "input": "raw patch",
+        "metadata": {},
     }
     assert decode_runtime_tool_call(encoded_freeform_call) == freeform_call
 
@@ -575,6 +584,7 @@ def test_every_event_data_shape_round_trips() -> None:
                 "name": "lookup",
                 "input_kind": "structured",
                 "input_delta": "{}",
+                "metadata": {},
             },
         ),
         (
@@ -592,7 +602,7 @@ def test_every_event_data_shape_round_trips() -> None:
                 "kind": "provider_tool_call",
                 "output_index": 2,
                 "id": "search-1",
-                "tool": {"namespace": "deepseek.responses", "type": "web_search"},
+                "tool": {"namespace": "example.provider", "type": "web_search"},
                 "status": "in_progress",
                 "event": "searching",
                 "data": {"query": "JHarness"},
@@ -604,7 +614,7 @@ def test_every_event_data_shape_round_trips() -> None:
                 "kind": "provider_tool_call",
                 "output_index": 2,
                 "id": "search-1",
-                "tool": {"namespace": "deepseek.responses", "type": "web_search"},
+                "tool": {"namespace": "example.provider", "type": "web_search"},
                 "status": "incomplete",
                 "event": "response.output_item.done",
                 "data": {},
@@ -640,6 +650,7 @@ def test_every_event_data_shape_round_trips() -> None:
                     "id": call.id,
                     "name": call.name,
                     "arguments": {"q": "x"},
+                    "metadata": {},
                 },
                 "risk": {"network": "read"},
             },
@@ -672,6 +683,7 @@ def test_every_event_data_shape_round_trips() -> None:
                     "id": call.id,
                     "name": call.name,
                     "arguments": {"q": "x"},
+                    "metadata": {},
                 },
                 "parallel": False,
             },
@@ -1166,10 +1178,41 @@ def test_public_wire_decoders_cover_nested_values_and_empty_documents() -> None:
                 "id": "call-1",
                 "name": "lookup",
                 "arguments": {},
+                "metadata": {},
             }
         ).id
         == "call-1"
     )
+    raw_call = decode_runtime_tool_call(
+        {
+            "input_kind": "structured",
+            "id": "call-raw",
+            "name": "lookup",
+            "raw_input": "{malformed",
+            "metadata": {"provider": "example"},
+        }
+    )
+    assert isinstance(raw_call, StructuredToolCall)
+    assert raw_call.arguments is None
+    assert raw_call.raw_input == "{malformed"
+    assert encode_runtime_tool_call(raw_call) == {
+        "input_kind": "structured",
+        "id": "call-raw",
+        "name": "lookup",
+        "raw_input": "{malformed",
+        "metadata": {"provider": "example"},
+    }
+    with pytest.raises(ProtocolError, match="exactly one"):
+        decode_runtime_tool_call(
+            {
+                "input_kind": "structured",
+                "id": "call-invalid",
+                "name": "lookup",
+                "arguments": {},
+                "raw_input": "{}",
+                "metadata": {},
+            }
+        )
     assert decode_error_info({"code": "bad", "message": "failed"}).code == "bad"
     assert (
         decode_model_usage(

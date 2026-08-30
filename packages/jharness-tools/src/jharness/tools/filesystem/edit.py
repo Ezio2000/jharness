@@ -57,11 +57,16 @@ class EditTool:
         return self.workspace.root
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
-        file_path = cast(str, call.arguments["file_path"])
-        old_string = cast(str, call.arguments["old_string"])
-        new_string = cast(str, call.arguments["new_string"])
-        replace_all = cast(bool, call.arguments.get("replace_all", False))
-        expected_sha256 = cast(str, call.arguments["expected_sha256"])
+        arguments = call.arguments
+        if arguments is None:
+            return failure(
+                FilesystemFailure("invalid_arguments", "Edit requires JSON object arguments.")
+            )
+        file_path = cast(str, arguments["file_path"])
+        old_string = cast(str, arguments["old_string"])
+        new_string = cast(str, arguments["new_string"])
+        replace_all = cast(bool, arguments.get("replace_all", False))
+        expected_sha256 = cast(str, arguments["expected_sha256"])
         try:
             return await run_mutation(
                 lambda cancelled_check: self._edit(

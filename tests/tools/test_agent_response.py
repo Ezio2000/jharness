@@ -437,6 +437,15 @@ def test_validate_waiting_identity_and_call_defenses() -> None:
             )
     agent_response._validate_waiting_identity(waiting, agent_call, snapshot, "agent-1")
 
+    for name, pattern in (("Agent", "foreground Agent"), ("AgentWait", "AgentWait")):
+        with pytest.raises(ValueError, match=pattern):
+            agent_response._validate_waiting_identity(
+                waiting,
+                StructuredToolCall("call-1", name, None, "not-json"),
+                snapshot,
+                "agent-1",
+            )
+
     for arguments, pattern in (
         ({"agent_id": "agent-1", "extra": True}, "only agent_id"),
         ({"agent_id": "other"}, "do not match"),

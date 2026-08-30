@@ -28,7 +28,7 @@ from jharness.models.openai.chat.errors import OpenAIChatError
 from jharness.models.openai.chat.profile import OpenAIChatProfile
 from jharness.models.openai.chat.stream import OpenAIChatStreamDecoder
 
-_REQUEST_ID_HEADERS = ("x-request-id", "x-ds-request-id")
+_REQUEST_ID_HEADERS = ("x-request-id",)
 
 
 class _OpenAIChatModelOptions(TypedDict, total=False):

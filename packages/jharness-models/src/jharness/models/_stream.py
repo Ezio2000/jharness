@@ -37,6 +37,7 @@ class _ToolCallBuffer:
     id: str | None = None
     name: str | None = None
     input_chunks: list[str] = field(default_factory=list[str])
+    metadata: dict[str, Any] = field(default_factory=dict[str, Any])
 
 
 class DeltaAccumulator:
@@ -121,6 +122,11 @@ class DeltaAccumulator:
         if current.input_kind is not delta.input_kind:
             self._raise("tool call delta input_kind changed for one index")
         current.input_chunks.append(delta.input_delta)
+        for key, value in delta.metadata.items():
+            existing = current.metadata.get(key)
+            if key in current.metadata and existing != value:
+                self._raise(f"tool call delta metadata {key!r} changed for one index")
+            current.metadata[key] = value
 
     def _reject_output_kind_conflict(
         self,
@@ -136,17 +142,30 @@ class DeltaAccumulator:
             self._raise("streamed tool call requires id and name")
         raw_input = "".join(buffer.input_chunks)
         if buffer.input_kind is RuntimeToolKind.FREEFORM:
-            return FreeformToolCall(buffer.id, buffer.name, raw_input)
+            return FreeformToolCall(buffer.id, buffer.name, raw_input, metadata=buffer.metadata)
         try:
-            arguments: object = json.loads(raw_input or "{}")
-        except json.JSONDecodeError as exc:
-            self._raise("streamed tool arguments must be valid JSON", cause=exc)
+            arguments: object = json.loads(raw_input)
+        except json.JSONDecodeError:
+            return StructuredToolCall(
+                buffer.id,
+                buffer.name,
+                arguments=None,
+                raw_input=raw_input,
+                metadata=buffer.metadata,
+            )
         if not isinstance(arguments, Mapping):
-            self._raise("streamed tool arguments must be a JSON object")
+            return StructuredToolCall(
+                buffer.id,
+                buffer.name,
+                arguments=None,
+                raw_input=raw_input,
+                metadata=buffer.metadata,
+            )
         return StructuredToolCall(
             buffer.id,
             buffer.name,
             cast(Mapping[str, Any], arguments),
+            metadata=buffer.metadata,
         )
 
     def _consistent_value(

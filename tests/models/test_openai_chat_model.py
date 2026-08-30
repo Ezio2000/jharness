@@ -8,7 +8,10 @@ import httpx
 import pytest
 
 from jharness.kernel import (
+    ArtifactRef,
     ContentPart,
+    FreeformToolCall,
+    FreeformToolSpec,
     Message,
     Model,
     ModelContentDelta,
@@ -18,11 +21,11 @@ from jharness.kernel import (
     ModelRequest,
     ResponseFormat,
     RunContext,
+    RuntimeToolKind,
     StructuredToolCall,
     StructuredToolSpec,
     ToolChoice,
 )
-from jharness.models.deepseek import deepseek_chat_profile
 from jharness.models.openai import (
     OpenAIChatCodec,
     OpenAIChatError,
@@ -84,6 +87,7 @@ def test_openai_chat_codec_encodes_direct_tool_identity_and_decodes_response() -
             "id": "resp-1",
             "model": "gpt-test",
             "object": "chat.completion",
+            "created": 1,
             "choices": [
                 {
                     "index": 0,
@@ -113,31 +117,14 @@ def test_openai_chat_codec_encodes_direct_tool_identity_and_decodes_response() -
     assert response.metadata["provider"] == "openai-chat"
 
 
-def test_openai_chat_codec_thaws_nested_profile_json_at_wire_boundary() -> None:
-    deepseek_profile = deepseek_chat_profile(thinking=True)
-    codec = OpenAIChatCodec(
-        model="deepseek-v4-pro",
-        profile=deepseek_profile,
-    )
-    model_request = ModelRequest(messages=(Message.user("hello"),))
-
-    payload = codec.encode_request(model_request)
-    assert json.loads(json.dumps(payload))["thinking"] == {"type": "enabled"}
-
-    thinking = cast(dict[str, Any], payload["thinking"])
-    thinking["type"] = "disabled"
-    assert codec.encode_request(model_request)["thinking"] == {"type": "enabled"}
-    assert deepseek_profile.extra_request_body["thinking"] == {"type": "enabled"}
-    with pytest.raises(TypeError, match="extra_request_body is immutable"):
-        cast(dict[str, Any], deepseek_profile.extra_request_body["thinking"])["type"] = "disabled"
-
-
 def test_openai_chat_stream_decoder_builds_complete_response() -> None:
     decoder = OpenAIChatStreamDecoder(profile())
     first = decoder.apply_chunk(
         {
             "id": "resp-1",
             "model": "gpt-test",
+            "object": "chat.completion.chunk",
+            "created": 1,
             "choices": [
                 {
                     "index": 0,
@@ -151,6 +138,8 @@ def test_openai_chat_stream_decoder_builds_complete_response() -> None:
         {
             "id": "resp-1",
             "model": "gpt-test",
+            "object": "chat.completion.chunk",
+            "created": 1,
             "choices": [{"index": 0, "delta": {"content": "lo"}, "finish_reason": "stop"}],
         }
     )
@@ -167,6 +156,10 @@ def test_openai_chat_stream_decoder_accumulates_tool_call_arguments() -> None:
     decoder = OpenAIChatStreamDecoder(profile())
     decoder.apply_chunk(
         {
+            "id": "resp-1",
+            "model": "gpt-test",
+            "object": "chat.completion.chunk",
+            "created": 1,
             "choices": [
                 {
                     "index": 0,
@@ -182,18 +175,22 @@ def test_openai_chat_stream_decoder_accumulates_tool_call_arguments() -> None:
                     },
                     "finish_reason": None,
                 }
-            ]
+            ],
         }
     )
     decoder.apply_chunk(
         {
+            "id": "resp-1",
+            "model": "gpt-test",
+            "object": "chat.completion.chunk",
+            "created": 1,
             "choices": [
                 {
                     "index": 0,
                     "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"x"}'}}]},
                     "finish_reason": "tool_calls",
                 }
-            ]
+            ],
         }
     )
 
@@ -213,6 +210,8 @@ async def test_openai_chat_client_uses_http_transport_and_maps_http_errors() -> 
             json={
                 "id": "resp-1",
                 "model": "gpt-test",
+                "object": "chat.completion",
+                "created": 1,
                 "choices": [
                     {
                         "index": 0,
@@ -261,169 +260,301 @@ async def test_openai_chat_client_uses_http_transport_and_maps_http_errors() -> 
     assert caught.value.info.request_id == "req-1"
 
 
-def test_openai_chat_codec_rejects_invalid_choice_shape() -> None:
-    codec = OpenAIChatCodec(model="gpt-test")
-    with pytest.raises(OpenAIChatError, match="exactly one choice"):
-        codec.decode_response({"choices": []})
+async def test_openai_chat_client_sends_nested_file_reference() -> None:
+    captured: dict[str, object] = {}
 
-
-def test_openai_chat_reasoning_content_round_trips_through_history() -> None:
-    profile = OpenAIChatProfile(reasoning_content_mode="round_trip")
-    codec = OpenAIChatCodec(model="gpt-test", profile=profile)
-    response = codec.decode_response(
-        {
-            "choices": [
-                {
-                    "index": 0,
-                    "finish_reason": "stop",
-                    "message": {
-                        "role": "assistant",
-                        "reasoning_content": "think",
-                        "content": "answer",
-                    },
-                }
-            ]
-        }
-    )
-
-    assert [(part.type, part.text) for part in response.visible_parts()] == [
-        ("reasoning", "think"),
-        ("text", "answer"),
-    ]
-    encoded = codec.encode_request(
-        ModelRequest(
-            messages=(
-                Message.user("question"),
-                Message.assistant(
-                    (
-                        ContentPart(type="reasoning", text="one"),
-                        ContentPart.text_part("answer"),
-                        ContentPart(type="reasoning", text="two"),
-                    )
-                ),
-            )
-        )
-    )
-    assert encoded["messages"][1] == {
-        "role": "assistant",
-        "content": "answer",
-        "reasoning_content": "onetwo",
-    }
-
-
-def test_openai_chat_reasoning_content_modes_enforce_tool_round_trip() -> None:
-    call = StructuredToolCall("call-1", "search", {})
-    required = OpenAIChatCodec(
-        model="gpt-test",
-        profile=OpenAIChatProfile(reasoning_content_mode="required_with_tools"),
-    )
-    with pytest.raises(OpenAIChatError, match="requires non-empty reasoning"):
-        required.decode_response(
-            {
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": "tool_calls",
-                        "message": {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": "call-1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "search",
-                                        "arguments": "{}",
-                                    },
-                                }
-                            ],
-                        },
-                    }
-                ]
-            }
-        )
-    with pytest.raises(OpenAIChatError, match="requires non-empty reasoning"):
-        required.encode_request(
-            ModelRequest(
-                messages=(
-                    Message.user("question"),
-                    Message.assistant((call,)),
-                )
-            )
-        )
-
-    payload = required.encode_request(
-        ModelRequest(
-            messages=(
-                Message.user("question"),
-                Message.assistant(
-                    (ContentPart(type="reasoning", text="why"), call),
-                ),
-            )
-        )
-    )
-    assert payload["messages"][1]["reasoning_content"] == "why"
-    with pytest.raises(OpenAIChatError, match="reasoning content"):
-        OpenAIChatCodec(model="gpt-test").encode_request(
-            ModelRequest(
-                messages=(
-                    Message.user("question"),
-                    Message.assistant((ContentPart(type="reasoning", text="why"),)),
-                )
-            )
-        )
-
-
-def test_deepseek_chat_thinking_tool_replay_omits_tool_choice_and_keeps_content_non_null() -> None:
-    codec = OpenAIChatCodec(
-        model="deepseek-v4-pro",
-        profile=deepseek_chat_profile(thinking=True),
-    )
-    call = StructuredToolCall("call-1", "search", {})
-    payload = codec.encode_request(
-        ModelRequest(
-            messages=(
-                Message.user("question"),
-                Message.assistant(
-                    (ContentPart(type="reasoning", text="why"), call),
-                ),
-            ),
-            runtime_tools=(StructuredToolSpec("search", "search", {"type": "object"}),),
-        )
-    )
-
-    assert "tool_choice" not in payload
-    assert payload["messages"][1]["content"] == ""
-    assert payload["messages"][1]["reasoning_content"] == "why"
-
-
-def test_openai_chat_reasoning_content_and_seed_validate_wire_values() -> None:
-    round_trip = OpenAIChatCodec(
-        model="gpt-test",
-        profile=OpenAIChatProfile(reasoning_content_mode="round_trip"),
-    )
-    with pytest.raises(OpenAIChatError, match="reasoning_content must be"):
-        round_trip.decode_response(
-            {
+    async def handler(raw: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(raw.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp-1",
+                "model": "vision-test",
+                "object": "chat.completion",
+                "created": 1,
                 "choices": [
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {
-                            "role": "assistant",
-                            "reasoning_content": 1,
-                            "content": "answer",
-                        },
+                        "message": {"role": "assistant", "content": "done"},
                     }
-                ]
+                ],
+            },
+            request=raw,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = OpenAIChatModel(
+            base_url="https://provider.test/v1",
+            api_key="secret",
+            model="vision-test",
+            profile=OpenAIChatProfile(
+                capabilities=replace(
+                    OpenAIChatProfile().capabilities,
+                    input_modalities=frozenset({"text", "image", "file"}),
+                )
+            ),
+            client=client,
+        )
+        await model.invoke(
+            ModelRequest(
+                messages=(
+                    Message(
+                        "user",
+                        (
+                            ContentPart.artifact_part(
+                                ArtifactRef("image-file", media_type="IMAGE/PNG")
+                            ),
+                        ),
+                    ),
+                )
+            ),
+            RunContext("run-1", 1.0),
+            stream=False,
+            emit_delta=None,
+        )
+
+    body = cast(dict[str, Any], captured["body"])
+    assert body["messages"] == [
+        {
+            "role": "user",
+            "content": [{"type": "file", "file": {"file_id": "image-file"}}],
+        }
+    ]
+
+
+def test_openai_chat_codec_rejects_invalid_choice_shape() -> None:
+    codec = OpenAIChatCodec(model="gpt-test")
+    with pytest.raises(OpenAIChatError, match="exactly one choice"):
+        codec.decode_response(
+            {
+                "id": "resp",
+                "model": "model",
+                "object": "chat.completion",
+                "created": 1,
+                "choices": [],
             }
         )
 
+
+def test_openai_chat_rejects_boolean_json_schema() -> None:
+    codec = OpenAIChatCodec(model="gpt-test", profile=profile())
+    with pytest.raises(OpenAIChatError, match="response schema must be an object"):
+        codec.encode_request(
+            ModelRequest(
+                messages=(Message.user("hello"),),
+                response_format=ResponseFormat("json_schema", True, True),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("options", "pattern"),
+    (
+        (ModelOptions(temperature=-0.1), "temperature"),
+        (ModelOptions(temperature=2.1), "temperature"),
+        (ModelOptions(top_p=-0.1), "top_p"),
+        (ModelOptions(top_p=1.1), "top_p"),
+        (ModelOptions(stop=("a", "b", "c", "d", "e")), "at most 4"),
+    ),
+)
+def test_openai_chat_rejects_out_of_range_request_options(
+    options: ModelOptions,
+    pattern: str,
+) -> None:
+    with pytest.raises(OpenAIChatError, match=pattern):
+        OpenAIChatCodec(model="gpt-test").encode_request(
+            ModelRequest(messages=(Message.user("hello"),), options=options)
+        )
+
+
+def test_openai_chat_rejects_nonstandard_reasoning_content() -> None:
+    codec = OpenAIChatCodec(model="gpt-test")
+    with pytest.raises(OpenAIChatError, match="do not support reasoning_content"):
+        codec.decode_response(
+            {
+                "id": "resp",
+                "model": "model",
+                "object": "chat.completion",
+                "created": 1,
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "reasoning_content": "x", "content": "a"},
+                    }
+                ],
+            }
+        )
+    with pytest.raises(OpenAIChatError, match="does not support assistant reasoning"):
+        codec.encode_request(
+            ModelRequest(messages=(Message.assistant((ContentPart(type="reasoning", text="x"),)),))
+        )
+
+
+def test_openai_chat_encodes_max_completion_tokens_and_standard_file_data() -> None:
+    codec = OpenAIChatCodec(
+        model="gpt-test",
+        profile=OpenAIChatProfile(
+            capabilities=replace(
+                OpenAIChatProfile().capabilities,
+                input_modalities=frozenset({"text", "image", "file"}),
+            )
+        ),
+    )
+    payload = codec.encode_request(
+        ModelRequest(
+            messages=(
+                Message(
+                    "user",
+                    (
+                        ContentPart(
+                            type="file", uri="data:text/plain;base64,aGVsbG8=", name="a.txt"
+                        ),
+                    ),
+                ),
+            ),
+            options=ModelOptions(max_output_tokens=7),
+        )
+    )
+    assert payload["max_completion_tokens"] == 7
+    assert "max_tokens" not in payload
+    assert payload["messages"][0]["content"] == [
+        {"type": "file", "file": {"file_data": "aGVsbG8=", "filename": "a.txt"}}
+    ]
+    with pytest.raises(OpenAIChatError, match="base64 data, not a URL"):
+        codec.encode_request(
+            ModelRequest(messages=(Message("user", (ContentPart(type="file", uri="https://x"),)),))
+        )
+
+
+def test_openai_chat_encodes_audio_and_custom_tools_with_history() -> None:
+    codec = OpenAIChatCodec(
+        model="gpt-test",
+        profile=OpenAIChatProfile(
+            capabilities=replace(
+                OpenAIChatProfile().capabilities,
+                runtime_tool_kinds=frozenset(
+                    {RuntimeToolKind.STRUCTURED, RuntimeToolKind.FREEFORM}
+                ),
+                input_modalities=frozenset({"text", "image", "audio"}),
+            )
+        ),
+    )
+    custom = FreeformToolSpec("patch", "apply a patch")
+    call = FreeformToolCall("call-1", "patch", "*** Begin Patch")
+    payload = codec.encode_request(
+        ModelRequest(
+            messages=(
+                Message(
+                    "user",
+                    (ContentPart(type="audio", uri="data:audio/wav;base64,aGk="),),
+                ),
+                Message.assistant((call,)),
+            ),
+            runtime_tools=(custom,),
+            tool_choice=ToolChoice(type="runtime", name="patch"),
+        )
+    )
+    assert payload["messages"][0]["content"] == [
+        {"type": "input_audio", "input_audio": {"data": "aGk=", "format": "wav"}}
+    ]
+    assert payload["tools"] == [
+        {"type": "custom", "custom": {"name": "patch", "description": "apply a patch"}}
+    ]
+    assert payload["tool_choice"] == {"type": "custom", "custom": {"name": "patch"}}
+    assert payload["messages"][1] == {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "custom",
+                "custom": {"name": "patch", "input": "*** Begin Patch"},
+            }
+        ],
+    }
+
+    decoded = codec.decode_response(
+        {
+            "id": "resp",
+            "model": "model",
+            "object": "chat.completion",
+            "created": 1,
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call-2",
+                                "type": "custom",
+                                "custom": {"name": "patch", "input": "*** End Patch"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+    assert decoded.runtime_tool_calls() == (FreeformToolCall("call-2", "patch", "*** End Patch"),)
+
+
+def test_openai_chat_stream_rejects_custom_tool_calls_and_decoder_custom_deltas() -> None:
+    profile = OpenAIChatProfile(
+        capabilities=replace(
+            OpenAIChatProfile().capabilities,
+            runtime_tool_kinds=frozenset({RuntimeToolKind.STRUCTURED, RuntimeToolKind.FREEFORM}),
+        )
+    )
+    codec = OpenAIChatCodec(model="gpt-test", profile=profile)
+    custom = FreeformToolSpec("patch", "apply a patch")
+    with pytest.raises(OpenAIChatError, match="streaming does not support custom"):
+        codec.encode_request(
+            ModelRequest(
+                messages=(Message.user("hello"),),
+                runtime_tools=(custom,),
+                tool_choice=ToolChoice(type="runtime", name="patch"),
+            ),
+            stream=True,
+        )
+    payload = codec.encode_request(
+        ModelRequest(
+            messages=(Message.user("hello"),),
+            runtime_tools=(custom,),
+            tool_choice=ToolChoice(type="none"),
+        ),
+        stream=True,
+    )
+    assert payload["stream"] is True
+    with pytest.raises(
+        OpenAIChatError, match="unsupported chat completion stream tool call type: custom"
+    ):
+        OpenAIChatStreamDecoder(profile).apply_chunk(
+            {
+                "id": "resp",
+                "model": "model",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"tool_calls": [{"index": 0, "type": "custom"}]},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+        )
+
+
+def test_openai_chat_seed_validate_wire_values() -> None:
+    codec = OpenAIChatCodec(model="gpt-test")
     seeded_request = ModelRequest(
         messages=(Message.user("question"),),
         options=ModelOptions(seed=7),
     )
-    assert round_trip.encode_request(seeded_request)["seed"] == 7
+    assert codec.encode_request(seeded_request)["seed"] == 7
     no_seed = OpenAIChatCodec(
         model="gpt-test",
         profile=OpenAIChatProfile(
@@ -437,12 +568,16 @@ def test_openai_chat_reasoning_content_and_seed_validate_wire_values() -> None:
         no_seed.encode_request(seeded_request)
 
 
-def test_openai_chat_usage_supports_deepseek_cache_fields_with_nested_precedence() -> None:
+def test_openai_chat_usage_reads_standard_cached_tokens() -> None:
     codec = OpenAIChatCodec(model="gpt-test")
 
     def decode_cache(usage: dict[str, object]) -> int | None:
         response = codec.decode_response(
             {
+                "id": "resp",
+                "model": "model",
+                "object": "chat.completion",
+                "created": 1,
                 "choices": [
                     {
                         "index": 0,
@@ -456,21 +591,126 @@ def test_openai_chat_usage_supports_deepseek_cache_fields_with_nested_precedence
         assert response.usage is not None
         return response.usage.cache_read_tokens
 
-    assert decode_cache({"prompt_cache_hit_tokens": 11}) == 11
     assert (
         decode_cache(
             {
-                "prompt_cache_hit_tokens": 11,
-                "prompt_tokens_details": {"cached_tokens": 7},
+                "prompt_tokens": 1,
+                "completion_tokens": 2,
+                "total_tokens": 3,
+                "prompt_tokens_details": {
+                    "audio_tokens": 0,
+                    "cache_write_tokens": 1,
+                    "cached_tokens": 7,
+                    "image_tokens": 0,
+                    "text_tokens": 1,
+                },
+                "completion_tokens_details": {
+                    "accepted_prediction_tokens": 0,
+                    "audio_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "rejected_prediction_tokens": 0,
+                    "text_tokens": 2,
+                },
             }
         )
         == 7
     )
 
 
+def test_openai_chat_content_filter_preserves_null_history_content() -> None:
+    codec = OpenAIChatCodec(model="gpt-test")
+    response = codec.decode_response(
+        {
+            "id": "resp",
+            "model": "model",
+            "object": "chat.completion",
+            "created": 1,
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "content_filter",
+                    "message": {"role": "assistant", "content": None},
+                }
+            ],
+            "service_tier": "fast",
+            "system_fingerprint": "fp_123",
+        }
+    )
+
+    assert response.output == ()
+    assert response.metadata["service_tier"] == "fast"
+    assert response.metadata["openai_chat"] == {"content_null": True}
+    payload = codec.encode_request(ModelRequest(messages=(response.to_assistant_message(),)))
+    assert payload["messages"] == [{"role": "assistant", "content": None}]
+
+    stopped = codec.decode_response(
+        {
+            "id": "resp-empty",
+            "model": "model",
+            "object": "chat.completion",
+            "created": 1,
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": None},
+                }
+            ],
+        }
+    )
+    assert stopped.output == ()
+
+
+def test_openai_chat_rejects_unsupported_response_observability_and_invalid_usage() -> None:
+    codec = OpenAIChatCodec(model="gpt-test")
+    response: dict[str, Any] = {
+        "id": "resp",
+        "model": "model",
+        "object": "chat.completion",
+        "created": 1,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "ok"},
+                "logprobs": {"content": []},
+            }
+        ],
+    }
+    with pytest.raises(OpenAIChatError, match="logprobs is not supported"):
+        codec.decode_response(response)
+
+    response["choices"] = [
+        {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}
+    ]
+    response["usage"] = {"prompt_tokens": 1, "completion_tokens": 1}
+    with pytest.raises(OpenAIChatError, match="total_tokens"):
+        codec.decode_response(response)
+
+
+def test_openai_chat_stream_rejects_null_choices_even_with_usage() -> None:
+    decoder = OpenAIChatStreamDecoder(profile())
+    with pytest.raises(OpenAIChatError, match="choices must be an array"):
+        decoder.apply_chunk(
+            {
+                "id": "resp",
+                "model": "model",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "choices": None,
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            }
+        )
+
+
 async def test_openai_chat_client_decodes_sse_stream() -> None:
     body = (
-        'data: {"id":"resp-1","model":"gpt-test","choices":['
+        'data: {"id":"resp-1","model":"gpt-test",'
+        '"object":"chat.completion.chunk","created":1,"choices":['
         '{"index":0,"delta":{"role":"assistant","content":"hello"},'
         '"finish_reason":"stop"}]}\n\n'
         "data: [DONE]\n\n"

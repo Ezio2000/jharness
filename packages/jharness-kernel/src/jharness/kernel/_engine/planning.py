@@ -54,8 +54,6 @@ from jharness.kernel.state import (
 )
 from jharness.kernel.tools import ToolCatalog
 
-_TEXT_LIKE = frozenset({"text", "reasoning", "thinking", "redacted_thinking", "refusal"})
-
 
 class Emit(Protocol):
     def __call__(self, kind: EventKind, data: Mapping[str, Any]) -> Awaitable[None]: ...
@@ -259,6 +257,7 @@ def delta_data(delta: ModelDelta) -> Mapping[str, Any]:
             "name": delta.name,
             "input_kind": delta.input_kind.value,
             "input_delta": delta.input_delta,
+            "metadata": delta.metadata,
         }
     if isinstance(delta, ModelReasoningDelta):
         return {
@@ -298,10 +297,10 @@ def _validate_request(request: ModelRequest, capabilities: ModelCapabilities) ->
     # Provider-tool output is governed by the requested ProviderToolId, not by
     # the model's direct output modalities.
     unsupported_modalities = {
-        _part_modality(part)
+        part.modality
         for message in request.messages
         for part in _message_input_parts(message)
-        if _part_modality(part) not in capabilities.input_modalities
+        if part.modality not in capabilities.input_modalities
     }
     if unsupported_modalities:
         raise ValueError(
@@ -341,8 +340,6 @@ def _validate_response(
     provider_calls = response.provider_tool_calls()
     _validate_response_tools(calls, provider_calls, request, capabilities)
     _validate_response_modalities(response, capabilities)
-    if not calls and not provider_calls and not response.visible_parts():
-        raise ValueError("terminal model response requires visible output")
 
 
 def _validate_response_tools(
@@ -399,10 +396,9 @@ def _validate_response_modalities(
     capabilities: ModelCapabilities,
 ) -> None:
     unsupported_modalities = {
-        _part_modality(item)
+        item.modality
         for item in response.output
-        if isinstance(item, ContentPart)
-        and _part_modality(item) not in capabilities.output_modalities
+        if isinstance(item, ContentPart) and item.modality not in capabilities.output_modalities
     }
     if unsupported_modalities:
         raise ValueError(
@@ -417,20 +413,3 @@ def _message_input_parts(message: Message) -> tuple[ContentPart, ...]:
     if message.role == "tool" and message.outcome is not None:
         return message.outcome.parts
     return message.parts
-
-
-def _part_modality(part: ContentPart) -> str:
-    if part.type in _TEXT_LIKE:
-        return "text"
-    if part.type in {"image", "input_image", "output_image"}:
-        return "image"
-    if part.type in {"audio", "input_audio", "output_audio"}:
-        return "audio"
-    if part.type in {"video", "input_video", "output_video"}:
-        return "video"
-    media_type = part.media_type or (None if part.artifact is None else part.artifact.media_type)
-    if media_type is not None:
-        family = media_type.partition("/")[0]
-        if family in {"image", "audio", "video"}:
-            return family
-    return "file"

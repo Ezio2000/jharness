@@ -39,7 +39,10 @@ class EchoTool:
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         del context
-        text = str(call.arguments["text"])
+        arguments = call.arguments
+        if arguments is None:
+            raise ValueError("echo requires JSON object arguments")
+        text = str(arguments["text"])
         return SettledResult(ToolSuccess((ContentPart.text_part(text),), {"text": text}))
 
 

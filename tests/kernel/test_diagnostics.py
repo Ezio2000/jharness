@@ -179,7 +179,7 @@ def _provider_only_completed_events() -> tuple[Event, ...]:
         RunSnapshot(0, context, RunHistory((user,)), RunMetrics(), Planning()),
         StartedFact(1, ("user",)),
     )
-    provider_tool = ProviderToolId("deepseek.responses", "web_search")
+    provider_tool = ProviderToolId("example.provider", "web_search")
     provider_calls = (
         ProviderToolCall(
             "provider-search-1",

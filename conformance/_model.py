@@ -143,6 +143,7 @@ def _delta(value: Mapping[str, Any]) -> ModelDelta:
             input_delta=string(value["input_delta"], "tool call input delta"),
             id=_optional_string(value["id"], "tool call delta id"),
             name=_optional_string(value["name"], "tool call delta name"),
+            metadata=mapping(value["metadata"], "tool call delta metadata"),
         )
     if kind == "reasoning":
         return ModelReasoningDelta(

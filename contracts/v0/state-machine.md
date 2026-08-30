@@ -42,7 +42,8 @@ increments snapshot revision exactly once. Fact kinds are `started`, `resumed`,
 `control`.
 
 A model turn is durable only after `Model.invoke` returns a complete response.
-The complete non-empty ordered output is persisted as one assistant message.
+The complete ordered output is persisted as one assistant message, including an
+empty output when the provider returned no assistant item.
 Provider-executed tool calls stay in that output; only runtime tool calls become
 pending work. A serial runtime tool call is a tool batch of one. A parallel
 batch is durable only after every selected runtime call has a normalized

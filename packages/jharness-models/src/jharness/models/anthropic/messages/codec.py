@@ -24,19 +24,18 @@ from jharness.models.anthropic.messages.tools import (
 JsonValue = Any
 JsonObject = dict[str, JsonValue]
 
-_RESERVED_REQUEST_FIELDS = {
-    "model",
-    "max_tokens",
-    "messages",
-    "system",
-    "temperature",
-    "top_p",
-    "stop_sequences",
-    "stream",
-    "tools",
-    "tool_choice",
-    "output_config",
-}
+_STOP_REASONS = frozenset(
+    {
+        "end_turn",
+        "max_tokens",
+        "stop_sequence",
+        "tool_use",
+        "pause_turn",
+        "refusal",
+        "model_context_window_exceeded",
+    }
+)
+
 _MAPPING_SUBSCHEMA_KEYWORDS = (
     "$defs",
     "definitions",
@@ -74,38 +73,38 @@ class AnthropicMessagesCodec:
         system, messages = encode_messages(request.messages, self.profile)
         payload: JsonObject = {
             "model": request.options.model or self.model,
-            "max_tokens": request.options.max_output_tokens or self.profile.default_max_tokens,
+            "max_tokens": (
+                self.profile.default_max_tokens
+                if request.options.max_output_tokens is None
+                else request.options.max_output_tokens
+            ),
             "messages": messages,
         }
         if system is not None:
             payload["system"] = system
+        container_id = _continuation_container_id(request)
+        if container_id is not None:
+            payload["container"] = {"id": container_id}
         self._add_generation_options(payload, request)
         self._add_tool_options(payload, request)
         self._add_output_options(payload, request)
         self._add_stream_option(payload, stream=stream)
-        self._add_extra_request_body(payload)
         return payload
 
     def _add_generation_options(self, payload: JsonObject, request: ModelRequest) -> None:
-        if request.options.temperature is not None:
-            payload["temperature"] = request.options.temperature
-        if request.options.top_p is not None:
-            payload["top_p"] = request.options.top_p
+        for field, value in (
+            ("temperature", request.options.temperature),
+            ("top_p", request.options.top_p),
+        ):
+            if value is None:
+                continue
+            if not 0 <= value <= 1:
+                raise AnthropicMessagesError(f"Anthropic Messages {field} must be between 0 and 1")
+            payload[field] = value
         if request.options.stop:
             payload["stop_sequences"] = list(request.options.stop)
-        self._add_seed(payload, request.options.seed)
-
-    def _add_seed(self, payload: JsonObject, seed: int | None) -> None:
-        if seed is None:
-            return
-        seed_field = self.profile.seed_field
-        if not self.profile.capabilities.seed or not seed_field:
+        if request.options.seed is not None:
             raise AnthropicMessagesError(f"{self.profile.name} does not support seed")
-        if seed_field in _RESERVED_REQUEST_FIELDS or seed_field in payload:
-            raise AnthropicMessagesError(
-                f"seed_field conflicts with reserved request field: {seed_field}"
-            )
-        payload[seed_field] = seed
 
     def _add_tool_options(
         self,
@@ -143,24 +142,13 @@ class AnthropicMessagesCodec:
                 raise AnthropicMessagesError(f"{self.profile.name} does not support streaming")
             payload["stream"] = True
 
-    def _add_extra_request_body(self, payload: JsonObject) -> None:
-        reserved_fields = _RESERVED_REQUEST_FIELDS.union(payload)
-        if self.profile.seed_field is not None:
-            reserved_fields.add(self.profile.seed_field)
-        collision = reserved_fields.intersection(self.profile.extra_request_body)
-        if collision:
-            key = min(collision)
-            raise AnthropicMessagesError(
-                f"extra_request_body cannot set reserved request field: {key}"
-            )
-        payload.update(cast(JsonObject, thaw_json_value(self.profile.extra_request_body)))
-
     def decode_response(
         self,
         value: Mapping[str, Any],
     ) -> ModelResponse:
         if "error" in value:
             raise AnthropicMessagesError("Anthropic response must not contain an error envelope")
+        reject_unknown_message_fields(value, stream_start=False)
         response_type = value.get("type")
         if response_type != "message":
             raise AnthropicMessagesError("Anthropic response requires type='message'")
@@ -170,23 +158,26 @@ class AnthropicMessagesCodec:
         if "content" not in value or value["content"] is None:
             raise AnthropicMessagesError("Anthropic response requires content")
         output = decode_content_blocks(value["content"], self.profile)
-        if not output:
-            raise AnthropicMessagesError(
-                "Anthropic assistant response requires content or tool_use"
-            )
-        stop_reason = ANTHROPIC_MESSAGES_JSON.required_string(
-            value.get("stop_reason"), "Anthropic stop_reason"
-        )
+        stop_reason = validate_stop_reason(value.get("stop_reason"), "Anthropic stop_reason")
+        validate_stop_sequence(stop_reason, value.get("stop_sequence"))
+        if "usage" not in value:
+            raise AnthropicMessagesError("Anthropic response requires usage")
         usage = decode_usage(value.get("usage"))
         metadata: JsonObject = {"provider": self.profile.name}
         metadata["type"] = response_type
         metadata["role"] = role
+        container_id = decode_container_id(value.get("container"), "Anthropic response container")
+        if container_id is not None:
+            metadata["anthropic"] = {"container_id": container_id}
+        stop_details = decode_stop_details(value.get("stop_details"))
+        if stop_details is not None:
+            metadata["stop_details"] = stop_details
         return ModelResponse(
             output=tuple(output),
-            finish_reason=self.profile.finish_reason(stop_reason),
+            finish_reason=stop_reason,
             usage=usage,
-            model_id=ANTHROPIC_MESSAGES_JSON.optional_string(value.get("model")),
-            response_id=ANTHROPIC_MESSAGES_JSON.optional_string(value.get("id")),
+            model_id=ANTHROPIC_MESSAGES_JSON.required_string(value.get("model"), "Anthropic model"),
+            response_id=ANTHROPIC_MESSAGES_JSON.required_string(value.get("id"), "Anthropic id"),
             provider_turn_pending=(
                 stop_reason == "pause_turn"
                 or any(getattr(item, "status", None) == "in_progress" for item in output)
@@ -216,7 +207,11 @@ class AnthropicMessagesCodec:
             if response_format.schema is None:
                 raise AnthropicMessagesError("JSON schema response format requires schema")
             schema = thaw_json_value(response_format.schema)
-            if response_format.strict and isinstance(schema, Mapping):
+            if not isinstance(schema, Mapping):
+                raise AnthropicMessagesError(
+                    "Anthropic JSON schema response format requires an object"
+                )
+            if response_format.strict:
                 schema = _strict_json_schema(schema)
             return {
                 "format": {
@@ -230,24 +225,44 @@ class AnthropicMessagesCodec:
         self,
         output_config: JsonObject,
     ) -> JsonObject:
-        if not output_config and not self.profile.extra_output_config:
+        if not output_config:
             return {}
-        merged = cast(JsonObject, thaw_json_value(self.profile.extra_output_config))
-        for key, value in output_config.items():
-            if key in merged:
-                raise AnthropicMessagesError(
-                    f"extra_output_config cannot set response format field: {key}"
-                )
-            merged[key] = value
-        return {"output_config": merged}
+        return {"output_config": output_config}
 
 
-def decode_usage(value: object) -> ModelUsage | None:
-    if value is None:
-        return None
+def decode_usage(value: object, *, delta: bool = False) -> ModelUsage:
     usage = ANTHROPIC_MESSAGES_JSON.mapping(value, "Anthropic usage")
-    input_tokens = ANTHROPIC_MESSAGES_JSON.optional_integer(usage.get("input_tokens"))
-    output_tokens = ANTHROPIC_MESSAGES_JSON.optional_integer(usage.get("output_tokens"))
+    allowed = (
+        {
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "input_tokens",
+            "output_tokens",
+            "output_tokens_details",
+            "server_tool_use",
+        }
+        if delta
+        else {
+            "cache_creation",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "inference_geo",
+            "input_tokens",
+            "output_tokens",
+            "output_tokens_details",
+            "server_tool_use",
+            "service_tier",
+        }
+    )
+    unknown = set(usage).difference(allowed)
+    if unknown:
+        raise AnthropicMessagesError(f"Anthropic usage has unsupported field: {min(unknown)}")
+    input_tokens = (
+        ANTHROPIC_MESSAGES_JSON.optional_integer(usage.get("input_tokens"))
+        if delta
+        else _required_integer(usage.get("input_tokens"), "Anthropic usage input_tokens")
+    )
+    output_tokens = _required_integer(usage.get("output_tokens"), "Anthropic usage output_tokens")
     output_details = usage.get("output_tokens_details")
     reasoning_tokens = None
     if isinstance(output_details, Mapping):
@@ -262,8 +277,9 @@ def decode_usage(value: object) -> ModelUsage | None:
         usage.get("cache_creation_input_tokens")
     )
     total_tokens = None
-    if input_tokens is not None and output_tokens is not None:
+    if input_tokens is not None:
         total_tokens = input_tokens + output_tokens
+    _validate_usage_extensions(usage, delta=delta)
     return ModelUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -272,6 +288,165 @@ def decode_usage(value: object) -> ModelUsage | None:
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
     )
+
+
+def _continuation_container_id(request: ModelRequest) -> str | None:
+    if not request.messages:
+        return None
+    last = request.messages[-1]
+    if last.role != "assistant":
+        return None
+    native = last.metadata.get("anthropic")
+    if native is None:
+        return None
+    if not isinstance(native, Mapping):
+        raise AnthropicMessagesError("Anthropic continuation metadata must be an object")
+    metadata = cast(Mapping[str, object], native)
+    unknown = set(metadata).difference({"container_id"})
+    if unknown:
+        raise AnthropicMessagesError(
+            f"Anthropic continuation metadata has unsupported field: {min(unknown)}"
+        )
+    identifier = metadata.get("container_id")
+    if not isinstance(identifier, str) or not identifier:
+        raise AnthropicMessagesError(
+            "Anthropic continuation metadata container_id must be a non-empty string"
+        )
+    return identifier
+
+
+def decode_container_id(value: object, label: str) -> str | None:  # noqa: C901
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise AnthropicMessagesError(f"{label} must be an object")
+    container = cast(Mapping[str, object], value)
+    unknown = set(container).difference({"id", "expires_at", "skills"})
+    if unknown:
+        raise AnthropicMessagesError(f"{label} has unsupported field: {min(unknown)}")
+    identifier = container.get("id")
+    if not isinstance(identifier, str) or not identifier:
+        raise AnthropicMessagesError(f"{label} id must be a non-empty string")
+    if not isinstance(container.get("expires_at"), str) or not container["expires_at"]:
+        raise AnthropicMessagesError(f"{label} expires_at must be a non-empty string")
+    skills = container.get("skills")
+    if skills is not None:
+        if not isinstance(skills, Sequence) or isinstance(skills, str | bytes | bytearray):
+            raise AnthropicMessagesError(f"{label} skills must be an array")
+        for skill in cast(Sequence[object], skills):
+            mapping = ANTHROPIC_MESSAGES_JSON.mapping(skill, f"{label} skill")
+            unknown_skill = set(mapping).difference({"skill_id", "type", "version"})
+            if unknown_skill:
+                raise AnthropicMessagesError(
+                    f"{label} skill has unsupported field: {min(unknown_skill)}"
+                )
+            if mapping.get("type") not in {"anthropic", "custom"}:
+                raise AnthropicMessagesError(f"{label} skill type is invalid")
+            for field in ("skill_id", "version"):
+                ANTHROPIC_MESSAGES_JSON.required_string(
+                    mapping.get(field), f"{label} skill {field}"
+                )
+    return identifier
+
+
+def _validate_usage_extensions(  # noqa: C901
+    usage: Mapping[str, object], *, delta: bool
+) -> None:
+    details = usage.get("output_tokens_details")
+    if details is not None:
+        mapping = ANTHROPIC_MESSAGES_JSON.mapping(details, "Anthropic usage output_tokens_details")
+        if set(mapping) != {"thinking_tokens"}:
+            raise AnthropicMessagesError("Anthropic usage output_tokens_details is invalid")
+        _required_integer(mapping.get("thinking_tokens"), "Anthropic usage thinking_tokens")
+    server = usage.get("server_tool_use")
+    if server is not None:
+        mapping = ANTHROPIC_MESSAGES_JSON.mapping(server, "Anthropic usage server_tool_use")
+        if set(mapping) != {"web_search_requests"}:
+            raise AnthropicMessagesError("Anthropic usage server_tool_use is invalid")
+        _required_integer(mapping.get("web_search_requests"), "Anthropic usage web_search_requests")
+    if not delta:
+        cache_creation = usage.get("cache_creation")
+        if cache_creation is not None:
+            mapping = ANTHROPIC_MESSAGES_JSON.mapping(
+                cache_creation, "Anthropic usage cache_creation"
+            )
+            if set(mapping) != {"ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens"}:
+                raise AnthropicMessagesError("Anthropic usage cache_creation is invalid")
+            for field in ("ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens"):
+                _required_integer(mapping.get(field), f"Anthropic usage {field}")
+        tier = usage.get("service_tier")
+        if tier is not None and tier not in {"standard", "priority", "batch"}:
+            raise AnthropicMessagesError("Anthropic usage service_tier is invalid")
+        geo = usage.get("inference_geo")
+        if geo is not None and not isinstance(geo, str):
+            raise AnthropicMessagesError("Anthropic usage inference_geo must be a string")
+
+
+def _required_integer(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AnthropicMessagesError(f"{label} must be a non-negative integer")
+    return value
+
+
+def validate_stop_reason(value: object, label: str) -> str:
+    reason = ANTHROPIC_MESSAGES_JSON.required_string(value, label)
+    if reason not in _STOP_REASONS:
+        raise AnthropicMessagesError(f"{label} is invalid")
+    return reason
+
+
+def validate_stop_sequence(stop_reason: str, value: object) -> None:
+    if stop_reason == "stop_sequence":
+        if not isinstance(value, str) or not value:
+            raise AnthropicMessagesError(
+                "Anthropic stop_sequence reason requires a non-empty stop_sequence"
+            )
+        return
+    if value is not None:
+        raise AnthropicMessagesError(
+            "Anthropic stop_sequence must be null unless stop_reason is stop_sequence"
+        )
+
+
+def reject_unknown_message_fields(value: Mapping[str, object], *, stream_start: bool) -> None:
+    allowed = {
+        "id",
+        "container",
+        "content",
+        "model",
+        "role",
+        "stop_details",
+        "stop_reason",
+        "stop_sequence",
+        "type",
+        "usage",
+    }
+    unknown = set(value).difference(allowed)
+    if unknown:
+        label = "stream message" if stream_start else "response"
+        raise AnthropicMessagesError(f"Anthropic {label} has unsupported field: {min(unknown)}")
+
+
+def decode_stop_details(value: object) -> JsonObject | None:
+    if value is None:
+        return None
+    details = ANTHROPIC_MESSAGES_JSON.mapping(value, "Anthropic stop_details")
+    unknown = set(details).difference({"type", "category", "explanation"})
+    if unknown or details.get("type") != "refusal":
+        raise AnthropicMessagesError("Anthropic stop_details is invalid")
+    category = details.get("category")
+    if category is not None and category not in {
+        "cyber",
+        "bio",
+        "frontier_llm",
+        "reasoning_extraction",
+        "general_harms",
+    }:
+        raise AnthropicMessagesError("Anthropic stop_details category is invalid")
+    explanation = details.get("explanation")
+    if explanation is not None and not isinstance(explanation, str):
+        raise AnthropicMessagesError("Anthropic stop_details explanation must be a string")
+    return dict(details)
 
 
 def _strict_json_schema(schema: Mapping[str, Any]) -> JsonObject:

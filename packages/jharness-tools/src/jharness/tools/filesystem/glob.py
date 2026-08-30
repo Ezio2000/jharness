@@ -98,9 +98,14 @@ class GlobTool:
         return self.workspace.root
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
-        pattern = cast(str, call.arguments["pattern"])
-        base_path = cast(str, call.arguments.get("path", "."))
-        limit = cast(int, call.arguments.get("limit", self.default_limit))
+        arguments = call.arguments
+        if arguments is None:
+            return failure(
+                FilesystemFailure("invalid_arguments", "Glob requires JSON object arguments.")
+            )
+        pattern = cast(str, arguments["pattern"])
+        base_path = cast(str, arguments.get("path", "."))
+        limit = cast(int, arguments.get("limit", self.default_limit))
         try:
             return await run_blocking(
                 lambda cancelled_check: self._glob(pattern, base_path, limit, cancelled_check),

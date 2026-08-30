@@ -269,14 +269,17 @@ def _validate_foreground_agent_call(
     assistant_call: StructuredToolCall,
     snapshot: AgentSnapshot,
 ) -> None:
-    if frozenset(assistant_call.arguments) - {"description", "prompt", "background"}:
+    arguments = assistant_call.arguments
+    if arguments is None:
+        raise ValueError("foreground Agent requires JSON object arguments")
+    if frozenset(arguments) - {"description", "prompt", "background"}:
         raise ValueError("foreground Agent arguments contain unexpected fields")
-    if assistant_call.arguments.get("description") != snapshot.description:
+    if arguments.get("description") != snapshot.description:
         raise ValueError("foreground Agent description does not match its waiting snapshot")
-    prompt = assistant_call.arguments.get("prompt")
+    prompt = arguments.get("prompt")
     if not isinstance(prompt, str) or not prompt:
         raise ValueError("foreground Agent prompt must be a non-empty string")
-    if assistant_call.arguments.get("background", False) is not False:
+    if arguments.get("background", False) is not False:
         raise ValueError("a foreground Agent suspension cannot be a background request")
 
 
@@ -284,9 +287,12 @@ def _validate_agent_wait_call(
     assistant_call: StructuredToolCall,
     snapshot: AgentSnapshot,
 ) -> None:
-    if frozenset(assistant_call.arguments) != frozenset({"agent_id"}):
+    arguments = assistant_call.arguments
+    if arguments is None:
+        raise ValueError("AgentWait requires JSON object arguments")
+    if frozenset(arguments) != frozenset({"agent_id"}):
         raise ValueError("AgentWait arguments must contain only agent_id")
-    if assistant_call.arguments.get("agent_id") != snapshot.agent_id:
+    if arguments.get("agent_id") != snapshot.agent_id:
         raise ValueError("AgentWait arguments do not match its waiting snapshot")
 
 

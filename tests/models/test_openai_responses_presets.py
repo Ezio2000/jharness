@@ -12,10 +12,8 @@ from jharness.models.openai import (
     OPENAI_RESPONSES_WEB_SEARCH,
     OpenAIResponsesCodec,
     OpenAIResponsesError,
-    OpenAIResponsesImageGenerationTool,
     OpenAIResponsesModel,
     OpenAIResponsesProfile,
-    OpenAIResponsesWebSearchTool,
     openai_responses_image_generation,
     openai_responses_profile,
     openai_responses_web_search,
@@ -72,7 +70,7 @@ def test_openai_responses_hosted_tool_declarations_deep_freeze_configuration() -
         image_generation.configuration["input_image_mask"]["metadata"]["layers"].append(2)
 
 
-def test_openai_responses_official_profile_installs_both_hosted_tool_codecs() -> None:
+def test_openai_responses_official_profile_enables_both_supported_hosted_tools() -> None:
     profile = openai_responses_profile()
 
     assert profile.name == "openai-responses"
@@ -83,18 +81,6 @@ def test_openai_responses_official_profile_installs_both_hosted_tool_codecs() ->
         }
     )
     assert "provider" in profile.capabilities.tool_choice_types
-    assert tuple(type(codec) for codec in profile.provider_tool_registry.codecs) == (
-        OpenAIResponsesWebSearchTool,
-        OpenAIResponsesImageGenerationTool,
-    )
-    assert (
-        profile.provider_tool_registry.codec_for_tool(OPENAI_RESPONSES_WEB_SEARCH).tool
-        is OPENAI_RESPONSES_WEB_SEARCH
-    )
-    assert (
-        profile.provider_tool_registry.codec_for_tool(OPENAI_RESPONSES_IMAGE_GENERATION).tool
-        is OPENAI_RESPONSES_IMAGE_GENERATION
-    )
 
 
 def test_openai_responses_base_profile_remains_provider_neutral() -> None:
@@ -102,7 +88,6 @@ def test_openai_responses_base_profile_remains_provider_neutral() -> None:
 
     assert profile.capabilities.provider_tools == frozenset()
     assert "provider" not in profile.capabilities.tool_choice_types
-    assert profile.provider_tool_registry.codecs == ()
 
 
 def test_generic_openai_responses_profile_rejects_hosted_tool_presets() -> None:
@@ -175,10 +160,13 @@ async def test_openai_responses_image_artifacts_are_required_only_when_explicitl
                     }
                 ],
                 "previous_response_id": None,
-                "store": False,
                 "tools": [],
                 "usage": {
                     "input_tokens": 1,
+                    "input_tokens_details": {
+                        "cached_tokens": 0,
+                        "cache_write_tokens": 0,
+                    },
                     "output_tokens": 1,
                     "total_tokens": 2,
                     "output_tokens_details": {"reasoning_tokens": 0},

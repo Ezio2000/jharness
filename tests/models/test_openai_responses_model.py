@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from hashlib import sha256
 from time import time
 from typing import Any, cast
@@ -17,10 +16,11 @@ from jharness.kernel import (
     FreeformToolCall,
     FreeformToolSpec,
     Message,
-    ModelCapabilities,
+    ModelContentDelta,
     ModelDelta,
     ModelError,
     ModelErrorInfo,
+    ModelOptions,
     ModelProviderToolCallDelta,
     ModelReasoningDelta,
     ModelRequest,
@@ -30,81 +30,28 @@ from jharness.kernel import (
     ProviderToolId,
     ProviderToolSpec,
     ProviderToolStatus,
+    ResponseFormat,
     RunContext,
+    Runtime,
     RuntimeToolKind,
     StructuredToolCall,
     StructuredToolSpec,
     ToolChoice,
     ToolSuccess,
 )
-from jharness.models.deepseek import deepseek_responses_profile
 from jharness.models.openai import (
     OpenAIResponsesArtifactStore,
     OpenAIResponsesCodec,
     OpenAIResponsesError,
-    OpenAIResponsesImageGenerationTool,
     OpenAIResponsesModel,
     OpenAIResponsesProfile,
-    OpenAIResponsesProviderToolCodec,
-    OpenAIResponsesProviderToolRegistry,
-    OpenAIResponsesProviderToolStreamUpdate,
-    OpenAIResponsesWebSearchTool,
 )
 from jharness.models.openai.responses.stream import OpenAIResponsesStreamDecoder
 
-_DEEPSEEK_WEB = ProviderToolId("deepseek.responses", "web_search")
+_OPENAI_WEB = ProviderToolId("openai.responses", "web_search")
 _OPENAI_IMAGE = ProviderToolId("openai.responses", "image_generation")
 _JPEG_BYTES = b"\xff\xd8\xffjpeg-payload"
 _JPEG_BASE64 = base64.b64encode(_JPEG_BYTES).decode("ascii")
-
-
-@dataclass(frozen=True, slots=True)
-class _SyntheticComputerTool(OpenAIResponsesProviderToolCodec):
-    tool: ProviderToolId
-    output_item_type: str = field(default="computer_call", init=False)
-    event_prefix: str = field(default="response.computer_call.", init=False)
-
-    @property
-    def declaration_types(self) -> frozenset[str]:
-        return frozenset({"computer_use_preview"})
-
-    def encode_declaration(self, spec: ProviderToolSpec) -> dict[str, Any]:
-        if spec.tool != self.tool:
-            raise OpenAIResponsesError("synthetic codec identity mismatch")
-        return {"type": "computer_use_preview", **dict(spec.configuration)}
-
-    def decode_call(
-        self,
-        item: Mapping[str, Any],
-        response: Mapping[str, Any],
-    ) -> ProviderToolCall:
-        del response
-        return ProviderToolCall(
-            id=cast(str, item["id"]),
-            tool=self.tool,
-            status=ProviderToolStatus(cast(str, item["status"])),
-            arguments=cast(Mapping[str, Any], item.get("action", {})),
-        )
-
-    def encode_history(self, call: ProviderToolCall) -> dict[str, Any]:
-        if call.tool != self.tool:
-            raise OpenAIResponsesError("synthetic codec identity mismatch")
-        return {
-            "type": self.output_item_type,
-            "id": call.id,
-            "status": call.status.value,
-            "action": dict(call.arguments),
-        }
-
-    def stream_event_update(
-        self,
-        event_type: str,
-        value: Mapping[str, Any],
-    ) -> OpenAIResponsesProviderToolStreamUpdate:
-        del value
-        if event_type != "response.computer_call.completed":
-            raise OpenAIResponsesError("unsupported synthetic provider event")
-        return OpenAIResponsesProviderToolStreamUpdate(ProviderToolStatus.COMPLETED)
 
 
 def _openai_feature_profile(
@@ -129,17 +76,16 @@ def _openai_feature_profile(
             ),
             provider_tools=provider_tools,
         ),
-        provider_tool_registry=(
-            OpenAIResponsesProviderToolRegistry(
-                (
-                    OpenAIResponsesImageGenerationTool(
-                        tool=_OPENAI_IMAGE,
-                        configuration_fields=frozenset({"output_format"}),
-                    ),
-                )
-            )
-            if image_generation
-            else OpenAIResponsesProviderToolRegistry()
+    )
+
+
+def _openai_web_profile() -> OpenAIResponsesProfile:
+    default = OpenAIResponsesProfile()
+    return OpenAIResponsesProfile(
+        capabilities=replace(
+            default.capabilities,
+            tool_choice_types=default.capabilities.tool_choice_types | {"provider"},
+            provider_tools=frozenset({_OPENAI_WEB}),
         ),
     )
 
@@ -240,10 +186,10 @@ def _terminal_response(
         "model": model,
         "output": output,
         "previous_response_id": None,
-        "store": False,
         "tools": [] if tools is None else tools,
         "usage": {
             "input_tokens": 3,
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
             "output_tokens": 2,
             "total_tokens": 5,
             "output_tokens_details": {"reasoning_tokens": 1},
@@ -281,9 +227,6 @@ def test_openai_responses_default_profile_is_conservative_and_stateless() -> Non
     assert stored_payload["store"] is True
     assert "include" not in stored_payload
 
-    with pytest.raises(ValueError, match="stateless reasoning history"):
-        OpenAIResponsesProfile(store=False, include=frozenset())
-
     reasoning = {
         "id": "reasoning-1",
         "type": "reasoning",
@@ -302,23 +245,67 @@ def test_openai_responses_default_profile_is_conservative_and_stateless() -> Non
         "encrypted-state"
     )
 
-    with pytest.raises(OpenAIResponsesError, match="reserved request field: store"):
-        OpenAIResponsesCodec(
-            model="gpt-test",
-            profile=OpenAIResponsesProfile(extra_request_body={"store": True}),
-        ).encode_request(ModelRequest(messages=(Message.user("hello"),)))
+
+def test_openai_responses_retains_validated_standard_response_envelope() -> None:
+    wire = _terminal_response([])
+    wire.update(
+        {
+            "service_tier": "priority",
+            "prompt_cache_key": "cache-key",
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "metadata": {"trace": "abc"},
+            "text": {"format": {"type": "text"}, "verbosity": "low"},
+        }
+    )
+
+    response = OpenAIResponsesCodec(model="gpt-test").decode_response(wire)
+
+    retained = cast(dict[str, Any], response.metadata["responses"])
+    assert "output" not in retained
+    assert retained == {key: value for key, value in wire.items() if key != "output"}
 
 
-def test_deepseek_responses_profile_and_request_encode_native_responses() -> None:
-    profile = deepseek_responses_profile(effort="none")
-    codec = OpenAIResponsesCodec(model="deepseek-v4-flash", profile=profile)
+@pytest.mark.parametrize(
+    ("reason", "finish_reason"),
+    ((None, "incomplete"), ("max_output_tokens", "length"), ("content_filter", "content_filter")),
+)
+def test_openai_responses_incomplete_details_are_closed_schema(
+    reason: str | None, finish_reason: str
+) -> None:
+    response = _terminal_response(
+        [
+            {
+                "id": "msg-incomplete",
+                "type": "message",
+                "status": "incomplete",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "partial", "annotations": []}],
+            }
+        ],
+        status="incomplete",
+    )
+    response["incomplete_details"] = {"reason": reason}
+    assert (
+        OpenAIResponsesCodec(model="gpt-test").decode_response(response).finish_reason
+        == finish_reason
+    )
+
+    response["incomplete_details"] = {"reason": "vendor"}
+    with pytest.raises(OpenAIResponsesError, match="incomplete reason"):
+        OpenAIResponsesCodec(model="gpt-test").decode_response(response)
+
+
+def test_openai_responses_profile_and_request_encode_native_responses() -> None:
+    profile = _openai_web_profile()
+    codec = OpenAIResponsesCodec(model="gpt-test", profile=profile)
     request = ModelRequest(
         messages=(Message.system("policy"), Message.user("question")),
         runtime_tools=(StructuredToolSpec("lookup", "lookup", {"type": "object"}),),
-        provider_tools=(ProviderToolSpec(_DEEPSEEK_WEB),),
+        provider_tools=(ProviderToolSpec(_OPENAI_WEB),),
         tool_choice=ToolChoice(
             type="provider",
-            provider_tool=_DEEPSEEK_WEB,
+            provider_tool=_OPENAI_WEB,
             allow_parallel_runtime_tool_calls=False,
         ),
     )
@@ -327,9 +314,8 @@ def test_deepseek_responses_profile_and_request_encode_native_responses() -> Non
 
     assert profile.capabilities.input_modalities == frozenset({"text"})
     assert profile.capabilities.output_modalities == frozenset({"text"})
-    assert profile.capabilities.provider_tools == frozenset({_DEEPSEEK_WEB})
-    assert payload["model"] == "deepseek-v4-flash"
-    assert payload["reasoning"] == {"effort": "none"}
+    assert profile.capabilities.provider_tools == frozenset({_OPENAI_WEB})
+    assert payload["model"] == "gpt-test"
     assert payload["tool_choice"] == {"type": "web_search"}
     assert payload["tools"] == [
         {
@@ -337,6 +323,7 @@ def test_deepseek_responses_profile_and_request_encode_native_responses() -> Non
             "name": "lookup",
             "description": "lookup",
             "parameters": {"type": "object"},
+            "strict": False,
         },
         {"type": "web_search"},
     ]
@@ -344,36 +331,18 @@ def test_deepseek_responses_profile_and_request_encode_native_responses() -> Non
         "system",
         "user",
     ]
-    assert "store" not in payload
+    assert payload["store"] is False
     assert "previous_response_id" not in payload
     assert "parallel_tool_calls" not in payload
 
     provider_only_payload = codec.encode_request(
         ModelRequest(
             messages=(Message.user("search"),),
-            provider_tools=(ProviderToolSpec(_DEEPSEEK_WEB),),
+            provider_tools=(ProviderToolSpec(_OPENAI_WEB),),
             tool_choice=ToolChoice(allow_parallel_runtime_tool_calls=False),
         )
     )
     assert "parallel_tool_calls" not in provider_only_payload
-
-    versioned_search = codec.encode_request(
-        ModelRequest(
-            messages=(Message.user("search"),),
-            provider_tools=(
-                ProviderToolSpec(
-                    _DEEPSEEK_WEB,
-                    {"variant": "web_search_2025_08_26"},
-                ),
-            ),
-            tool_choice=ToolChoice(
-                type="provider",
-                provider_tool=_DEEPSEEK_WEB,
-            ),
-        )
-    )
-    assert versioned_search["tools"] == [{"type": "web_search_2025_08_26"}]
-    assert versioned_search["tool_choice"] == {"type": "web_search_2025_08_26"}
 
     custom = codec.encode_request(
         ModelRequest(
@@ -382,28 +351,9 @@ def test_deepseek_responses_profile_and_request_encode_native_responses() -> Non
             tool_choice=ToolChoice(type="required"),
         )
     )
-    assert custom["tools"] == [{"type": "custom", "name": "apply_patch"}]
-    with pytest.raises(OpenAIResponsesError, match="freeform runtime tool"):
-        codec.encode_request(
-            ModelRequest(
-                messages=(Message.user("run"),),
-                runtime_tools=(FreeformToolSpec("shell", "unsupported"),),
-            )
-        )
-
-    thinking_profile = deepseek_responses_profile()
-    thinking_codec = OpenAIResponsesCodec(
-        model="deepseek-v4-flash",
-        profile=thinking_profile,
-    )
-    with pytest.raises(OpenAIResponsesError, match="does not support tool_choice='required'"):
-        thinking_codec.encode_request(
-            ModelRequest(
-                messages=(Message.user("question"),),
-                provider_tools=(ProviderToolSpec(_DEEPSEEK_WEB),),
-                tool_choice=ToolChoice(type="required"),
-            )
-        )
+    assert custom["tools"] == [
+        {"type": "custom", "name": "apply_patch", "description": "must not reach wire"}
+    ]
     with pytest.raises(ValueError, match="input modality"):
         OpenAIResponsesProfile(
             capabilities=replace(
@@ -418,35 +368,340 @@ def test_deepseek_responses_profile_and_request_encode_native_responses() -> Non
                 output_modalities=frozenset({"image"}),
             )
         )
-    with pytest.raises(ValueError, match="registry must exactly match"):
+    with pytest.raises(ValueError, match="does not support seed"):
         OpenAIResponsesProfile(
-            capabilities=ModelCapabilities(
+            capabilities=replace(
+                OpenAIResponsesProfile().capabilities,
+                seed=True,
+            )
+        )
+    with pytest.raises(ValueError, match="unsupported OpenAI Responses provider tool"):
+        OpenAIResponsesProfile(
+            capabilities=replace(
+                OpenAIResponsesProfile().capabilities,
                 provider_tools=frozenset({ProviderToolId("test", "computer")}),
                 tool_choice_types=frozenset({"auto", "none", "required", "runtime", "provider"}),
             ),
         )
 
 
-def test_deepseek_responses_custom_tool_terminal_history_and_output_round_trip() -> None:
-    profile = deepseek_responses_profile(effort="none")
-    codec = OpenAIResponsesCodec(model="deepseek-v4-flash", profile=profile)
+def test_openai_responses_rejects_boolean_function_and_response_schemas() -> None:
+    with pytest.raises(OpenAIResponsesError, match="function parameters must be an object"):
+        OpenAIResponsesCodec(model="gpt-test").encode_request(
+            ModelRequest(
+                messages=(Message.user("question"),),
+                runtime_tools=(StructuredToolSpec("lookup", "lookup", True),),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    ((ModelOptions(temperature=2.1), "temperature"), (ModelOptions(top_p=-0.1), "top_p")),
+)
+def test_openai_responses_rejects_out_of_range_sampling_options(
+    options: ModelOptions, message: str
+) -> None:
+    with pytest.raises(OpenAIResponsesError, match=message):
+        OpenAIResponsesCodec(model="gpt-test").encode_request(
+            ModelRequest(messages=(Message.user("question"),), options=options)
+        )
+
+
+def test_openai_responses_requires_its_protocol_minimum_output_token_limit() -> None:
+    with pytest.raises(OpenAIResponsesError, match="at least 16"):
+        OpenAIResponsesCodec(model="gpt-test").encode_request(
+            ModelRequest(
+                messages=(Message.user("question"),),
+                options=ModelOptions(max_output_tokens=15),
+            )
+        )
+
+
+def test_openai_responses_strict_envelope_usage_and_empty_output() -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test")
+    empty = _terminal_response([])
+    response = codec.decode_response(empty)
+    assert response.output == ()
+    with pytest.raises(OpenAIResponsesError, match="unsupported field"):
+        codec.decode_response({**empty, "vendor": True})
+    for sdk_or_request_only_field in ("output_text", "store"):
+        with pytest.raises(OpenAIResponsesError, match="unsupported field"):
+            codec.decode_response({**empty, sdk_or_request_only_field: False})
+    with pytest.raises(OpenAIResponsesError, match="cache_write_tokens"):
+        codec.decode_response(
+            {
+                **empty,
+                "usage": {
+                    "input_tokens": 1,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens": 1,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 2,
+                },
+            }
+        )
+    function_item = {
+        "id": "fc-empty-arguments",
+        "type": "function_call",
+        "call_id": "call-empty-arguments",
+        "name": "lookup",
+        "arguments": "",
+    }
+    call = cast(
+        StructuredToolCall, codec.decode_response(_terminal_response([function_item])).output[0]
+    )
+    assert call.arguments is None and call.raw_input == ""
+
+
+def test_openai_responses_stream_requires_sequence_and_rejects_vendor_event_fields() -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test")
+    decoder = OpenAIResponsesStreamDecoder(codec, codec.profile)
+    with pytest.raises(OpenAIResponsesError, match="sequence_number"):
+        decoder.apply_event(
+            "response.created",
+            {
+                "type": "response.created",
+                "response": {"id": "resp-1", "object": "response", "status": "in_progress"},
+            },
+        )
+    with pytest.raises(OpenAIResponsesError, match="unsupported field"):
+        decoder.apply_event(
+            "response.created",
+            {
+                "type": "response.created",
+                "sequence_number": 0,
+                "vendor": True,
+                "response": {"id": "resp-1", "object": "response", "status": "in_progress"},
+            },
+        )
+
+
+def test_openai_responses_provider_calls_reject_nonstandard_items_and_actions() -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test", profile=_openai_web_profile())
+    base_web = {"id": "ws-1", "type": "web_search_call", "status": "completed"}
+    with pytest.raises(OpenAIResponsesError, match="action"):
+        codec.decode_response(_terminal_response([base_web]))
+    with pytest.raises(OpenAIResponsesError, match="action type"):
+        codec.decode_response(_terminal_response([{**base_web, "action": {"type": "other"}}]))
+    with pytest.raises(OpenAIResponsesError, match="unsupported field"):
+        codec.decode_response(
+            _terminal_response(
+                [{**base_web, "action": {"type": "search", "query": "q"}, "vendor": True}]
+            )
+        )
+    decoded = codec.decode_response(
+        _terminal_response(
+            [
+                {
+                    **base_web,
+                    "action": {
+                        "type": "search",
+                        "queries": ["q1", "q2"],
+                        "sources": [{"type": "url", "url": "https://example.test"}],
+                    },
+                }
+            ]
+        )
+    )
+    assert decoded.provider_tool_calls()[0].arguments["queries"] == ["q1", "q2"]
+    assert codec.decode_response(
+        _terminal_response([{**base_web, "action": {"type": "open_page", "url": None}}])
+    ).provider_tool_calls()
+    with pytest.raises(OpenAIResponsesError, match="source url"):
+        codec.decode_response(
+            _terminal_response(
+                [
+                    {
+                        **base_web,
+                        "action": {"type": "search", "sources": [{"type": "url", "url": None}]},
+                    }
+                ]
+            )
+        )
+
+
+def test_openai_responses_web_search_uses_only_stable_configuration_and_call_fields() -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test", profile=_openai_web_profile())
+    payload = codec.encode_request(
+        ModelRequest(
+            messages=(Message.user("find a bridge"),),
+            provider_tools=(
+                ProviderToolSpec(
+                    _OPENAI_WEB,
+                    configuration={
+                        "external_web_access": True,
+                        "filters": {"allowed_domains": ["openai.com"]},
+                        "search_context_size": "high",
+                        "user_location": {
+                            "country": None,
+                            "city": None,
+                            "region": None,
+                            "timezone": None,
+                        },
+                    },
+                ),
+            ),
+        )
+    )
+    assert payload["tools"][0]["filters"] == {"allowed_domains": ["openai.com"]}
+    item = {
+        "id": "ws-image-1",
+        "type": "web_search_call",
+        "status": "completed",
+        "action": {"type": "search", "queries": ["bridge"]},
+    }
+    call = codec.decode_response(_terminal_response([item])).provider_tool_calls()[0]
+    assert call.arguments["queries"] == ["bridge"]
+    replay = codec.encode_request(
+        ModelRequest(messages=(Message.user("find"), Message.assistant((call,))))
+    )
+    assert cast(list[dict[str, Any]], replay["input"])[1] == item
+    searching_action: dict[str, Any] = {
+        "type": "find_in_page",
+        "url": "",
+        "pattern": "",
+    }
+    searching_item: dict[str, Any] = {
+        **item,
+        "status": "searching",
+        "action": searching_action,
+    }
+    searching_call = ProviderToolCall(
+        id="ws-image-1",
+        tool=_OPENAI_WEB,
+        status=ProviderToolStatus.IN_PROGRESS,
+        arguments=searching_action,
+        metadata={"responses": {"item": searching_item}},
+    )
+    searching_replay = codec.encode_request(
+        ModelRequest(messages=(Message.user("find"), Message.assistant((searching_call,))))
+    )
+    assert cast(list[dict[str, Any]], searching_replay["input"])[1] == searching_item
+    profile = _openai_web_profile()
+    decoder = OpenAIResponsesStreamDecoder(
+        OpenAIResponsesCodec(model="gpt-test", profile=profile),
+        profile,
+    )
+    _stream_event(
+        decoder,
+        "response.created",
+        0,
+        response={"id": "resp-1", "object": "response", "status": "in_progress"},
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.added",
+        1,
+        output_index=0,
+        item={
+            "id": "ws-image-1",
+            "type": "web_search_call",
+            "status": "in_progress",
+            "action": {"type": "search", "query": "bridge"},
+        },
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.done",
+        2,
+        output_index=0,
+        item=item,
+    )
+    terminal, _ = _stream_event(
+        decoder,
+        "response.completed",
+        3,
+        response=_terminal_response([item]),
+    )
+    assert terminal is True
+    assert decoder.completed_response().output[0] == call
+    for configuration in (
+        {"search_content_types": ["image"]},
+        {"image_settings": {"max_results": 1}},
+        {"return_token_budget": "unlimited"},
+        {"filters": {"blocked_domains": ["x"]}},
+        {"user_location": {"country": "USA"}},
+        {"user_location": {"type": None}},
+    ):
+        with pytest.raises(OpenAIResponsesError):
+            codec.encode_request(
+                ModelRequest(
+                    messages=(Message.user("find"),),
+                    provider_tools=(ProviderToolSpec(_OPENAI_WEB, configuration=configuration),),
+                )
+            )
+    with pytest.raises(OpenAIResponsesError, match="unsupported field"):
+        codec.decode_response(_terminal_response([{**item, "results": [{"type": "image_result"}]}]))
+
+    image_codec = OpenAIResponsesCodec(
+        model="gpt-test", profile=_openai_feature_profile(image_generation=True)
+    )
+    base_image = {"id": "ig-1", "type": "image_generation_call", "status": "failed"}
+    assert image_codec.decode_response(_terminal_response([base_image])).provider_tool_calls()
+    with pytest.raises(OpenAIResponsesError, match="unsupported field"):
+        image_codec.decode_response(
+            _terminal_response([{**base_image, "result": None, "vendor": True}])
+        )
+    with pytest.raises(OpenAIResponsesError, match="incomplete"):
+        image_codec.decode_response(_terminal_response([{**base_image, "status": "incomplete"}]))
+    assert image_codec.encode_request(
+        ModelRequest(
+            messages=(Message.user("draw"),),
+            provider_tools=(
+                ProviderToolSpec(_OPENAI_IMAGE, {"model": "gpt-image-2", "size": "1536x864"}),
+            ),
+        )
+    )["tools"] == [{"type": "image_generation", "model": "gpt-image-2", "size": "1536x864"}]
+    assert image_codec.encode_request(
+        ModelRequest(
+            messages=(Message.user("draw"),),
+            provider_tools=(ProviderToolSpec(_OPENAI_IMAGE, {"input_fidelity": None}),),
+        )
+    )["tools"] == [{"type": "image_generation", "input_fidelity": None}]
+    with pytest.raises(OpenAIResponsesError, match="input_image_mask"):
+        image_codec.encode_request(
+            ModelRequest(
+                messages=(Message.user("draw"),),
+                provider_tools=(ProviderToolSpec(_OPENAI_IMAGE, {"input_image_mask": None}),),
+            )
+        )
+
+    default = OpenAIResponsesProfile()
+    codec = OpenAIResponsesCodec(
+        model="gpt-test",
+        profile=replace(
+            default,
+            capabilities=replace(default.capabilities, structured_output=True),
+        ),
+    )
+    with pytest.raises(OpenAIResponsesError, match="JSON schema must be an object"):
+        codec.encode_request(
+            ModelRequest(
+                messages=(Message.user("question"),),
+                response_format=ResponseFormat("json_schema", True),
+            )
+        )
+
+
+def test_openai_responses_custom_tool_terminal_history_and_output_round_trip() -> None:
+    profile = _openai_web_profile()
+    codec = OpenAIResponsesCodec(model="gpt-test", profile=profile)
     wire_item = {
         "id": "ct-item-1",
         "type": "custom_tool_call",
-        "status": "completed",
         "call_id": "ct-call-1",
         "name": "apply_patch",
         "input": "*** Begin Patch\n*** End Patch",
     }
 
-    response = codec.decode_response(_terminal_response([wire_item], model="deepseek-v4-flash"))
+    response = codec.decode_response(_terminal_response([wire_item]))
 
-    assert response.runtime_tool_calls() == (
-        FreeformToolCall(
-            "ct-call-1",
-            "apply_patch",
-            "*** Begin Patch\n*** End Patch",
-        ),
+    call = cast(FreeformToolCall, response.runtime_tool_calls()[0])
+    assert (call.id, call.name, call.input) == (
+        "ct-call-1",
+        "apply_patch",
+        "*** Begin Patch\n*** End Patch",
     )
     payload = codec.encode_request(
         ModelRequest(
@@ -463,9 +718,12 @@ def test_deepseek_responses_custom_tool_terminal_history_and_output_round_trip()
         )
     )
 
-    assert payload["tools"] == [{"type": "custom", "name": "apply_patch"}]
+    assert payload["tools"] == [
+        {"type": "custom", "name": "apply_patch", "description": "not emitted"}
+    ]
     assert cast(list[dict[str, Any]], payload["input"])[1:] == [
         {
+            "id": "ct-item-1",
             "type": "custom_tool_call",
             "call_id": "ct-call-1",
             "name": "apply_patch",
@@ -479,16 +737,15 @@ def test_deepseek_responses_custom_tool_terminal_history_and_output_round_trip()
     ]
 
 
-def test_deepseek_responses_custom_tool_stream_round_trip() -> None:
-    profile = deepseek_responses_profile(effort="none")
+def test_openai_responses_custom_tool_stream_round_trip() -> None:
+    profile = _openai_web_profile()
     decoder = OpenAIResponsesStreamDecoder(
-        OpenAIResponsesCodec(model="deepseek-v4-flash", profile=profile),
+        OpenAIResponsesCodec(model="gpt-test", profile=profile),
         profile,
     )
     final_item = {
         "id": "ct-item-1",
         "type": "custom_tool_call",
-        "status": "completed",
         "call_id": "ct-call-1",
         "name": "apply_patch",
         "input": "*** Begin Patch\n*** End Patch",
@@ -504,7 +761,7 @@ def test_deepseek_responses_custom_tool_stream_round_trip() -> None:
         "response.output_item.added",
         1,
         output_index=0,
-        item={**final_item, "status": "in_progress", "input": ""},
+        item={**final_item, "input": ""},
     )
     _, streamed = _stream_event(
         decoder,
@@ -533,7 +790,7 @@ def test_deepseek_responses_custom_tool_stream_round_trip() -> None:
         decoder,
         "response.completed",
         5,
-        response=_terminal_response([final_item], model="deepseek-v4-flash"),
+        response=_terminal_response([final_item]),
     )
 
     assert terminal is True
@@ -544,6 +801,17 @@ def test_deepseek_responses_custom_tool_stream_round_trip() -> None:
             input_delta="",
             id="ct-call-1",
             name="apply_patch",
+            metadata={
+                "responses": {
+                    "item": {
+                        "id": "ct-item-1",
+                        "type": "custom_tool_call",
+                        "call_id": "ct-call-1",
+                        "name": "apply_patch",
+                        "input": "",
+                    }
+                }
+            },
         )
     ]
     assert streamed == [
@@ -553,119 +821,12 @@ def test_deepseek_responses_custom_tool_stream_round_trip() -> None:
             input_delta="*** Begin Patch\n*** End Patch",
         )
     ]
-    assert decoder.completed_response().runtime_tool_calls() == (
-        FreeformToolCall(
-            "ct-call-1",
-            "apply_patch",
-            "*** Begin Patch\n*** End Patch",
-        ),
+    call = cast(FreeformToolCall, decoder.completed_response().runtime_tool_calls()[0])
+    assert (call.id, call.name, call.input) == (
+        "ct-call-1",
+        "apply_patch",
+        "*** Begin Patch\n*** End Patch",
     )
-
-
-def test_openai_responses_provider_registry_is_open_for_synthetic_tool_dialects() -> None:
-    synthetic_tool = ProviderToolId("synthetic.responses", "computer_use")
-    default = OpenAIResponsesProfile()
-    profile = OpenAIResponsesProfile(
-        capabilities=replace(
-            default.capabilities,
-            provider_tools=frozenset({synthetic_tool}),
-            tool_choice_types=default.capabilities.tool_choice_types | {"provider"},
-        ),
-        provider_tool_registry=OpenAIResponsesProviderToolRegistry(
-            (_SyntheticComputerTool(tool=synthetic_tool),)
-        ),
-    )
-    codec = OpenAIResponsesCodec(model="synthetic-model", profile=profile)
-    request = ModelRequest(
-        messages=(Message.user("search"),),
-        provider_tools=(ProviderToolSpec(synthetic_tool, {"display_width": 1024}),),
-        tool_choice=ToolChoice(type="provider", provider_tool=synthetic_tool),
-    )
-
-    payload = codec.encode_request(request)
-    assert payload["tools"] == [{"type": "computer_use_preview", "display_width": 1024}]
-    assert payload["tool_choice"] == {"type": "computer_use_preview"}
-    response = codec.decode_response(
-        _terminal_response(
-            [
-                {
-                    "id": "computer-synthetic",
-                    "type": "computer_call",
-                    "status": "completed",
-                    "action": {"type": "click", "x": 1, "y": 2},
-                }
-            ],
-            model="synthetic-model",
-        )
-    )
-    assert response.provider_tool_calls()[0].tool == synthetic_tool
-    replay = codec.encode_request(
-        replace(
-            request,
-            messages=(Message.user("search"), response.to_assistant_message()),
-        )
-    )
-    assert cast(list[dict[str, Any]], replay["input"])[1] == {
-        "type": "computer_call",
-        "id": "computer-synthetic",
-        "status": "completed",
-        "action": {"type": "click", "x": 1, "y": 2},
-    }
-
-    decoder = OpenAIResponsesStreamDecoder(codec, profile)
-    final_item = {
-        "id": "computer-stream",
-        "type": "computer_call",
-        "status": "completed",
-        "action": {"type": "click", "x": 3, "y": 4},
-    }
-    _stream_event(
-        decoder,
-        "response.created",
-        0,
-        response={"id": "resp-1", "object": "response", "status": "in_progress"},
-    )
-    _, added = _stream_event(
-        decoder,
-        "response.output_item.added",
-        1,
-        output_index=0,
-        item={**final_item, "status": "in_progress"},
-    )
-    _, completed = _stream_event(
-        decoder,
-        "response.computer_call.completed",
-        2,
-        item_id="computer-stream",
-        output_index=0,
-    )
-    _stream_event(
-        decoder,
-        "response.output_item.done",
-        3,
-        output_index=0,
-        item=final_item,
-    )
-    terminal, _ = _stream_event(
-        decoder,
-        "response.completed",
-        4,
-        response=_terminal_response([final_item], model="synthetic-model"),
-    )
-    assert terminal is True
-    assert [cast(ModelProviderToolCallDelta, delta).tool for delta in added + completed] == [
-        synthetic_tool,
-        synthetic_tool,
-    ]
-
-    with pytest.raises(OpenAIResponsesError, match="does not support provider tool"):
-        codec.encode_request(
-            replace(
-                request,
-                provider_tools=(ProviderToolSpec(_DEEPSEEK_WEB),),
-                tool_choice=ToolChoice(type="auto"),
-            )
-        )
 
 
 def test_openai_responses_parallel_control_applies_only_when_runtime_calls_can_be_parallel() -> (
@@ -710,40 +871,94 @@ def test_openai_responses_parallel_control_applies_only_when_runtime_calls_can_b
         ).encode_request(request)
 
 
-def test_openai_responses_encodes_non_native_assistant_history_as_easy_input() -> None:
-    payload = OpenAIResponsesCodec(model="gpt-test").encode_request(
-        ModelRequest(
-            messages=(
-                Message.user("question"),
-                Message.assistant((ContentPart.text_part("answer"),)),
-            ),
-        )
-    )
-
-    assert cast(list[dict[str, Any]], payload["input"])[1] == {
-        "type": "message",
-        "role": "assistant",
-        "content": [{"type": "input_text", "text": "answer"}],
-    }
-
-
-def test_deepseek_responses_rejects_exact_custom_tool_choice() -> None:
-    codec = OpenAIResponsesCodec(
-        model="deepseek-v4-flash",
-        profile=deepseek_responses_profile(effort="none"),
-    )
-
-    with pytest.raises(OpenAIResponsesError, match="exact freeform runtime tool choice"):
-        codec.encode_request(
+def test_openai_responses_rejects_non_native_assistant_history() -> None:
+    with pytest.raises(OpenAIResponsesError, match="native response output message"):
+        OpenAIResponsesCodec(model="gpt-test").encode_request(
             ModelRequest(
-                messages=(Message.user("patch"),),
-                runtime_tools=(FreeformToolSpec("apply_patch", "apply a patch"),),
-                tool_choice=ToolChoice(type="runtime", name="apply_patch"),
+                messages=(
+                    Message.user("question"),
+                    Message.assistant((ContentPart.text_part("answer"),)),
+                ),
             )
         )
 
 
-async def test_deepseek_responses_nonstream_client_preserves_interleaved_output_order() -> None:
+def test_openai_responses_replays_standard_message_phase_and_incomplete_status() -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test")
+    response = codec.decode_response(
+        _terminal_response(
+            [
+                {
+                    "id": "msg-1",
+                    "type": "message",
+                    "status": "incomplete",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "partial", "annotations": []}],
+                }
+            ],
+            status="incomplete",
+        )
+    )
+
+    replay = codec.encode_request(
+        ModelRequest(messages=(Message.user("question"), response.to_assistant_message()))
+    )
+    assert cast(list[dict[str, Any]], replay["input"])[1] == {
+        "id": "msg-1",
+        "type": "message",
+        "status": "incomplete",
+        "role": "assistant",
+        "phase": "commentary",
+        "content": [{"type": "output_text", "text": "partial", "annotations": []}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("item_type", "missing_field"),
+    (("function_call", "arguments"), ("custom_tool_call", "input")),
+)
+def test_openai_responses_stream_requires_runtime_call_input_fields(
+    item_type: str,
+    missing_field: str,
+) -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test")
+    decoder = OpenAIResponsesStreamDecoder(codec, codec.profile)
+    _stream_event(
+        decoder,
+        "response.created",
+        0,
+        response={"id": "resp-1", "object": "response", "status": "in_progress"},
+    )
+    item = {
+        "id": "call-item-1",
+        "type": item_type,
+        "call_id": "call-1",
+        "name": "tool",
+    }
+    if item_type == "function_call":
+        item["status"] = "in_progress"
+    with pytest.raises(OpenAIResponsesError, match=missing_field):
+        _stream_event(decoder, "response.output_item.added", 1, output_index=0, item=item)
+
+
+def test_openai_responses_accepts_exact_custom_tool_choice() -> None:
+    codec = OpenAIResponsesCodec(
+        model="gpt-test",
+        profile=_openai_web_profile(),
+    )
+
+    payload = codec.encode_request(
+        ModelRequest(
+            messages=(Message.user("patch"),),
+            runtime_tools=(FreeformToolSpec("apply_patch", "apply a patch"),),
+            tool_choice=ToolChoice(type="runtime", name="apply_patch"),
+        )
+    )
+    assert payload["tool_choice"] == {"type": "custom", "name": "apply_patch"}
+
+
+async def test_openai_responses_nonstream_client_preserves_interleaved_output_order() -> None:
     captured: dict[str, object] = {}
     wire_response = _terminal_response(
         [
@@ -774,7 +989,7 @@ async def test_deepseek_responses_nonstream_client_preserves_interleaved_output_
                 "content": [{"type": "output_text", "text": "two", "annotations": []}],
             },
         ],
-        model="deepseek-v4-flash",
+        model="gpt-test",
     )
 
     async def handler(raw: httpx.Request) -> httpx.Response:
@@ -784,24 +999,24 @@ async def test_deepseek_responses_nonstream_client_preserves_interleaved_output_
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         model = OpenAIResponsesModel(
-            base_url="https://api.deepseek.test/v1",
+            base_url="https://api.openai.test/v1",
             api_key="secret",
-            model="deepseek-v4-flash",
-            profile=deepseek_responses_profile(effort="none"),
+            model="gpt-test",
+            profile=_openai_web_profile(),
             client=client,
         )
         response = await model.invoke(
             ModelRequest(
                 messages=(Message.user("question"),),
-                provider_tools=(ProviderToolSpec(_DEEPSEEK_WEB),),
+                provider_tools=(ProviderToolSpec(_OPENAI_WEB),),
             ),
             RunContext("run-1", time()),
             stream=False,
             emit_delta=None,
         )
 
-    assert captured["url"] == "https://api.deepseek.test/v1/responses"
-    assert "store" not in cast(dict[str, object], captured["body"])
+    assert captured["url"] == "https://api.openai.test/v1/responses"
+    assert cast(dict[str, object], captured["body"])["store"] is False
     assert [type(item) for item in response.output] == [
         ProviderToolCall,
         ContentPart,
@@ -817,25 +1032,26 @@ async def test_deepseek_responses_nonstream_client_preserves_interleaved_output_
     assert failed.error is not None and failed.error.code == "web_search_failed"
 
 
-def test_openai_responses_terminal_function_call_rejects_incomplete_execution() -> None:
+def test_openai_responses_terminal_function_call_preserves_optional_status() -> None:
     codec = OpenAIResponsesCodec(model="gpt-test")
 
-    for status in ("in_progress", "incomplete"):
-        with pytest.raises(OpenAIResponsesError, match="must be completed"):
-            codec.decode_response(
-                _terminal_response(
-                    [
-                        {
-                            "id": "fc-1",
-                            "type": "function_call",
-                            "status": status,
-                            "call_id": "call-1",
-                            "name": "lookup",
-                            "arguments": "{}",
-                        }
-                    ]
-                )
+    for status in ("in_progress", "completed", "incomplete"):
+        response = codec.decode_response(
+            _terminal_response(
+                [
+                    {
+                        "id": "fc-1",
+                        "type": "function_call",
+                        "status": status,
+                        "call_id": "call-1",
+                        "name": "lookup",
+                        "arguments": "{}",
+                    }
+                ]
             )
+        )
+        call = cast(StructuredToolCall, response.output[0])
+        assert call.metadata["responses"]["item"]["status"] == status
 
     response = codec.decode_response(
         _terminal_response(
@@ -850,7 +1066,13 @@ def test_openai_responses_terminal_function_call_rejects_incomplete_execution() 
             ]
         )
     )
-    assert response.runtime_tool_calls() == (StructuredToolCall("call-1", "lookup", {}),)
+    call = cast(StructuredToolCall, response.runtime_tool_calls()[0])
+    assert (call.id, call.name, call.arguments, call.raw_input) == (
+        "call-1",
+        "lookup",
+        {},
+        None,
+    )
 
     with pytest.raises(OpenAIResponsesError, match="incomplete Responses"):
         codec.decode_response(
@@ -870,9 +1092,62 @@ def test_openai_responses_terminal_function_call_rejects_incomplete_execution() 
         )
 
 
-def test_deepseek_responses_reasoning_sse_tracks_open_part_and_uses_terminal_response() -> None:
-    profile = deepseek_responses_profile()
-    codec = OpenAIResponsesCodec(model="deepseek-v4-flash", profile=profile)
+def test_openai_responses_runtime_calls_round_trip_standard_metadata_and_raw_arguments() -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test")
+    item = {
+        "id": "fc-raw-1",
+        "type": "function_call",
+        "status": "in_progress",
+        "call_id": "call-raw-1",
+        "name": "lookup",
+        "arguments": "{",
+        "caller": {"type": "program", "caller_id": "program-1"},
+        "namespace": "tools",
+    }
+    response = codec.decode_response(_terminal_response([item]))
+    call = cast(StructuredToolCall, response.runtime_tool_calls()[0])
+    assert call.arguments is None and call.raw_input == "{"
+    payload = codec.encode_request(
+        ModelRequest(messages=(Message.user("q"), response.to_assistant_message()))
+    )
+    assert cast(list[dict[str, Any]], payload["input"])[1] == item
+    with pytest.raises(OpenAIResponsesError, match="unsupported field"):
+        codec.decode_response(_terminal_response([{**item, "reasoning_content": "vendor"}]))
+    with pytest.raises(OpenAIResponsesError, match="custom_tool_call contains unsupported field"):
+        codec.decode_response(
+            _terminal_response(
+                [
+                    {
+                        "id": "ct-1",
+                        "type": "custom_tool_call",
+                        "call_id": "ct-call-1",
+                        "name": "custom",
+                        "input": "",
+                        "status": "completed",
+                    }
+                ]
+            )
+        )
+
+
+def test_openai_responses_reasoning_preserves_an_absent_status() -> None:
+    profile = OpenAIResponsesProfile(store=True, include=frozenset())
+    codec = OpenAIResponsesCodec(model="gpt-test", profile=profile)
+    reasoning = {
+        "id": "rs-no-status",
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "summary"}],
+    }
+    response = codec.decode_response(_terminal_response([reasoning]))
+    payload = codec.encode_request(
+        ModelRequest(messages=(Message.user("q"), response.to_assistant_message()))
+    )
+    assert cast(list[dict[str, Any]], payload["input"])[1] == reasoning
+
+
+def test_openai_responses_reasoning_sse_tracks_open_part_and_uses_terminal_response() -> None:
+    profile = OpenAIResponsesProfile(include=frozenset({"reasoning.encrypted_content"}))
+    codec = OpenAIResponsesCodec(model="gpt-test", profile=profile)
     decoder = OpenAIResponsesStreamDecoder(codec, profile)
     reasoning_item = {
         "id": "rs-1",
@@ -880,6 +1155,7 @@ def test_deepseek_responses_reasoning_sse_tracks_open_part_and_uses_terminal_res
         "status": "completed",
         "content": [{"type": "reasoning_text", "text": "分析"}],
         "summary": [],
+        "encrypted_content": "encrypted-state",
     }
 
     _stream_event(
@@ -952,7 +1228,7 @@ def test_deepseek_responses_reasoning_sse_tracks_open_part_and_uses_terminal_res
         decoder,
         "response.completed",
         9,
-        response=_terminal_response([reasoning_item], model="deepseek-v4-flash"),
+        response=_terminal_response([reasoning_item]),
     )
 
     assert len(reasoning_deltas) == 1
@@ -967,22 +1243,18 @@ def test_deepseek_responses_reasoning_sse_tracks_open_part_and_uses_terminal_res
     assert reasoning.text == "分析"
 
 
-@pytest.mark.parametrize("lifecycle_status", ["completed", "incomplete", "failed"])
-def test_deepseek_responses_web_search_keeps_lifecycle_status_provisional_until_output_item(
-    lifecycle_status: str,
-) -> None:
-    profile = deepseek_responses_profile(effort="none")
+def test_openai_responses_web_search_completed_lifecycle_is_terminal() -> None:
+    profile = _openai_web_profile()
     decoder = OpenAIResponsesStreamDecoder(
-        OpenAIResponsesCodec(model="deepseek-v4-flash", profile=profile),
+        OpenAIResponsesCodec(model="gpt-test", profile=profile),
         profile,
     )
     action = {"type": "search", "query": "JHarness"}
     final_item = {
         "id": "ws-1",
         "type": "web_search_call",
-        "status": "failed",
+        "status": "completed",
         "action": action,
-        "error": {"code": "search_failed", "message": "failed"},
     }
     _stream_event(
         decoder,
@@ -999,17 +1271,17 @@ def test_deepseek_responses_web_search_keeps_lifecycle_status_provisional_until_
             "id": "ws-1",
             "type": "web_search_call",
             "status": "searching",
+            "action": action,
         },
     )
     _, lifecycle = _stream_event(
         decoder,
-        f"response.web_search_call.{lifecycle_status}",
+        "response.web_search_call.completed",
         2,
         item_id="ws-1",
         output_index=0,
-        action=action,
     )
-    _, failed = _stream_event(
+    _, done = _stream_event(
         decoder,
         "response.output_item.done",
         3,
@@ -1020,38 +1292,28 @@ def test_deepseek_responses_web_search_keeps_lifecycle_status_provisional_until_
         decoder,
         "response.completed",
         4,
-        response=_terminal_response([final_item], model="deepseek-v4-flash"),
+        response=_terminal_response([final_item]),
     )
 
-    deltas = [added[0], lifecycle[0], failed[0]]
+    deltas = [added[0], lifecycle[0]]
     assert all(isinstance(delta, ModelProviderToolCallDelta) for delta in deltas)
     assert [cast(ModelProviderToolCallDelta, delta).status for delta in deltas] == [
         ProviderToolStatus.IN_PROGRESS,
-        ProviderToolStatus.IN_PROGRESS,
-        ProviderToolStatus.FAILED,
+        ProviderToolStatus.COMPLETED,
     ]
     assert cast(ModelProviderToolCallDelta, lifecycle[0]).event == (
-        f"response.web_search_call.{lifecycle_status}"
+        "response.web_search_call.completed"
     )
-    assert cast(ModelProviderToolCallDelta, lifecycle[0]).data == {"action": action}
+    assert cast(ModelProviderToolCallDelta, lifecycle[0]).data == {}
     assert terminal is True
     completed_call = decoder.completed_response().output[0]
     assert isinstance(completed_call, ProviderToolCall)
-    assert completed_call.status is ProviderToolStatus.FAILED
+    assert done == []
+    assert completed_call.status is ProviderToolStatus.COMPLETED
 
 
 def _generic_web_search_stream_decoder() -> OpenAIResponsesStreamDecoder:
-    web_search = ProviderToolId("test.responses", "web_search")
-    default = OpenAIResponsesProfile()
-    profile = OpenAIResponsesProfile(
-        capabilities=replace(
-            default.capabilities,
-            provider_tools=frozenset({web_search}),
-        ),
-        provider_tool_registry=OpenAIResponsesProviderToolRegistry(
-            (OpenAIResponsesWebSearchTool(tool=web_search),)
-        ),
-    )
+    profile = _openai_web_profile()
     return OpenAIResponsesStreamDecoder(
         OpenAIResponsesCodec(model="gpt-test", profile=profile),
         profile,
@@ -1071,7 +1333,12 @@ def test_openai_responses_provider_lifecycle_rejects_conflicting_terminal_status
         "response.output_item.added",
         1,
         output_index=0,
-        item={"id": "ws-1", "type": "web_search_call", "status": "searching"},
+        item={
+            "id": "ws-1",
+            "type": "web_search_call",
+            "status": "searching",
+            "action": {"type": "search", "query": "JHarness"},
+        },
     )
     _stream_event(
         decoder,
@@ -1098,7 +1365,7 @@ def test_openai_responses_provider_lifecycle_rejects_conflicting_terminal_status
                 "id": "ws-1",
                 "type": "web_search_call",
                 "status": "failed",
-                "error": {"code": "search_failed", "message": "failed"},
+                "action": {"type": "search", "query": "JHarness"},
             },
         )
 
@@ -1116,7 +1383,12 @@ def test_openai_responses_provider_output_item_done_requires_a_terminal_status()
         "response.output_item.added",
         1,
         output_index=0,
-        item={"id": "ws-1", "type": "web_search_call", "status": "searching"},
+        item={
+            "id": "ws-1",
+            "type": "web_search_call",
+            "status": "searching",
+            "action": {"type": "search", "query": "JHarness"},
+        },
     )
 
     with pytest.raises(OpenAIResponsesError, match="requires a terminal status"):
@@ -1125,11 +1397,53 @@ def test_openai_responses_provider_output_item_done_requires_a_terminal_status()
             "response.output_item.done",
             2,
             output_index=0,
-            item={"id": "ws-1", "type": "web_search_call", "status": "searching"},
+            item={
+                "id": "ws-1",
+                "type": "web_search_call",
+                "status": "searching",
+                "action": {"type": "search", "query": "JHarness"},
+            },
         )
 
 
-@pytest.mark.parametrize("status", ["completed", "incomplete", "failed"])
+def test_openai_responses_partial_image_accepts_nullable_rendering_fields() -> None:
+    profile = _openai_feature_profile(image_generation=True)
+    decoder = OpenAIResponsesStreamDecoder(
+        OpenAIResponsesCodec(model="gpt-test", profile=profile), profile
+    )
+    _stream_event(
+        decoder,
+        "response.created",
+        0,
+        response={"id": "resp-1", "object": "response", "status": "in_progress"},
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.added",
+        1,
+        output_index=0,
+        item={"id": "ig-1", "type": "image_generation_call", "status": "generating"},
+    )
+    _, deltas = _stream_event(
+        decoder,
+        "response.image_generation_call.partial_image",
+        2,
+        item_id="ig-1",
+        output_index=0,
+        partial_image_index=0,
+        partial_image_b64=_JPEG_BASE64,
+        background=None,
+        output_format=None,
+        quality=None,
+        size=None,
+    )
+    assert cast(ModelProviderToolCallDelta, deltas[0]).data == {
+        "base64": _JPEG_BASE64,
+        "partial_image_index": 0,
+    }
+
+
+@pytest.mark.parametrize("status", ["completed", "failed"])
 def test_openai_responses_terminal_response_accepts_provider_status_matching_output_item_done(
     status: str,
 ) -> None:
@@ -1139,7 +1453,6 @@ def test_openai_responses_terminal_response_accepts_provider_status_matching_out
         "type": "web_search_call",
         "status": status,
         "action": {"type": "search", "query": "JHarness"},
-        "error": {"code": "search_failed", "message": "failed"},
     }
     _stream_event(
         decoder,
@@ -1152,7 +1465,12 @@ def test_openai_responses_terminal_response_accepts_provider_status_matching_out
         "response.output_item.added",
         1,
         output_index=0,
-        item={"id": "ws-1", "type": "web_search_call", "status": "searching"},
+        item={
+            "id": "ws-1",
+            "type": "web_search_call",
+            "status": "searching",
+            "action": {"type": "search", "query": "JHarness"},
+        },
     )
     _stream_event(
         decoder,
@@ -1188,7 +1506,6 @@ def test_openai_responses_terminal_response_rejects_provider_status_mismatching_
         "type": "web_search_call",
         "status": done_status,
         "action": {"type": "search", "query": "JHarness"},
-        "error": {"code": "search_failed", "message": "failed"},
     }
     terminal_item = {**done_item, "status": terminal_status}
     _stream_event(
@@ -1202,7 +1519,12 @@ def test_openai_responses_terminal_response_rejects_provider_status_mismatching_
         "response.output_item.added",
         1,
         output_index=0,
-        item={"id": "ws-1", "type": "web_search_call", "status": "searching"},
+        item={
+            "id": "ws-1",
+            "type": "web_search_call",
+            "status": "searching",
+            "action": {"type": "search", "query": "JHarness"},
+        },
     )
     _stream_event(
         decoder,
@@ -1250,7 +1572,7 @@ def test_openai_responses_output_text_annotation_event_validates_the_open_messag
         item_id="msg-1",
         output_index=0,
         content_index=0,
-        part={"type": "output_text", "text": ""},
+        part={"type": "output_text", "text": "", "annotations": []},
     )
     _, deltas = _stream_event(
         decoder,
@@ -1270,23 +1592,182 @@ def test_openai_responses_output_text_annotation_event_validates_the_open_messag
     )
 
     assert deltas == []
-    with pytest.raises(OpenAIResponsesError, match="annotation"):
+    _, null_deltas = _stream_event(
+        decoder,
+        "response.output_text.annotation.added",
+        8,
+        item_id="msg-1",
+        output_index=0,
+        content_index=0,
+        annotation_index=1,
+        annotation=None,
+    )
+    assert null_deltas == []
+
+
+def test_openai_responses_text_stream_validates_nested_standard_shapes() -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test")
+    decoder = OpenAIResponsesStreamDecoder(codec, codec.profile)
+    initial_item: dict[str, Any] = {
+        "id": "msg-stream",
+        "type": "message",
+        "status": "in_progress",
+        "role": "assistant",
+        "content": [],
+    }
+    final_part: dict[str, Any] = {
+        "type": "output_text",
+        "text": "hello",
+        "annotations": [],
+        "logprobs": [],
+    }
+    final_item: dict[str, Any] = {
+        **initial_item,
+        "status": "completed",
+        "content": [final_part],
+    }
+
+    _stream_event(
+        decoder,
+        "response.created",
+        0,
+        response={"id": "resp-1", "object": "response", "status": "in_progress"},
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.added",
+        1,
+        output_index=0,
+        item=initial_item,
+    )
+    _stream_event(
+        decoder,
+        "response.content_part.added",
+        2,
+        item_id="msg-stream",
+        output_index=0,
+        content_index=0,
+        part={"type": "output_text", "text": "", "annotations": []},
+    )
+    _, deltas = _stream_event(
+        decoder,
+        "response.output_text.delta",
+        3,
+        item_id="msg-stream",
+        output_index=0,
+        content_index=0,
+        delta="hello",
+        logprobs=[
+            {
+                "token": "hello",
+                "logprob": -0.1,
+                "top_logprobs": [
+                    {"token": "hello", "logprob": -0.1},
+                    {"token": None, "logprob": None},
+                ],
+            }
+        ],
+    )
+    assert len(deltas) == 1 and isinstance(deltas[0], ModelContentDelta)
+    _stream_event(
+        decoder,
+        "response.output_text.done",
+        4,
+        item_id="msg-stream",
+        output_index=0,
+        content_index=0,
+        text="hello",
+        logprobs=[],
+    )
+    _stream_event(
+        decoder,
+        "response.content_part.done",
+        5,
+        item_id="msg-stream",
+        output_index=0,
+        content_index=0,
+        part=final_part,
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.done",
+        6,
+        output_index=0,
+        item=final_item,
+    )
+    terminal, _ = _stream_event(
+        decoder,
+        "response.completed",
+        7,
+        response=_terminal_response([final_item]),
+    )
+    assert terminal is True
+
+
+def test_openai_responses_summary_done_and_error_events_use_exact_schemas() -> None:
+    profile = OpenAIResponsesProfile(store=True, include=frozenset())
+    codec = OpenAIResponsesCodec(model="gpt-test", profile=profile)
+    decoder = OpenAIResponsesStreamDecoder(codec, profile)
+    _stream_event(
+        decoder,
+        "response.created",
+        0,
+        response={"id": "resp-1", "object": "response", "status": "in_progress"},
+    )
+    _stream_event(
+        decoder,
+        "response.output_item.added",
+        1,
+        output_index=0,
+        item={"id": "rs-1", "type": "reasoning", "summary": []},
+    )
+    summary = {"type": "summary_text", "text": ""}
+    _stream_event(
+        decoder,
+        "response.reasoning_summary_part.added",
+        2,
+        item_id="rs-1",
+        output_index=0,
+        summary_index=0,
+        part=summary,
+    )
+    _stream_event(
+        decoder,
+        "response.reasoning_summary_part.done",
+        3,
+        item_id="rs-1",
+        output_index=0,
+        summary_index=0,
+        part=summary,
+        status="incomplete",
+    )
+
+    error_decoder = OpenAIResponsesStreamDecoder(codec, profile)
+    with pytest.raises(OpenAIResponsesError, match=r"E_TEST.*failed"):
         _stream_event(
-            decoder,
-            "response.output_text.annotation.added",
-            8,
-            item_id="msg-1",
-            output_index=0,
-            content_index=0,
-            annotation_index=1,
-            annotation=None,
+            error_decoder,
+            "error",
+            0,
+            code="E_TEST",
+            message="failed",
+            param=None,
+        )
+    invalid_error_decoder = OpenAIResponsesStreamDecoder(codec, profile)
+    with pytest.raises(OpenAIResponsesError, match="unsupported field"):
+        _stream_event(
+            invalid_error_decoder,
+            "error",
+            0,
+            code="E_TEST",
+            message="failed",
+            vendor=True,
         )
 
 
 def test_openai_responses_provider_only_terminal_response_is_valid() -> None:
-    profile = deepseek_responses_profile()
+    profile = _openai_web_profile()
     response = OpenAIResponsesCodec(
-        model="deepseek-v4-flash",
+        model="gpt-test",
         profile=profile,
     ).decode_response(
         _terminal_response(
@@ -1298,7 +1779,7 @@ def test_openai_responses_provider_only_terminal_response_is_valid() -> None:
                     "action": {"type": "search", "query": "only"},
                 }
             ],
-            model="deepseek-v4-flash",
+            model="gpt-test",
         )
     )
 
@@ -1307,10 +1788,119 @@ def test_openai_responses_provider_only_terminal_response_is_valid() -> None:
     assert response.visible_parts() == ()
     assert response.finish_reason == "stop"
 
+
+def test_openai_responses_validates_and_replays_output_text_metadata() -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test")
+    item = {
+        "id": "msg-metadata",
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "output_text",
+                "text": "source",
+                "annotations": [
+                    {
+                        "type": "url_citation",
+                        "start_index": 0,
+                        "end_index": 6,
+                        "url": "https://example.test",
+                        "title": "Example",
+                    },
+                    {"type": "file_path", "file_id": "file-1", "index": 0},
+                    {
+                        "type": "container_file_citation",
+                        "container_id": "cntr-1",
+                        "file_id": "file-2",
+                        "filename": "source.txt",
+                        "start_index": 0,
+                        "end_index": 6,
+                    },
+                ],
+                "logprobs": [
+                    {
+                        "token": "source",
+                        "logprob": -0.1,
+                        "bytes": [115],
+                        "top_logprobs": [{"token": "source", "logprob": -0.1, "bytes": [115]}],
+                    }
+                ],
+            }
+        ],
+    }
+    response = codec.decode_response(_terminal_response([item]))
+    replay = codec.encode_request(
+        ModelRequest(messages=(Message.user("question"), response.to_assistant_message()))
+    )
+    assert cast(list[dict[str, Any]], replay["input"])[1] == item
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        {"type": "output_text", "text": "x", "vendor": True},
+        {"type": "refusal", "refusal": "no", "vendor": True},
+        {"type": "output_text", "text": "x", "annotations": [{"type": "unknown"}]},
+    ),
+)
+def test_openai_responses_rejects_nonstandard_output_metadata(content: dict[str, Any]) -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test")
+    with pytest.raises(OpenAIResponsesError, match="unsupported"):
+        codec.decode_response(
+            _terminal_response(
+                [
+                    {
+                        "id": "msg-invalid",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [content],
+                    }
+                ]
+            )
+        )
+
+
+def test_openai_responses_reasoning_requires_summary_and_closed_blocks() -> None:
+    codec = OpenAIResponsesCodec(model="gpt-test")
+    invalid: dict[str, object] = {
+        "id": "reasoning-invalid",
+        "type": "reasoning",
+        "status": "completed",
+        "encrypted_content": "encrypted",
+    }
+    with pytest.raises(OpenAIResponsesError, match="requires summary"):
+        codec.decode_response(_terminal_response([invalid]))
+    invalid["summary"] = [{"type": "summary_text", "text": "x", "vendor": True}]
+    with pytest.raises(OpenAIResponsesError, match="unsupported field"):
+        codec.decode_response(_terminal_response([invalid]))
+
+
+def test_openai_responses_replays_stored_reasoning_without_encrypted_content() -> None:
+    profile = OpenAIResponsesProfile(store=True, include=frozenset())
+    codec = OpenAIResponsesCodec(model="gpt-test", profile=profile)
+    response = codec.decode_response(
+        _terminal_response(
+            [
+                {
+                    "id": "reasoning-stored",
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "summary"}],
+                }
+            ]
+        )
+    )
+    replay = codec.encode_request(
+        ModelRequest(messages=(Message.user("question"), response.to_assistant_message()))
+    )
+    assert "encrypted_content" not in cast(list[dict[str, Any]], replay["input"])[1]
+
     with pytest.raises(OpenAIResponsesError, match="in-progress provider tools"):
         OpenAIResponsesCodec(
-            model="deepseek-v4-flash",
-            profile=profile,
+            model="gpt-test",
+            profile=_openai_web_profile(),
         ).decode_response(
             _terminal_response(
                 [
@@ -1321,7 +1911,7 @@ def test_openai_responses_provider_only_terminal_response_is_valid() -> None:
                         "action": {"type": "search", "query": "pending"},
                     }
                 ],
-                model="deepseek-v4-flash",
+                model="gpt-test",
             )
         )
 
@@ -1340,6 +1930,15 @@ def test_openai_responses_vision_inputs_encode_url_base64_and_artifact_with_medi
                 (
                     ContentPart(type="image", uri="https://images.test/cat.png"),
                     ContentPart(type="image", data={"base64": _JPEG_BASE64}),
+                    ContentPart(
+                        type="image",
+                        media_type="IMAGE/JPEG",
+                        data={"base64": _JPEG_BASE64},
+                    ),
+                    ContentPart(
+                        type="file",
+                        uri=f"DATA:image/jpeg;base64,{_JPEG_BASE64}",
+                    ),
                     ContentPart.artifact_part(ArtifactRef("file-image", media_type="image/png")),
                 ),
             ),
@@ -1348,12 +1947,23 @@ def test_openai_responses_vision_inputs_encode_url_base64_and_artifact_with_medi
 
     content = cast(list[dict[str, Any]], codec.encode_request(request)["input"])[0]["content"]
     assert content == [
-        {"type": "input_image", "image_url": "https://images.test/cat.png"},
+        {"type": "input_image", "image_url": "https://images.test/cat.png", "detail": "auto"},
         {
             "type": "input_image",
             "image_url": f"data:image/jpeg;base64,{_JPEG_BASE64}",
+            "detail": "auto",
         },
-        {"type": "input_image", "file_id": "file-image"},
+        {
+            "type": "input_image",
+            "image_url": f"data:IMAGE/JPEG;base64,{_JPEG_BASE64}",
+            "detail": "auto",
+        },
+        {
+            "type": "input_image",
+            "image_url": f"DATA:image/jpeg;base64,{_JPEG_BASE64}",
+            "detail": "auto",
+        },
+        {"type": "input_image", "file_id": "file-image", "detail": "auto"},
     ]
 
     with pytest.raises(OpenAIResponsesError, match="does not match"):
@@ -1390,6 +2000,61 @@ def test_openai_responses_vision_inputs_encode_url_base64_and_artifact_with_medi
                 )
             )
         )
+
+
+async def test_runtime_sends_file_typed_image_data_url_as_responses_image() -> None:
+    captured: dict[str, object] = {}
+    default = OpenAIResponsesProfile()
+    image_only = OpenAIResponsesProfile(
+        capabilities=replace(
+            default.capabilities,
+            input_modalities=frozenset({"text", "image"}),
+        )
+    )
+
+    async def handler(raw: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(raw.content)
+        return httpx.Response(
+            200,
+            json=_terminal_response(
+                [
+                    {
+                        "id": "msg-1",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                    }
+                ],
+                model="vision-test",
+            ),
+            request=raw,
+        )
+
+    image_uri = f"DATA:image/jpeg;base64,{_JPEG_BASE64}"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = OpenAIResponsesModel(
+            base_url="https://provider.test/v1",
+            api_key="secret",
+            model="vision-test",
+            profile=image_only,
+            client=client,
+        )
+        checkpoint = (
+            await Runtime(model=model)
+            .start((Message("user", (ContentPart("file", uri=image_uri),)),))
+            .result()
+        )
+
+    assert checkpoint.snapshot.status == "completed"
+    body = cast(dict[str, Any], captured["body"])
+    assert body["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": image_uri, "detail": "auto"}],
+        }
+    ]
 
 
 def test_openai_responses_image_generation_decodes_media_type_and_replays_base64_history() -> None:
@@ -1801,7 +2466,7 @@ async def test_openai_responses_image_artifact_load_failure_aborts_before_http()
             )
 
 
-@pytest.mark.parametrize("status", ["incomplete", "failed"])
+@pytest.mark.parametrize("status", ["failed"])
 async def test_openai_responses_terminal_partial_or_failed_image_results_are_externalized(
     status: str,
 ) -> None:
@@ -1812,8 +2477,6 @@ async def test_openai_responses_terminal_partial_or_failed_image_results_are_ext
         "status": status,
         "result": _JPEG_BASE64,
     }
-    if status == "failed":
-        item["error"] = {"code": "image_failed", "message": "partial result"}
     wire = _terminal_response(
         [item],
         tools=[{"type": "image_generation", "output_format": "jpeg"}],
@@ -1993,8 +2656,9 @@ async def test_openai_responses_failed_response_has_same_nonstream_and_stream_se
         "id": "resp-failed",
         "object": "response",
         "model": "gpt-test",
+        "created_at": 1,
         "status": "failed",
-        "error": {"code": "generation_failed", "message": "generation failed"},
+        "error": {"code": "server_error", "message": "generation failed"},
         "output": [],
     }
 
@@ -2055,11 +2719,14 @@ async def test_openai_responses_failed_response_has_same_nonstream_and_stream_se
     streamed = await invoke_failed(stream=True)
 
     assert nonstream == streamed
-    assert nonstream.code == "generation_failed"
+    assert nonstream.code == "server_error"
     assert nonstream.provider == "openai-responses"
     assert nonstream.status_code is None
     assert nonstream.request_id == "request-1"
-    assert nonstream.metadata == {"response_id": "resp-failed", "status": "failed"}
+    retained = cast(dict[str, Any], nonstream.metadata["responses"])
+    assert retained["id"] == "resp-failed"
+    assert retained["status"] == "failed"
+    assert retained["output"] == []
 
     async def envelope_handler(raw: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -2083,3 +2750,32 @@ async def test_openai_responses_failed_response_has_same_nonstream_and_stream_se
                 emit_delta=None,
             )
     assert caught.value.info.code == "plain_error"
+
+
+def test_openai_responses_cancelled_is_a_terminal_error_but_not_an_sse_event() -> None:
+    cancelled: dict[str, object] = {
+        "id": "resp-cancelled",
+        "object": "response",
+        "model": "gpt-test",
+        "created_at": 1,
+        "status": "cancelled",
+        "error": None,
+        "output": [],
+    }
+    codec = OpenAIResponsesCodec(model="gpt-test")
+    with pytest.raises(ModelError, match="cancelled") as full:
+        codec.decode_response(cancelled)
+    retained = cast(dict[str, Any], full.value.info.metadata["responses"])
+    assert retained["id"] == "resp-cancelled"
+    assert retained["status"] == "cancelled"
+    assert retained["output"] == []
+
+    decoder = OpenAIResponsesStreamDecoder(codec, codec.profile)
+    _stream_event(
+        decoder,
+        "response.created",
+        0,
+        response={"id": "resp-cancelled", "object": "response", "status": "in_progress"},
+    )
+    with pytest.raises(OpenAIResponsesError, match="unsupported Responses stream event type"):
+        _stream_event(decoder, "response.cancelled", 1, response=cancelled)

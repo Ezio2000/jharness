@@ -45,7 +45,10 @@ class ExternalWaitTool:
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         del context
-        wait_id = str(call.arguments["wait_id"])
+        arguments = call.arguments
+        if arguments is None:
+            raise ValueError("wait requires JSON object arguments")
+        wait_id = str(arguments["wait_id"])
         return WaitingResult(
             ToolWaiting((ContentPart.text_part(f"waiting for {wait_id}"),)),
             Suspension("external_callback", "external_wait", wait_id),

@@ -269,9 +269,13 @@ def encode_runtime_tool_call(call: RuntimeToolCall) -> dict[str, Any]:
         "name": call.name,
     }
     if isinstance(call, StructuredToolCall):
-        common["arguments"] = thaw_object(call.arguments)
+        if call.arguments is not None:
+            common["arguments"] = thaw_object(call.arguments)
+        else:
+            common["raw_input"] = call.raw_input
     else:
         common["input"] = call.input
+    common["metadata"] = thaw_object(call.metadata)
     return common
 
 
@@ -288,23 +292,37 @@ def decode_runtime_tool_call_value(value: object) -> RuntimeToolCall:
         fields = object_fields(
             mapping,
             "structured runtime tool call",
-            {"input_kind", "id", "name", "arguments"},
+            {"input_kind", "id", "name", "metadata"},
+            {"arguments", "raw_input"},
         )
+        has_arguments = "arguments" in fields
+        has_raw_input = "raw_input" in fields
+        if has_arguments == has_raw_input:
+            raise ProtocolError(
+                "structured runtime tool call requires exactly one of arguments or raw_input"
+            )
         return StructuredToolCall(
             id=string(fields["id"], "tool call id", non_empty=True),
             name=string(fields["name"], "tool call name", non_empty=True),
-            arguments=json_object(fields["arguments"], "tool call arguments"),
+            arguments=(
+                json_object(fields["arguments"], "tool call arguments") if has_arguments else None
+            ),
+            raw_input=(
+                string(fields["raw_input"], "tool call raw_input") if has_raw_input else None
+            ),
+            metadata=json_object(fields["metadata"], "tool call metadata"),
         )
     if input_kind == "freeform":
         fields = object_fields(
             mapping,
             "freeform runtime tool call",
-            {"input_kind", "id", "name", "input"},
+            {"input_kind", "id", "name", "input", "metadata"},
         )
         return FreeformToolCall(
             id=string(fields["id"], "tool call id", non_empty=True),
             name=string(fields["name"], "tool call name", non_empty=True),
             input=string(fields["input"], "tool call input"),
+            metadata=json_object(fields["metadata"], "tool call metadata"),
         )
     raise ProtocolError(f"runtime tool call input_kind has unsupported value: {input_kind}")
 

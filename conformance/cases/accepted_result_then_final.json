@@ -34,7 +34,8 @@
                   "arguments": {
                     "text": "queued",
                     "correlation_id": "job-1"
-                  }
+                  },
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

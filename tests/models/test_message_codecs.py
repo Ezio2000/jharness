@@ -60,13 +60,12 @@ def tool_message(call_id: str, *, failure: bool = False) -> Message:
 
 
 def test_openai_chat_message_codec_covers_roles_multimodal_and_native_parts() -> None:
-    default = OpenAIChatProfile()
+    profile = OpenAIChatProfile()
     profile = OpenAIChatProfile(
         capabilities=replace(
-            default.capabilities,
-            input_modalities=frozenset({"text", "image", "video", "file"}),
-        ),
-        system_content_mode="parts",
+            profile.capabilities,
+            input_modalities=frozenset({"text", "image", "audio", "file"}),
+        )
     )
     call = StructuredToolCall("call-1", "search", {"q": "x"})
 
@@ -74,13 +73,10 @@ def test_openai_chat_message_codec_covers_roles_multimodal_and_native_parts() ->
         "role": "user",
         "content": "callback",
     }
-    assert encode_chat_message(Message.system("policy"), profile)["content"] == [
-        {"type": "text", "text": "policy"}
-    ]
+    assert encode_chat_message(Message.system("policy"), profile)["content"] == "policy"
     assistant = Message.assistant(
         (
             ContentPart.text_part("cannot"),
-            ContentPart(type="refusal", text="no"),
             call,
         ),
     )
@@ -96,10 +92,6 @@ def test_openai_chat_message_codec_covers_roles_multimodal_and_native_parts() ->
         encode_content_part(ContentPart("image", uri="https://x/image.png"), profile)["type"]
         == "image_url"
     )
-    assert (
-        encode_content_part(ContentPart("video", uri="https://x/video.mp4"), profile)["type"]
-        == "video_url"
-    )
     assert encode_content_part(ContentPart.artifact_part(ArtifactRef("file-1")), profile) == {
         "type": "file",
         "file": {"file_id": "file-1"},
@@ -112,13 +104,42 @@ def test_openai_chat_message_codec_covers_roles_multimodal_and_native_parts() ->
     )
 
     decoded = decode_message_content(
-        [
-            {"type": "text", "text": "hello"},
-            {"type": "refusal", "refusal": "no"},
-        ]
+        "hello",
     )
-    assert [part.type for part in decoded] == ["text", "refusal"]
+    assert [part.type for part in decoded] == ["text"]
     assert decode_message_refusal("blocked")[0].type == "refusal"
+
+
+def test_openai_chat_files_use_one_nested_shape_and_require_file_capability() -> None:
+    default = OpenAIChatProfile()
+    file_profile = OpenAIChatProfile(
+        capabilities=replace(default.capabilities, input_modalities=frozenset({"text", "file"})),
+    )
+    image_artifact = ContentPart.artifact_part(
+        ArtifactRef("file-image", media_type="IMAGE/PNG", name="chart.png")
+    )
+
+    assert encode_content_part(image_artifact, file_profile) == {
+        "type": "file",
+        "file": {"file_id": "file-image"},
+    }
+    assert encode_content_part(
+        ContentPart("file", uri="data:image/png;base64,AA=="),
+        file_profile,
+    ) == {
+        "type": "file",
+        "file": {"file_data": "AA==", "filename": "file"},
+    }
+    with pytest.raises(OpenAIChatError, match="does not support file input"):
+        encode_content_part(
+            ContentPart.artifact_part(ArtifactRef("file-text")),
+            OpenAIChatProfile(
+                capabilities=replace(
+                    default.capabilities,
+                    input_modalities=frozenset({"text", "image", "audio"}),
+                )
+            ),
+        )
 
 
 def test_openai_chat_tool_codec_validates_choices_and_arguments() -> None:
@@ -126,10 +147,13 @@ def test_openai_chat_tool_codec_validates_choices_and_arguments() -> None:
     profile = OpenAIChatProfile()
 
     assert encode_openai_tools((spec,), profile)[0]["function"]["name"] == "search"
-    assert encode_openai_choice(ToolChoice(), tool_names={"search"}, profile=profile) == "auto"
+    assert (
+        encode_openai_choice(ToolChoice(), tools_by_name={"search": spec}, profile=profile)
+        == "auto"
+    )
     assert encode_openai_choice(
         ToolChoice(type="runtime", name="search"),
-        tool_names={"search"},
+        tools_by_name={"search": spec},
         profile=profile,
     ) == {"type": "function", "function": {"name": "search"}}
     calls = decode_tool_calls(
@@ -137,11 +161,12 @@ def test_openai_chat_tool_codec_validates_choices_and_arguments() -> None:
             {
                 "id": "call-1",
                 "type": "function",
-                "function": {"name": "search", "arguments": {"q": "x"}},
+                "function": {"name": "search", "arguments": '{"q":"x"}'},
             },
             {
                 "id": "call-2",
-                "function": {"name": "search", "arguments": ""},
+                "type": "function",
+                "function": {"name": "search", "arguments": "{}"},
             },
         ]
     )
@@ -151,15 +176,25 @@ def test_openai_chat_tool_codec_validates_choices_and_arguments() -> None:
     ]
 
     with pytest.raises(OpenAIChatError, match="requires at least one"):
-        encode_openai_choice(ToolChoice("required"), tool_names=set(), profile=profile)
+        encode_openai_choice(ToolChoice("required"), tools_by_name={}, profile=profile)
     with pytest.raises(OpenAIChatError, match="unavailable"):
         encode_openai_choice(
             ToolChoice(type="runtime", name="other"),
-            tool_names={"search"},
+            tools_by_name={"search": spec},
             profile=profile,
         )
-    with pytest.raises(OpenAIChatError, match="invalid JSON"):
-        decode_tool_calls([{"id": "call", "function": {"name": "search", "arguments": "{"}}])
+    raw_call = decode_tool_calls(
+        [
+            {
+                "id": "call",
+                "type": "function",
+                "function": {"name": "search", "arguments": "{"},
+            }
+        ]
+    )[0]
+    assert isinstance(raw_call, StructuredToolCall)
+    assert raw_call.arguments is None
+    assert raw_call.raw_input == "{"
 
 
 def test_openai_chat_message_codec_rejects_unsupported_content() -> None:
@@ -172,16 +207,18 @@ def test_openai_chat_message_codec_rejects_unsupported_content() -> None:
     )
     with pytest.raises(OpenAIChatError, match="image input"):
         encode_content_part(ContentPart("image", uri="https://x/image"), profile)
-    with pytest.raises(OpenAIChatError, match="unsupported content"):
+    with pytest.raises(OpenAIChatError, match="audio input"):
         encode_content_part(ContentPart("audio", uri="https://x/audio"), profile)
-    with pytest.raises(OpenAIChatError, match="string, array, or null"):
+    with pytest.raises(OpenAIChatError, match="string or null"):
         decode_message_content(3)
-    with pytest.raises(OpenAIChatError, match="non-empty"):
-        decode_message_refusal("")
+    refusal = decode_message_refusal("")
+    assert len(refusal) == 1
+    assert refusal[0].type == "refusal"
+    assert refusal[0].text == ""
 
 
 def test_anthropic_messages_message_codec_covers_system_tools_and_native_parts() -> None:
-    profile = AnthropicMessagesProfile(system_content_mode="blocks")
+    profile = AnthropicMessagesProfile()
     call = StructuredToolCall("call-1", "search", {"q": "x"})
     thinking = ContentPart(
         type="thinking",
@@ -229,7 +266,7 @@ def test_anthropic_messages_message_codec_covers_system_tools_and_native_parts()
     assert encode_message(Message.external("callback"), profile)["role"] == "user"
 
 
-def test_anthropic_messages_message_codec_guards_redacted_thinking_replay() -> None:
+def test_anthropic_messages_message_codec_round_trips_redacted_thinking() -> None:
     default_profile = AnthropicMessagesProfile()
     metadata_redacted = ContentPart(
         type="redacted_thinking",
@@ -240,27 +277,218 @@ def test_anthropic_messages_message_codec_guards_redacted_thinking_replay() -> N
         default_profile,
     )["content"] == [{"type": "redacted_thinking", "data": "secret"}]
 
-    profile = AnthropicMessagesProfile(
-        name="anthropic-without-redacted-thinking",
-        redacted_thinking_mode="reject",
-    )
-    expected_error = "anthropic-without-redacted-thinking does not support redacted_thinking"
     native_redacted = ContentPart(
         type="redacted_thinking",
         data={"anthropic": {"type": "redacted_thinking", "data": "secret"}},
     )
-    for part in (metadata_redacted, native_redacted):
-        with pytest.raises(AnthropicMessagesError, match=expected_error):
-            encode_message(Message.assistant((part,)), profile)
+    assert encode_message(Message.assistant((native_redacted,)), default_profile)["content"] == [
+        {"type": "redacted_thinking", "data": "secret"}
+    ]
 
     thinking = ContentPart(
         type="thinking",
         text="reason",
         metadata={"anthropic": {"signature": "sig"}},
     )
-    assert encode_message(Message.assistant((thinking,)), profile)["content"] == [
+    assert encode_message(Message.assistant((thinking,)), default_profile)["content"] == [
         {"type": "thinking", "thinking": "reason", "signature": "sig"}
     ]
+
+
+def test_anthropic_messages_native_blocks_reject_unknown_metadata_and_require_signature() -> None:
+    profile = AnthropicMessagesProfile()
+    unknown_text = ContentPart.text_part(
+        "hello",
+        metadata={"anthropic": {"extra": {"vendor_extra": True}}},
+    )
+    unsigned_thinking = ContentPart(type="thinking", text="reason")
+
+    with pytest.raises(AnthropicMessagesError, match="unsupported field: vendor_extra"):
+        encode_message(Message.assistant((unknown_text,)), profile)
+    with pytest.raises(AnthropicMessagesError, match="metadata signature"):
+        encode_message(Message.assistant((unsigned_thinking,)), profile)
+
+
+@pytest.mark.parametrize(
+    "citation",
+    (
+        {
+            "type": "char_location",
+            "cited_text": "text",
+            "document_index": 0,
+            "start_char_index": 0,
+            "end_char_index": 4,
+            "document_title": None,
+            "file_id": None,
+        },
+        {
+            "type": "page_location",
+            "cited_text": "text",
+            "document_index": 0,
+            "start_page_number": 1,
+            "end_page_number": 1,
+        },
+        {
+            "type": "content_block_location",
+            "cited_text": "text",
+            "document_index": 0,
+            "start_block_index": 0,
+            "end_block_index": 1,
+        },
+        {
+            "type": "web_search_result_location",
+            "cited_text": "text",
+            "encrypted_index": "encrypted",
+            "url": "https://example.com",
+            "title": None,
+        },
+        {
+            "type": "search_result_location",
+            "cited_text": "text",
+            "search_result_index": 0,
+            "source": "source",
+            "start_block_index": 0,
+            "end_block_index": 1,
+            "title": None,
+        },
+    ),
+)
+def test_anthropic_messages_accepts_all_official_citation_variants(
+    citation: dict[str, object],
+) -> None:
+    parts = decode_content_blocks(
+        [{"type": "text", "text": "answer", "citations": [citation]}], AnthropicMessagesProfile()
+    )
+    assert parts[0].metadata["anthropic"]["extra"]["citations"] == [citation]
+
+
+def test_anthropic_messages_rejects_unknown_citation_fields() -> None:
+    with pytest.raises(AnthropicMessagesError, match="unsupported field: vendor_extra"):
+        decode_content_blocks(
+            [
+                {
+                    "type": "text",
+                    "text": "answer",
+                    "citations": [
+                        {
+                            "type": "page_location",
+                            "cited_text": "text",
+                            "document_index": 0,
+                            "start_page_number": 1,
+                            "end_page_number": 1,
+                            "vendor_extra": True,
+                        }
+                    ],
+                }
+            ],
+            AnthropicMessagesProfile(),
+        )
+
+
+def test_anthropic_messages_native_document_citations_use_config_not_text_citations() -> None:
+    profile = AnthropicMessagesProfile()
+    document = ContentPart(
+        "opaque",
+        data={
+            "anthropic": {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "aGVsbG8=",
+                },
+                "citations": {"enabled": True},
+            }
+        },
+    )
+    assert encode_user_content_part(document, profile)["citations"] == {"enabled": True}
+
+    invalid = ContentPart(
+        "opaque",
+        data={
+            "anthropic": {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "aGVsbG8=",
+                },
+                "citations": [],
+            }
+        },
+    )
+    with pytest.raises(AnthropicMessagesError, match="document citations must be an object"):
+        encode_user_content_part(invalid, profile)
+
+
+@pytest.mark.parametrize(
+    "block, match",
+    (
+        (
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/svg+xml", "data": "aGVsbG8="},
+            },
+            "unsupported media_type",
+        ),
+        (
+            {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "text/plain", "data": "aGVsbG8="},
+            },
+            "unsupported media_type",
+        ),
+        (
+            {
+                "type": "document",
+                "source": {"type": "text", "media_type": "text/html", "data": "text"},
+            },
+            "must be text/plain",
+        ),
+        (
+            {"type": "document", "source": {"type": "container_upload", "file_id": "file"}},
+            "unsupported Anthropic-native document source type",
+        ),
+    ),
+)
+def test_anthropic_messages_native_sources_reject_unsupported_shapes(
+    block: dict[str, object], match: str
+) -> None:
+    with pytest.raises(AnthropicMessagesError, match=match):
+        encode_user_content_part(
+            ContentPart("opaque", data={"anthropic": block}), AnthropicMessagesProfile()
+        )
+
+
+def test_anthropic_messages_document_content_source_validates_nested_blocks() -> None:
+    profile = AnthropicMessagesProfile()
+    document = ContentPart(
+        "opaque",
+        data={
+            "anthropic": {
+                "type": "document",
+                "source": {
+                    "type": "content",
+                    "content": [
+                        {"type": "text", "text": "source text"},
+                        {"type": "image", "source": {"type": "file", "file_id": "image"}},
+                    ],
+                },
+            }
+        },
+    )
+    assert encode_user_content_part(document, profile)["source"]["type"] == "content"
+    bad_document = ContentPart(
+        "opaque",
+        data={
+            "anthropic": {
+                "type": "document",
+                "source": {"type": "content", "content": [{"type": "vendor"}]},
+            }
+        },
+    )
+    with pytest.raises(AnthropicMessagesError, match="must be text or image"):
+        encode_user_content_part(bad_document, profile)
 
 
 def test_anthropic_messages_media_and_tool_choice_codec() -> None:
@@ -282,19 +510,21 @@ def test_anthropic_messages_media_and_tool_choice_codec() -> None:
     )
 
     assert encode_user_content_part(image, profile)["source"]["type"] == "base64"
-    default_media = encode_user_content_part(
-        ContentPart("image", uri="data:;base64,aGVsbG8="),
-        profile,
-    )
-    assert default_media["source"]["media_type"] == "application/octet-stream"
+    with pytest.raises(AnthropicMessagesError, match="image data URLs"):
+        encode_user_content_part(ContentPart("image", uri="data:;base64,aGVsbG8="), profile)
     assert encode_user_content_part(pdf, profile)["source"]["media_type"] == "application/pdf"
     assert encode_user_content_part(text, profile)["source"]["data"] == "hello"
-    assert encode_user_content_part(ContentPart.artifact_part(ArtifactRef("file-1")), profile)[
-        "source"
-    ] == {
+    assert encode_user_content_part(
+        ContentPart.artifact_part(ArtifactRef("file-1", media_type="application/pdf")),
+        profile,
+    )["source"] == {
         "type": "file",
         "file_id": "file-1",
     }
+    assert encode_user_content_part(
+        ContentPart.artifact_part(ArtifactRef("dataset-1", media_type="text/csv")),
+        profile,
+    ) == {"type": "container_upload", "file_id": "dataset-1"}
     spec = StructuredToolSpec("search", "search", {"type": "object"})
     assert encode_anthropic_tools((spec,), (), profile)[0]["name"] == "search"
     assert encode_anthropic_choice(
@@ -314,7 +544,7 @@ def test_anthropic_messages_codec_rejects_invalid_roles_media_and_blocks() -> No
             input_modalities=frozenset({"text"}),
         )
     )
-    with pytest.raises(AnthropicMessagesError, match="mid-conversation"):
+    with pytest.raises(AnthropicMessagesError, match="all system content before messages"):
         encode_messages(
             (Message.user("hello"), Message.system("late")),
             profile,
@@ -323,7 +553,7 @@ def test_anthropic_messages_codec_rejects_invalid_roles_media_and_blocks() -> No
         encode_user_content_part(ContentPart("image", uri="https://x/image"), profile)
     with pytest.raises(AnthropicMessagesError, match="video input"):
         encode_user_content_part(ContentPart("video", uri="https://x/video"), profile)
-    with pytest.raises(AnthropicMessagesError, match="non-empty text"):
-        decode_content_blocks([{"type": "text", "text": ""}], profile)
-    with pytest.raises(AnthropicMessagesError, match="invalid JSON"):
-        decode_tool_uses([{"id": "call", "name": "tool", "input": "{"}])
+    empty = decode_content_blocks([{"type": "text", "text": ""}], profile)
+    assert empty == [ContentPart.text_part("")]
+    with pytest.raises(AnthropicMessagesError, match="input must be an object"):
+        decode_tool_uses([{"type": "tool_use", "id": "call", "name": "tool", "input": "{"}])

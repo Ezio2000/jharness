@@ -33,7 +33,8 @@
                   "name": "echo",
                   "arguments": {
                     "text": "late"
-                  }
+                  },
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

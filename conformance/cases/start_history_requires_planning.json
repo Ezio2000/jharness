@@ -25,7 +25,8 @@
             "input_kind": "structured",
             "id": "call-1",
             "name": "lookup",
-            "arguments": {}
+            "arguments": {},
+            "metadata": {}
           }
         ],
         "metadata": {}

@@ -256,6 +256,7 @@ async def test_function_tool_decorator_preserves_explicit_spec() -> None:
         execution=ToolExecution(read_only=True, idempotent=True),
     )
     async def sum_tool(call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
+        assert call.arguments is not None
         return SettledResult(
             ToolSuccess((ContentPart.text_part(str(sum(call.arguments.values()))),))
         )

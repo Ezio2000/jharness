@@ -8,7 +8,6 @@ three explicit wire APIs:
 | `jharness.models.openai` | OpenAI Chat (Chat Completions API) | `OpenAIChatModel` and `OpenAIChatProfile` |
 | `jharness.models.openai` | OpenAI Responses | `OpenAIResponsesModel` and `OpenAIResponsesProfile` |
 | `jharness.models.anthropic` | Anthropic Messages | `AnthropicMessagesModel` and `AnthropicMessagesProfile` |
-| `jharness.models.deepseek` | Compatible Chat Completions, Messages, or native Responses endpoint | DeepSeek profile factories for the concrete adapters above |
 
 Install the adapter package with `uv add jharness-models`. Provider APIs are not
 flattened into `jharness.models`; import from the namespaces shown above.
@@ -60,23 +59,31 @@ returns that same value unchanged. There is no second set of per-feature profile
 booleans for the client to translate.
 
 Built-in profile identifiers use the same concise API vocabulary as their Python
-types: `openai-chat`, `openai-responses`, `anthropic-messages`, `deepseek-chat`,
-`deepseek-messages`, and `deepseek-responses`. A DeepSeek thinking profile appends
-`-thinking`; the default non-thinking profiles have no mode suffix.
+types: `openai-chat`, `openai-responses`, and `anthropic-messages`.
 
 `profile.name` is an observable adapter identity, not a display label or a supplier
 field. It is emitted as `ModelResponse.metadata["provider"]` and
-`ModelErrorInfo.provider`. Runtime checkpoints, history, and traces preserve assistant
-output rather than response-level metadata, so they do not persist this identity.
+`ModelErrorInfo.provider`. `ModelResponse.to_assistant_message()` copies response
+metadata onto the assistant turn, so checkpoints, history, and traces retain this
+identity without a second compatibility field.
 
 The default `OpenAIResponsesProfile` is deliberately conservative: text input and
 output, runtime functions, streaming, and usage only. It does not claim image/file
 input, structured output, JSON mode, or provider-hosted tools for an arbitrary model
-identifier. `AnthropicMessagesProfile` likewise keeps its server-tool registry empty.
+identifier. `AnthropicMessagesProfile` likewise advertises no hosted tool by default.
 The official `openai_responses_profile()` and `anthropic_messages_profile()` factories
-install the corresponding supplier-hosted tool identities and codecs. Selecting one is
-the host's explicit confirmation that its chosen endpoint and model support those
-advertised capabilities.
+enable the corresponding protocol-owned hosted-tool identities. Hosted-tool wire
+mapping is closed over the documented protocol schema; profiles cannot install custom
+codecs or alternate field sets. Selecting an official profile is the host's explicit
+confirmation that its chosen endpoint and model support those advertised capabilities.
+
+Capabilities are trusted host declarations, not results of endpoint discovery. The
+runtime rejects a request that exceeds the selected profile before network invocation,
+but it cannot prove that an advertised capability is implemented by the configured
+model. If a profile overstates support, the provider may reject the request, silently
+ignore the field or tool, or return a normal response after degrading the input. Keep
+generic profiles conservative and opt in only to capabilities verified for the exact
+model and endpoint.
 
 For example, narrow Chat Completions to text input while retaining its other default
 capabilities:
@@ -101,9 +108,8 @@ text_only = OpenAIChatProfile(
 only. The latter says whether a model that may return parallel runtime calls can honor
 `allow_parallel_runtime_tool_calls=False`; provider-only selection neither requires that
 control nor emits its wire field. `seed` declares whether `ModelOptions.seed` is
-accepted. Protocol-only wire choices—such as whether automatic tool choice is explicit,
-how reasoning history is encoded, or which fields a hosted tool accepts—remain profile
-policy rather than kernel semantics.
+accepted. Each adapter has one standard protocol wire shape; profiles declare model
+capabilities and documented request options, not alternate provider dialects.
 
 ## Capability and Execution Boundaries
 
@@ -127,11 +133,9 @@ The current adapters expose these boundaries as follows:
 | Adapter/profile | Default model input | Native model output | Runtime tools | Provider-hosted tools | Conversation rule |
 | --- | --- | --- | --- | --- | --- |
 | OpenAI Chat | Text and image | Text | Function tools | None | Complete JHarness history is encoded as messages |
-| Anthropic Messages | Text, image, and file | Text | Client `tool_use` blocks | Official web-search preset or host-installed server-tool codecs | Complete JHarness history is encoded as Messages blocks |
-| OpenAI Responses default | Text | Text | Function tools | None | Complete ordered history is encoded as Responses input items with `store=false` |
-| OpenAI Responses official/explicit profile | Host-declared subset of text, image, and file | Text | Function tools | Official web-search and image-generation presets or host-installed codecs | Profile storage policy and complete ordered history are authoritative |
-| DeepSeek Responses profile | Text only | Text | Function and `apply_patch` freeform tools | `deepseek.responses/web_search` | Strictly stateless; complete history is resent |
-| DeepSeek Messages profile | Text only | Text | Client `tool_use` blocks | `deepseek.messages/web_search` | Complete Messages history, including opaque search results, is replayed exactly |
+| Anthropic Messages | Text, image, and file | Text and container-upload file references | Client `tool_use` blocks | Official web-search preset | Complete JHarness history is encoded as Messages blocks |
+| OpenAI Responses default | Text | Text | Function and custom tools | None | Complete ordered history is encoded as Responses input items with `store=false`; encrypted reasoning is requested for stateless replay |
+| OpenAI Responses official/explicit profile | Host-declared subset of text, image, and file | Text | Function and custom tools | Official web-search and image-generation presets | Profile storage policy and complete ordered history are authoritative |
 
 Profiles remain authoritative. The runtime rejects request modalities and tool
 identities that the selected explicit profile does not advertise before network
@@ -143,7 +147,7 @@ invocation.
 | --- | --- | --- |
 | Kernel `ModelCapabilities` | Exact model modalities, tool-choice types, runtime/provider tools, parallel behavior, structured output, seed, streaming, and usage | Name a supplier or encode HTTP/SSE fields |
 | Protocol profile | One `ModelCapabilities` plus immutable wire policies for Chat Completions, Responses, or Messages | Duplicate capabilities as `supports_*` flags |
-| Supplier factory | Compose a protocol profile for one concrete endpoint, such as DeepSeek thinking or Responses | Add supplier checks to a shared codec |
+| Official preset factory | Add documented hosted-tool identities and model capabilities | Add undocumented wire variants or infer behavior from model names |
 | Protocol codec/client | Consume the profile, validate wire data, and expose `profile.capabilities` unchanged | Infer features from model names or translate a second capability representation |
 
 ### Hosted-Tool Presets
@@ -221,7 +225,9 @@ explicitly when the chosen model and deployment support it.
 
 Constructing either official profile sends no tool declaration by itself. The generic
 `OpenAIResponsesProfile()` and `AnthropicMessagesProfile()` classes remain available
-for compatible endpoints or narrower, host-composed capability sets.
+for narrower, host-composed capability sets. A third-party endpoint can use an adapter
+through `base_url` and `model` only when it implements that protocol's standard wire
+contract; vendor-specific deviations belong in a separate user-owned adapter.
 
 ### Vision and Hosted Image Generation
 
@@ -244,6 +250,14 @@ message = Message(
     ),
 )
 ```
+
+An `ArtifactRef` whose `media_type` is `image/*` is also an image modality even though
+the provider transports it by file id. Responses encodes it as `input_image` with
+`file_id`. Anthropic Messages maps JPEG, PNG, GIF, and WebP files to `image`, PDF and
+plain text to `document`, and datasets or other MIME types to `container_upload`.
+Chat Completions always uses the standard nested `file` content-part shape, so an
+artifact also requires the profile's `"file"` input capability; top-level `file_id`
+and `file_data` variants are not accepted.
 
 Declare OpenAI-hosted image generation in an explicit model profile. Generated bytes
 must be externalized through a host-owned `OpenAIResponsesArtifactStore` before the model
@@ -361,72 +375,11 @@ example, makes repeated saves safe and simplifies that cleanup.
 ### Responses Storage Policy
 
 The default OpenAI Responses profile sends `store=false` and requests
-`reasoning.encrypted_content`, allowing reasoning items to round-trip in complete
-history without relying on provider storage. Set `store=True` explicitly only when the
-host permits provider retention; `include` may then be empty. `store` and `include` are
-first-class profile fields and cannot be overridden through `extra_request_body`.
-Compatible endpoints that do not implement these fields use `store=None` and an empty
-`include`, as the DeepSeek Responses profile does.
-
-## DeepSeek Profiles
-
-DeepSeek factories configure one of the concrete adapters:
-
-```python
-import os
-
-from jharness.models.deepseek import deepseek_chat_profile
-from jharness.models.openai import OpenAIChatModel
-
-model = OpenAIChatModel(
-    base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-    api_key=os.environ["DEEPSEEK_API_KEY"],
-    model=os.environ["DEEPSEEK_MODEL"],
-    profile=deepseek_chat_profile(thinking=True, effort="high"),
-)
-```
-
-`deepseek_messages_profile` configures `AnthropicMessagesModel` instead. Both factories
-default to non-thinking mode; set `thinking=True` explicitly to enable thinking.
-`effort` accepts `"high"` or `"max"` only when thinking is enabled.
-
-DeepSeek's native Responses endpoint uses the Responses adapter with its own strict
-profile:
-
-```python
-import os
-
-from jharness.models.deepseek import deepseek_responses_profile
-from jharness.models.openai import OpenAIResponsesModel
-
-model = OpenAIResponsesModel(
-    base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-    api_key=os.environ["DEEPSEEK_API_KEY"],
-    model="deepseek-v4-flash",
-    profile=deepseek_responses_profile(effort="none"),
-)
-```
-
-This profile accepts only `deepseek-v4-flash`, text input and output, runtime function
-tools, the exact freeform runtime tool `apply_patch`, and the provider-hosted
-`deepseek.responses/web_search` tool. Web search accepts the proven `web_search` and
-`web_search_2025_08_26` wire variants. It rejects image or file input, image generation,
-unmodeled provider tools, `seed`, and requests to disable parallel runtime calls while
-runtime tools remain selectable. These checks happen locally instead of relying on fields
-the compatible endpoint may silently ignore. DeepSeek Responses is stateless: every
-request carries the complete ordered history, and the codec omits `store` and
-`previous_response_id` instead of relying on provider-managed conversation state. It
-never uses a response ID as a continuation handle. See the
-[DeepSeek Responses API guide](https://api-docs.deepseek.com/guides/responses_api/)
-for the upstream endpoint behavior.
-
-DeepSeek can emit `response.web_search_call.completed` after an individual search
-action has finished even when the later `response.output_item.done` item reports that
-action as failed. The DeepSeek profile therefore exposes that lifecycle event as an
-advisory provider-tool delta while keeping the portable call status `in_progress`.
-The `response.output_item.done` item finalizes the live `completed`, `incomplete`, or
-`failed` status. The terminal full response remains the authoritative durable value
-and must report the same provider-tool status.
+`reasoning.encrypted_content` through the standard `include` field so native reasoning
+items can be replayed statelessly. Set `store=True` explicitly only when the host permits
+provider retention; callers may then choose an empty `include`. Generic kernel reasoning
+is never synthesized into a native Responses reasoning item, and an item without its
+original encrypted content cannot be replayed in a stateless request.
 
 ## Retry and Fallback
 
@@ -454,7 +407,8 @@ in-flight model work.
 `ModelError`. Its advertised capabilities are the field-by-field intersection of the
 two models, including exact tool-choice and provider-tool intersections, preventing
 the runtime from relying on a capability either model marks unsupported.
-Endpoint-specific request-shape compatibility remains the host's responsibility.
+Fallback composition assumes that each model already implements its selected standard
+protocol contract; endpoint dialect handling is outside these adapters.
 
 Neither decorator switches attempts once the first streaming delta is offered to the
 host sink. This prevents deltas from separate provider attempts from being presented
@@ -497,11 +451,11 @@ Provider HTTP/SSE envelopes and codecs stay in `jharness.models`. An adapter may
 selected native item data in explicit `ContentPart.data`, `metadata`, or
 `ProviderToolCall` fields when the complete ordered history must round-trip, but those
 opaque details do not become general kernel semantics. The package implements OpenAI
-Chat Completions, Anthropic Messages, and OpenAI-compatible Responses. Hosted tools
+Chat Completions, Anthropic Messages, and OpenAI Responses. Hosted tools
 are available only when explicitly advertised by the selected profile and requested
-through `ProviderToolSpec`. Responses installs independent codecs for image generation
-and web search; Anthropic Messages installs independent server-tool codecs, including
-DeepSeek's verified web search. Chat Completions remains a runtime-tool protocol unless
-a concrete Chat-compatible endpoint exposes a stable hosted-call lifecycle.
+through `ProviderToolSpec`. Responses implements fixed official mappings for image
+generation and web search; Anthropic Messages implements its fixed official web-search
+mapping. Profiles cannot inject alternate declarations, result blocks, lifecycle
+events, or configuration fields. Chat Completions remains a runtime-tool protocol.
 Provider-managed conversation state, batch jobs, and file-upload management remain
 outside this package.

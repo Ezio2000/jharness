@@ -7,7 +7,6 @@ import pytest
 from jharness.kernel import (
     ContentPart,
     ModelContentDelta,
-    ModelReasoningDelta,
     ModelRuntimeToolCallDelta,
     ModelUsageDelta,
     StructuredToolCall,
@@ -26,6 +25,10 @@ def openai_choice(
     **metadata: object,
 ) -> dict[str, Any]:
     return {
+        "id": "response",
+        "model": "model",
+        "object": "chat.completion.chunk",
+        "created": 1,
         **metadata,
         "choices": [{"index": index, "delta": delta, "finish_reason": finish_reason}],
     }
@@ -46,19 +49,19 @@ def test_openai_chat_stream_completion_guards_usage_and_metadata() -> None:
         decoder.completed_response()
     usage = decoder.apply_chunk(
         {
+            "id": "response",
+            "model": "model",
+            "object": "chat.completion.chunk",
+            "created": 1,
             "choices": [],
             "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
         }
     )
     assert isinstance(usage[0], ModelUsageDelta)
     decoder.apply_chunk(openai_choice({}, finish_reason="stop"))
-    with pytest.raises(OpenAIChatError, match="without content"):
-        decoder.completed_response()
-
-    reasoning_only = OpenAIChatStreamDecoder(OpenAIChatProfile())
-    reasoning_only.apply_chunk(openai_choice({"reasoning_content": "why"}, finish_reason="stop"))
-    with pytest.raises(OpenAIChatError, match="without content"):
-        reasoning_only.completed_response()
+    empty = decoder.completed_response()
+    assert empty.output == ()
+    assert empty.metadata["openai_chat"] == {"content_null": True}
 
     unfinished = OpenAIChatStreamDecoder(OpenAIChatProfile())
     unfinished.apply_chunk(openai_choice({"content": "x"}))
@@ -68,7 +71,7 @@ def test_openai_chat_stream_completion_guards_usage_and_metadata() -> None:
     complete = OpenAIChatStreamDecoder(OpenAIChatProfile())
     deltas = complete.apply_chunk(
         openai_choice(
-            {"role": "assistant", "refusal": "no", "reasoning_content": "why"},
+            {"role": "assistant", "refusal": "no"},
             finish_reason="stop",
             id="response",
             model="model",
@@ -83,10 +86,31 @@ def test_openai_chat_stream_completion_guards_usage_and_metadata() -> None:
     assert response.metadata["created"] == 7
 
 
+def test_openai_chat_stream_content_filter_preserves_chunk_obfuscation_and_null_history() -> None:
+    decoder = OpenAIChatStreamDecoder(OpenAIChatProfile())
+    decoder.apply_chunk(
+        {
+            "id": "response",
+            "model": "model",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "content_filter"}],
+            "service_tier": "priority",
+            "system_fingerprint": "fp_123",
+            "obfuscation": "first",
+        }
+    )
+    response = decoder.completed_response()
+
+    assert response.output == ()
+    assert response.metadata["obfuscation"] == ["first"]
+    assert response.metadata["openai_chat"] == {"content_null": True}
+
+
 @pytest.mark.parametrize(
     "chunk,pattern",
     [
-        ({"unused": None}, "requires choices or usage"),
+        ({"unused": None}, "stream chunk has unsupported fields"),
         ({"choices": 1}, "choices must be an array"),
         ({"choices": list[object]()}, "empty choices require usage"),
         (
@@ -97,10 +121,10 @@ def test_openai_chat_stream_completion_guards_usage_and_metadata() -> None:
         (openai_choice({"unused": None}, index=True), "index must be an integer"),
         (openai_choice({"unused": None}, index=1), "index must be 0"),
         (openai_choice(1), "delta must be an object"),
-        (openai_choice({"unused": None}, finish_reason=""), "finish_reason must be"),
+        (openai_choice({}, finish_reason=""), "finish_reason has an unsupported"),
         (openai_choice({"role": "user"}), "role must be 'assistant'"),
         (openai_choice({"content": 1}), "content delta must be"),
-        (openai_choice({"reasoning_content": 1}), "reasoning delta must be"),
+        (openai_choice({"reasoning_content": 1}), "do not support reasoning_content"),
         (openai_choice({"refusal": 1}), "refusal delta must be"),
         (openai_choice({"tool_calls": 1}), "tool_calls must be an array"),
         (openai_choice({"tool_calls": [1]}), "tool call must be an object"),
@@ -134,7 +158,15 @@ def test_openai_chat_stream_completion_guards_usage_and_metadata() -> None:
 )
 def test_openai_chat_stream_rejects_invalid_chunks(chunk: dict[str, Any], pattern: str) -> None:
     with pytest.raises(OpenAIChatError, match=pattern):
-        OpenAIChatStreamDecoder(OpenAIChatProfile()).apply_chunk(chunk)
+        OpenAIChatStreamDecoder(OpenAIChatProfile()).apply_chunk(
+            {
+                "id": "response",
+                "model": "model",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                **chunk,
+            }
+        )
 
 
 def test_openai_chat_stream_rejects_metadata_changes_and_post_finish_choices() -> None:
@@ -149,14 +181,15 @@ def test_openai_chat_stream_rejects_metadata_changes_and_post_finish_choices() -
         finished.apply_chunk(openai_choice({"content": "b"}))
 
     empty_call = OpenAIChatStreamDecoder(OpenAIChatProfile())
-    assert empty_call.apply_chunk(openai_choice({"tool_calls": [{"unused": None}]})) == []
+    with pytest.raises(OpenAIChatError, match="tool call has unsupported fields"):
+        empty_call.apply_chunk(openai_choice({"tool_calls": [{"unused": None}]}))
 
 
 @pytest.mark.parametrize(
     ("wire_field", "part_type"),
     (("content", "text"), ("refusal", "refusal")),
 )
-def test_openai_chat_live_only_stream_reserves_content_before_tool_calls(
+def test_openai_chat_stream_reserves_content_before_tool_calls(
     wire_field: str,
     part_type: str,
 ) -> None:
@@ -181,7 +214,7 @@ def test_openai_chat_live_only_stream_reserves_content_before_tool_calls(
     )
 
 
-def test_openai_chat_live_only_stream_reserves_same_chunk_prefix_for_multiple_tools() -> None:
+def test_openai_chat_stream_reserves_same_chunk_prefix_for_multiple_tools() -> None:
     decoder = OpenAIChatStreamDecoder(OpenAIChatProfile())
     deltas = decoder.apply_chunk(
         openai_choice(
@@ -211,25 +244,6 @@ def test_openai_chat_live_only_stream_reserves_same_chunk_prefix_for_multiple_to
     )
 
 
-def test_openai_chat_live_only_reasoning_does_not_reserve_durable_output() -> None:
-    decoder = OpenAIChatStreamDecoder(OpenAIChatProfile())
-    deltas = decoder.apply_chunk(
-        openai_choice(
-            {
-                "reasoning_content": "why",
-                "tool_calls": [openai_tool_call(0, "call-1", "search")],
-            },
-            finish_reason="tool_calls",
-        )
-    )
-
-    assert [(type(delta), getattr(delta, "output_index", None)) for delta in deltas] == [
-        (ModelReasoningDelta, 0),
-        (ModelRuntimeToolCallDelta, 0),
-    ]
-    assert decoder.completed_response().output == (StructuredToolCall("call-1", "search", {}),)
-
-
 def test_openai_chat_empty_tool_fragment_does_not_freeze_output_offset() -> None:
     decoder = OpenAIChatStreamDecoder(OpenAIChatProfile())
     empty_tool_call: dict[str, Any] = {"index": 0, "type": "function", "function": {}}
@@ -255,117 +269,6 @@ def test_openai_chat_empty_tool_fragment_does_not_freeze_output_offset() -> None
     )
 
 
-def test_openai_chat_stream_round_trips_reasoning_with_distinct_output_indexes() -> None:
-    decoder = OpenAIChatStreamDecoder(OpenAIChatProfile(reasoning_content_mode="round_trip"))
-    deltas = decoder.apply_chunk(
-        openai_choice(
-            {
-                "role": "assistant",
-                "reasoning_content": "why",
-                "content": "answer",
-                "refusal": "no",
-            },
-            finish_reason="stop",
-        )
-    )
-
-    assert [
-        (
-            type(delta),
-            getattr(delta, "output_index", None),
-            getattr(delta, "content_index", None),
-            getattr(delta, "part_type", None),
-        )
-        for delta in deltas
-    ] == [
-        (ModelReasoningDelta, 0, 0, None),
-        (ModelContentDelta, 0, 0, "reasoning"),
-        (ModelContentDelta, 1, 0, "text"),
-        (ModelContentDelta, 2, 0, "refusal"),
-    ]
-    assert [(part.type, part.text) for part in decoder.completed_response().visible_parts()] == [
-        ("reasoning", "why"),
-        ("text", "answer"),
-        ("refusal", "no"),
-    ]
-
-    reasoning_only = OpenAIChatStreamDecoder(OpenAIChatProfile(reasoning_content_mode="round_trip"))
-    reasoning_only.apply_chunk(openai_choice({"reasoning_content": "only"}, finish_reason="stop"))
-    assert [
-        (part.type, part.text) for part in reasoning_only.completed_response().visible_parts()
-    ] == [("reasoning", "only")]
-
-
-@pytest.mark.parametrize(
-    ("wire_field", "part_type"),
-    (("content", "text"), ("refusal", "refusal")),
-)
-def test_openai_chat_stream_round_trip_uses_compact_indexes_without_reasoning(
-    wire_field: str,
-    part_type: str,
-) -> None:
-    decoder = OpenAIChatStreamDecoder(OpenAIChatProfile(reasoning_content_mode="round_trip"))
-    deltas = decoder.apply_chunk(openai_choice({wire_field: "only"}, finish_reason="stop"))
-
-    content_delta = next(delta for delta in deltas if isinstance(delta, ModelContentDelta))
-    assert content_delta.output_index == 0
-    assert content_delta.content_index == 0
-    assert [(part.type, part.text) for part in decoder.completed_response().visible_parts()] == [
-        (part_type, "only")
-    ]
-
-
-def test_openai_chat_stream_round_trip_rejects_reasoning_after_content() -> None:
-    decoder = OpenAIChatStreamDecoder(OpenAIChatProfile(reasoning_content_mode="round_trip"))
-    decoder.apply_chunk(openai_choice({"content": "answer"}))
-
-    with pytest.raises(OpenAIChatError, match="reasoning after a later content part"):
-        decoder.apply_chunk(openai_choice({"reasoning_content": "late"}))
-
-
-def test_openai_chat_stream_requires_reasoning_for_round_trip_tool_calls() -> None:
-    profile = OpenAIChatProfile(reasoning_content_mode="required_with_tools")
-    missing = OpenAIChatStreamDecoder(profile)
-    missing.apply_chunk(
-        openai_choice(
-            {
-                "tool_calls": [
-                    {
-                        "index": 0,
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "search", "arguments": "{}"},
-                    }
-                ]
-            },
-            finish_reason="tool_calls",
-        )
-    )
-    with pytest.raises(OpenAIChatError, match="requires non-empty reasoning"):
-        missing.completed_response()
-
-    complete = OpenAIChatStreamDecoder(profile)
-    complete.apply_chunk(openai_choice({"reasoning_content": "why"}))
-    complete.apply_chunk(
-        openai_choice(
-            {
-                "tool_calls": [
-                    {
-                        "index": 0,
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "search", "arguments": "{}"},
-                    }
-                ]
-            },
-            finish_reason="tool_calls",
-        )
-    )
-    response = complete.completed_response()
-    assert response.visible_parts()[0].type == "reasoning"
-    assert response.runtime_tool_calls() == (StructuredToolCall("call-1", "search", {}),)
-
-
 def anthropic_started(
     *, profile: AnthropicMessagesProfile | None = None
 ) -> AnthropicMessagesStreamDecoder:
@@ -382,6 +285,7 @@ def anthropic_started(
                 "content": [],
                 "id": "message",
                 "model": "model",
+                "usage": {"input_tokens": 0, "output_tokens": 0},
             },
         },
     )
@@ -425,7 +329,6 @@ def test_anthropic_messages_stream_event_envelope_and_start_guards() -> None:
         (None, {"unused": None}, "requires a type"),
         ("ping", {"type": "message_start"}, "name must match"),
         ("error", {"type": "error"}, "stream error event"),
-        ("other", {"type": "other"}, "unsupported Anthropic stream event"),
         (
             "content_block_start",
             {
@@ -441,6 +344,8 @@ def test_anthropic_messages_stream_event_envelope_and_start_guards() -> None:
             AnthropicMessagesStreamDecoder(AnthropicMessagesProfile()).apply_event(
                 event_name, value
             )
+    with pytest.raises(AnthropicMessagesError, match="unsupported Anthropic stream event"):
+        decoder.apply_event("other", {"type": "other"})
 
     started = anthropic_started()
     with pytest.raises(AnthropicMessagesError, match="more than once"):
@@ -479,14 +384,13 @@ def test_anthropic_messages_stream_rejects_invalid_message_start(
 @pytest.mark.parametrize(
     "block,index,pattern",
     [
-        ({"type": "text", "text": "x"}, None, "index must be an integer"),
+        ({"type": "text", "text": "x"}, None, "requires field: index"),
         ({"type": "text", "text": "x"}, True, "index must be an integer"),
         ({"type": "text", "text": "x"}, -1, "index must be >= 0"),
         ({"unused": None}, 0, "requires non-empty type"),
         ({"type": "other"}, 0, "unsupported Anthropic stream content block"),
         ({"type": "text", "text": 1}, 0, "text block requires text"),
         ({"type": "thinking", "thinking": 1}, 0, "thinking block requires thinking"),
-        ({"type": "redacted_thinking", "data": ""}, 0, "must not be empty"),
         ({"type": "tool_use", "id": "", "name": "tool"}, 0, "id must not be empty"),
         ({"type": "tool_use", "id": "call", "name": ""}, 0, "name must not be empty"),
         (
@@ -513,14 +417,14 @@ def test_anthropic_messages_stream_rejects_duplicate_and_empty_blocks() -> None:
     with pytest.raises(AnthropicMessagesError, match="started more than once"):
         anthropic_start_block(duplicate, {"type": "text", "text": "y"})
 
-    for block, pattern in (
-        ({"type": "text", "text": ""}, "completed without data"),
-        ({"type": "thinking", "thinking": ""}, "completed without data"),
-    ):
-        decoder = anthropic_started()
-        anthropic_start_block(decoder, block)
-        with pytest.raises(AnthropicMessagesError, match=pattern):
-            anthropic_stop(decoder)
+    empty_text = anthropic_started()
+    anthropic_start_block(empty_text, {"type": "text", "text": ""})
+    anthropic_stop(empty_text)
+
+    unsigned_thinking = anthropic_started()
+    anthropic_start_block(unsigned_thinking, {"type": "thinking", "thinking": ""})
+    with pytest.raises(AnthropicMessagesError, match="requires a signature"):
+        anthropic_stop(unsigned_thinking)
 
 
 def test_anthropic_messages_stream_rejects_events_for_a_closed_block() -> None:
@@ -554,7 +458,11 @@ def test_anthropic_messages_stream_interleaves_blocks_and_keeps_monotonic_tool_o
     anthropic_stop(decoder, index=9)
     decoder.apply_event(
         "message_delta",
-        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 0},
+        },
     )
     decoder.apply_event("message_stop", {"type": "message_stop"})
 
@@ -590,7 +498,7 @@ def test_anthropic_messages_stream_interleaves_blocks_and_keeps_monotonic_tool_o
             "requires signature",
         ),
         (
-            {"type": "tool_use", "id": "call", "name": "tool"},
+            {"type": "tool_use", "id": "call", "name": "tool", "input": {}},
             {"type": "input_json_delta", "partial_json": 1},
             "requires partial_json",
         ),
@@ -605,7 +513,7 @@ def test_anthropic_messages_stream_rejects_invalid_block_deltas(
         anthropic_delta(decoder, delta)
 
 
-def test_anthropic_messages_stream_terminal_guards_and_disabled_usage() -> None:
+def test_anthropic_messages_stream_terminal_guards_and_usage() -> None:
     no_open = anthropic_started()
     with pytest.raises(AnthropicMessagesError, match="requires an open index"):
         anthropic_delta(no_open, {"type": "text_delta", "text": "x"})
@@ -619,7 +527,11 @@ def test_anthropic_messages_stream_terminal_guards_and_disabled_usage() -> None:
     with pytest.raises(AnthropicMessagesError, match="all content blocks to stop"):
         open_block.apply_event(
             "message_delta",
-            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 0},
+            },
         )
     with pytest.raises(AnthropicMessagesError, match="requires a terminal message_delta"):
         open_block.apply_event("message_stop", {"type": "message_stop"})
@@ -627,20 +539,28 @@ def test_anthropic_messages_stream_terminal_guards_and_disabled_usage() -> None:
     no_data = anthropic_started()
     no_data.apply_event(
         "message_delta",
-        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 0},
+        },
     )
-    with pytest.raises(AnthropicMessagesError, match="completed without output"):
-        no_data.apply_event("message_stop", {"type": "message_stop"})
-    with pytest.raises(AnthropicMessagesError, match="appeared after message_delta"):
+    assert no_data.apply_event("message_stop", {"type": "message_stop"}) == (True, [])
+    assert no_data.completed_response().output == ()
+    with pytest.raises(AnthropicMessagesError, match="after message_stop"):
         no_data.apply_event(
             "message_delta",
-            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 0},
+            },
         )
 
-    no_usage = anthropic_started(profile=AnthropicMessagesProfile(stream_usage_mode="omit"))
-    anthropic_start_block(no_usage, {"type": "text", "text": "x"})
-    anthropic_stop(no_usage)
-    _, usage = no_usage.apply_event(
+    with_usage = anthropic_started()
+    anthropic_start_block(with_usage, {"type": "text", "text": "x"})
+    anthropic_stop(with_usage)
+    _, usage = with_usage.apply_event(
         "message_delta",
         {
             "type": "message_delta",
@@ -648,8 +568,10 @@ def test_anthropic_messages_stream_terminal_guards_and_disabled_usage() -> None:
             "usage": {"output_tokens": 1},
         },
     )
-    assert usage == []
-    no_usage.apply_event("message_stop", {"type": "message_stop"})
-    no_usage.completed_response()
+    assert len(usage) == 1
+    assert isinstance(usage[0], ModelUsageDelta)
+    assert usage[0].usage.output_tokens == 1
+    with_usage.apply_event("message_stop", {"type": "message_stop"})
+    with_usage.completed_response()
     with pytest.raises(AnthropicMessagesError, match="after message_stop"):
-        no_usage.apply_event("ping", {"type": "ping"})
+        with_usage.apply_event("ping", {"type": "ping"})

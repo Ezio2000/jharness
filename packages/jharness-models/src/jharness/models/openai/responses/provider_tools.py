@@ -1,13 +1,11 @@
-"""Provider-owned tool dialects for OpenAI-compatible Responses APIs."""
+"""Closed exact handling for the two supported OpenAI Responses hosted tools."""
 
 from __future__ import annotations
 
 import base64
 import binascii
-from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
-from types import MappingProxyType
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any, cast
 
 from jharness.kernel import (
@@ -35,780 +33,580 @@ from jharness.models.openai.responses.errors import OPENAI_RESPONSES_JSON, OpenA
 
 JsonObject = dict[str, Any]
 
-_IN_PROGRESS_STATUSES = frozenset({"generating", "in_progress", "searching"})
-_PROVIDER_TERMINAL_STATUSES = frozenset(
-    {
-        ProviderToolStatus.COMPLETED,
-        ProviderToolStatus.INCOMPLETE,
-        ProviderToolStatus.FAILED,
-    }
+OPENAI_RESPONSES_WEB_SEARCH = ProviderToolId("openai.responses", "web_search")
+OPENAI_RESPONSES_IMAGE_GENERATION = ProviderToolId("openai.responses", "image_generation")
+SUPPORTED_PROVIDER_TOOLS = frozenset(
+    {OPENAI_RESPONSES_WEB_SEARCH, OPENAI_RESPONSES_IMAGE_GENERATION}
+)
+_WEB_SEARCH_ITEM = "web_search_call"
+_IMAGE_GENERATION_ITEM = "image_generation_call"
+_TERMINAL = frozenset(
+    {ProviderToolStatus.COMPLETED, ProviderToolStatus.INCOMPLETE, ProviderToolStatus.FAILED}
 )
 
 
-@dataclass(frozen=True, slots=True)
-class OpenAIResponsesProviderToolStreamUpdate:
-    """One normalized status/data update produced by a provider-tool dialect."""
-
-    status: ProviderToolStatus
-    data: Mapping[str, object] = field(default_factory=dict[str, object])
-
-
-class OpenAIResponsesProviderToolCodec(ABC):
-    """One immutable provider-tool wire family installed into a profile registry."""
-
-    tool: ProviderToolId
-    output_item_type: str
-    event_prefix: str
-
-    @property
-    @abstractmethod
-    def declaration_types(self) -> frozenset[str]:
-        """Return every request-side wire discriminator accepted by this codec."""
-
-    @abstractmethod
-    def encode_declaration(self, spec: ProviderToolSpec) -> JsonObject:
-        """Encode one requested declaration after validating its configuration."""
-
-    def encode_choice(self, spec: ProviderToolSpec) -> JsonObject:
-        """Encode an exact provider-tool choice using the declaration discriminator."""
-
-        return {"type": cast(str, self.encode_declaration(spec)["type"])}
-
-    @abstractmethod
-    def decode_call(
-        self,
-        item: Mapping[str, Any],
-        response: Mapping[str, Any],
-    ) -> ProviderToolCall:
-        """Decode one terminal output item."""
-
-    @abstractmethod
-    def encode_history(self, call: ProviderToolCall) -> JsonObject:
-        """Encode one durable provider call for a later stateless request."""
-
-    def stream_item_update(
-        self, item: Mapping[str, Any]
-    ) -> OpenAIResponsesProviderToolStreamUpdate:
-        """Decode the provider status carried by output_item.added/done."""
-
-        return OpenAIResponsesProviderToolStreamUpdate(
-            provider_status(
-                item.get("status"),
-                label=f"Responses {self.output_item_type} status",
-            )
-        )
-
-    @abstractmethod
-    def stream_event_update(
-        self,
-        event_type: str,
-        value: Mapping[str, Any],
-    ) -> OpenAIResponsesProviderToolStreamUpdate:
-        """Decode a tool-specific lifecycle/progress event."""
-
-    def request_requires_artifact_store(self, spec: ProviderToolSpec) -> bool:
-        """Return whether invoking this tool requires host artifact persistence."""
-
-        del spec
-        return False
-
-    def history_requires_artifact_store(self, call: ProviderToolCall) -> bool:
-        """Return whether replaying this call requires artifact hydration."""
-
-        del call
-        return False
-
-    def response_requires_artifact_store(self, call: ProviderToolCall) -> bool:
-        """Return whether this decoded call still carries inline artifact bytes."""
-
-        del call
-        return False
-
-    async def hydrate_call(
-        self,
-        call: ProviderToolCall,
-        store: OpenAIResponsesArtifactStore,
-        context: RunContext,
-    ) -> ProviderToolCall:
-        """Hydrate invocation-local wire data for one durable call."""
-
-        del store, context
-        return call
-
-    async def externalize_call(
-        self,
-        call: ProviderToolCall,
-        store: OpenAIResponsesArtifactStore,
-        context: RunContext,
-    ) -> ProviderToolCall:
-        """Externalize provider bytes before checkpoint persistence."""
-
-        del store, context
-        return call
-
-
-@dataclass(frozen=True, slots=True)
-class OpenAIResponsesWebSearchTool(OpenAIResponsesProviderToolCodec):
-    """Responses web-search request, output, history, and SSE dialect."""
-
-    tool: ProviderToolId
-    allowed_variants: frozenset[str] = field(default_factory=lambda: frozenset({"web_search"}))
-    default_variant: str = "web_search"
-    configuration_fields: frozenset[str] = field(
-        default_factory=lambda: frozenset(
-            {"filters", "search_context_size", "user_location", "variant"}
-        )
-    )
-    output_item_type: str = field(default="web_search_call", init=False)
-    event_prefix: str = field(default="response.web_search_call.", init=False)
-
-    def __post_init__(self) -> None:
-        _validate_tool_identity(self.tool, "web_search")
-        variants = _nonempty_string_set(self.allowed_variants, "web search variants")
-        if self.default_variant not in variants:
-            raise ValueError("default web search variant must be allowed")
-        fields = _nonempty_string_set(
-            self.configuration_fields,
-            "web search configuration fields",
-            allow_empty=True,
-        )
-        if "variant" not in fields and variants != frozenset({self.default_variant}):
-            raise ValueError("multiple web search variants require the variant configuration field")
-        object.__setattr__(self, "allowed_variants", variants)
-        object.__setattr__(self, "configuration_fields", fields)
-
-    @property
-    def declaration_types(self) -> frozenset[str]:
-        return self.allowed_variants
-
-    def encode_declaration(self, spec: ProviderToolSpec) -> JsonObject:
-        _require_spec_identity(spec, self.tool)
-        configuration = _configuration(spec, self.configuration_fields)
-        variant = configuration.pop("variant", self.default_variant)
-        if not isinstance(variant, str) or variant not in self.allowed_variants:
-            expected = ", ".join(sorted(self.allowed_variants))
-            raise OpenAIResponsesError(f"web_search variant must be one of: {expected}")
-        return {"type": variant, **configuration}
-
-    def decode_call(
-        self,
-        item: Mapping[str, Any],
-        response: Mapping[str, Any],
-    ) -> ProviderToolCall:
-        del response
-        call_id = OPENAI_RESPONSES_JSON.required_string(
-            item.get("id"),
-            "Responses web search call id",
-        )
-        status = provider_status(item.get("status"), label="Responses web search status")
-        action = item.get("action")
-        if action is None:
-            arguments: Mapping[str, Any] = {}
-        elif isinstance(action, Mapping):
-            arguments = cast(Mapping[str, Any], action)
-        else:
-            raise OpenAIResponsesError("Responses web search action must be an object or null")
-        return ProviderToolCall(
-            id=call_id,
-            tool=self.tool,
-            status=status,
-            arguments=arguments,
-            error=_provider_error(item, "web_search")
-            if status is ProviderToolStatus.FAILED
-            else None,
-            metadata={"responses": {"item": dict(item)}},
-        )
-
-    def encode_history(self, call: ProviderToolCall) -> JsonObject:
-        _require_call_identity(call, self.tool)
-        raw = _native_item(call.metadata)
-        if raw is not None:
-            if raw.get("type") != self.output_item_type:
-                raise OpenAIResponsesError("Responses provider metadata has the wrong item type")
-            return raw
-        encoded: JsonObject = {
-            "type": self.output_item_type,
-            "id": call.id,
-            "status": call.status.value,
-        }
-        if call.arguments:
-            encoded["action"] = thaw_json_value(call.arguments)
-        return encoded
-
-    def stream_event_update(
-        self,
-        event_type: str,
-        value: Mapping[str, Any],
-    ) -> OpenAIResponsesProviderToolStreamUpdate:
-        suffix = event_type.removeprefix(self.event_prefix)
-        status = _provider_event_status(suffix, "web search")
-        data: dict[str, object] = {}
-        if isinstance(value.get("action"), Mapping):
-            data["action"] = value["action"]
-        return OpenAIResponsesProviderToolStreamUpdate(status, data)
-
-
-@dataclass(frozen=True, slots=True)
-class OpenAIResponsesImageGenerationTool(OpenAIResponsesProviderToolCodec):
-    """Responses image-generation dialect including artifact persistence hooks."""
-
-    tool: ProviderToolId
-    configuration_fields: frozenset[str] = field(
-        default_factory=lambda: frozenset(
-            {
-                "action",
-                "background",
-                "input_fidelity",
-                "input_image_mask",
-                "moderation",
-                "output_compression",
-                "output_format",
-                "partial_images",
-                "quality",
-                "size",
-            }
-        )
-    )
-    output_item_type: str = field(default="image_generation_call", init=False)
-    event_prefix: str = field(default="response.image_generation_call.", init=False)
-
-    def __post_init__(self) -> None:
-        _validate_tool_identity(self.tool, "image_generation")
-        object.__setattr__(
-            self,
-            "configuration_fields",
-            _nonempty_string_set(
-                self.configuration_fields,
-                "image generation configuration fields",
-                allow_empty=True,
-            ),
-        )
-
-    @property
-    def declaration_types(self) -> frozenset[str]:
-        return frozenset({"image_generation"})
-
-    def encode_declaration(self, spec: ProviderToolSpec) -> JsonObject:
-        _require_spec_identity(spec, self.tool)
-        configuration = _configuration(spec, self.configuration_fields)
+def encode_provider_declaration(spec: ProviderToolSpec) -> JsonObject:
+    configuration = _configuration(spec)
+    if spec.tool == OPENAI_RESPONSES_WEB_SEARCH:
+        _validate_web_search_configuration(configuration)
+        return {"type": "web_search", **configuration}
+    if spec.tool == OPENAI_RESPONSES_IMAGE_GENERATION:
         _validate_image_configuration(configuration)
         return {"type": "image_generation", **configuration}
-
-    def decode_call(
-        self,
-        item: Mapping[str, Any],
-        response: Mapping[str, Any],
-    ) -> ProviderToolCall:
-        call_id = OPENAI_RESPONSES_JSON.required_string(
-            item.get("id"),
-            "Responses image generation call id",
-        )
-        status = provider_status(
-            item.get("status"),
-            label="Responses image generation status",
-        )
-        result = item.get("result")
-        output: tuple[ContentPart, ...] = ()
-        if result is not None:
-            image_base64 = OPENAI_RESPONSES_JSON.required_string(
-                result,
-                "Responses image generation result",
-            )
-            if status is ProviderToolStatus.IN_PROGRESS:
-                raise OpenAIResponsesError(
-                    "in-progress Responses image generation cannot carry a final result"
-                )
-            output = (
-                ContentPart(
-                    type="image",
-                    data={"base64": image_base64},
-                    media_type=_resolve_image_media_type(
-                        image_base64,
-                        self._configured_media_type(response.get("tools")),
-                    ),
-                ),
-            )
-        elif status is ProviderToolStatus.COMPLETED:
-            raise OpenAIResponsesError("completed Responses image generation requires a result")
-        return ProviderToolCall(
-            id=call_id,
-            tool=self.tool,
-            status=status,
-            output=output,
-            error=_provider_error(item, "image_generation")
-            if status is ProviderToolStatus.FAILED
-            else None,
-            metadata={"responses": {"item": _without_result(item)}},
-        )
-
-    def encode_history(self, call: ProviderToolCall) -> JsonObject:
-        _require_call_identity(call, self.tool)
-        raw = _native_item(call.metadata)
-        encoded = {} if raw is None else raw
-        if raw is not None and raw.get("type") != self.output_item_type:
-            raise OpenAIResponsesError("Responses provider metadata has the wrong item type")
-        result: str | None = None
-        if call.output:
-            if len(call.output) != 1 or call.output[0].type != "image":
-                raise OpenAIResponsesError(
-                    "image_generation history requires exactly one image output"
-                )
-            raw_base64 = call.output[0].data.get("base64")
-            if not isinstance(raw_base64, str) or not raw_base64:
-                raise OpenAIResponsesError(
-                    "image_generation history image requires non-empty base64 data"
-                )
-            _resolve_image_media_type(raw_base64, call.output[0].media_type)
-            result = raw_base64
-        if call.status is ProviderToolStatus.COMPLETED and result is None:
-            raise OpenAIResponsesError(
-                "completed image_generation history requires an image output"
-            )
-        encoded.update(
-            type=self.output_item_type,
-            id=call.id,
-            status=call.status.value,
-            result=result,
-        )
-        return encoded
-
-    def stream_event_update(
-        self,
-        event_type: str,
-        value: Mapping[str, Any],
-    ) -> OpenAIResponsesProviderToolStreamUpdate:
-        suffix = event_type.removeprefix(self.event_prefix)
-        if suffix == "partial_image":
-            image = OPENAI_RESPONSES_JSON.required_string(
-                value.get("partial_image_b64"),
-                "Responses partial image base64",
-            )
-            partial_index = _nonnegative_int(
-                value.get("partial_image_index"),
-                "Responses partial image index",
-            )
-            if partial_index > 3:
-                raise OpenAIResponsesError("Responses partial image index must be at most 3")
-            return OpenAIResponsesProviderToolStreamUpdate(
-                ProviderToolStatus.IN_PROGRESS,
-                {"base64": image, "partial_image_index": partial_index},
-            )
-        return OpenAIResponsesProviderToolStreamUpdate(
-            _provider_event_status(suffix, "image generation")
-        )
-
-    def request_requires_artifact_store(self, spec: ProviderToolSpec) -> bool:
-        _require_spec_identity(spec, self.tool)
-        return True
-
-    def history_requires_artifact_store(self, call: ProviderToolCall) -> bool:
-        _require_call_identity(call, self.tool)
-        return image_call_has_artifact(call)
-
-    def response_requires_artifact_store(self, call: ProviderToolCall) -> bool:
-        _require_call_identity(call, self.tool)
-        return image_call_has_inline_result(call)
-
-    async def hydrate_call(
-        self,
-        call: ProviderToolCall,
-        store: OpenAIResponsesArtifactStore,
-        context: RunContext,
-    ) -> ProviderToolCall:
-        _require_call_identity(call, self.tool)
-        return await hydrate_image_call(call, store, context)
-
-    async def externalize_call(
-        self,
-        call: ProviderToolCall,
-        store: OpenAIResponsesArtifactStore,
-        context: RunContext,
-    ) -> ProviderToolCall:
-        _require_call_identity(call, self.tool)
-        return await externalize_image_call(call, store, context)
-
-    def _configured_media_type(self, value: object) -> str | None:
-        if value is None:
-            return None
-        if not _is_array(value):
-            raise OpenAIResponsesError("Responses tools must be an array")
-        output_format: str | None = None
-        image_tool_seen = False
-        for raw_tool in cast(Sequence[object], value):
-            declaration = OPENAI_RESPONSES_JSON.mapping(raw_tool, "Responses tool")
-            if declaration.get("type") not in self.declaration_types:
-                continue
-            if image_tool_seen:
-                raise OpenAIResponsesError("Responses contains duplicate image_generation tools")
-            image_tool_seen = True
-            raw_format = declaration.get("output_format")
-            if raw_format is not None:
-                output_format = OPENAI_RESPONSES_JSON.required_string(
-                    raw_format,
-                    "Responses image_generation output_format",
-                )
-        if output_format is None:
-            return None
-        media_types = {
-            "jpeg": "image/jpeg",
-            "png": "image/png",
-            "webp": "image/webp",
-        }
-        try:
-            return media_types[output_format]
-        except KeyError as exc:
-            raise OpenAIResponsesError(
-                f"unsupported Responses image output format: {output_format}"
-            ) from exc
+    raise _unsupported_tool(spec.tool)
 
 
-@dataclass(frozen=True, slots=True)
-class OpenAIResponsesProviderToolRegistry:
-    """Immutable exact-identity registry consumed by the shared Responses codec."""
+def encode_provider_choice(spec: ProviderToolSpec) -> JsonObject:
+    return {"type": cast(str, encode_provider_declaration(spec)["type"])}
 
-    codecs: tuple[OpenAIResponsesProviderToolCodec, ...] = ()
-    _by_tool: Mapping[ProviderToolId, OpenAIResponsesProviderToolCodec] = field(
-        init=False,
-        repr=False,
-        compare=False,
+
+def decode_provider_call(
+    item: Mapping[str, Any], response: Mapping[str, Any]
+) -> ProviderToolCall | None:
+    item_type = OPENAI_RESPONSES_JSON.required_string(
+        item.get("type"), "Responses output item type"
     )
-    _by_output_item: Mapping[str, OpenAIResponsesProviderToolCodec] = field(
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _event_codecs: tuple[OpenAIResponsesProviderToolCodec, ...] = field(
-        init=False,
-        repr=False,
-        compare=False,
-    )
+    if item_type == _WEB_SEARCH_ITEM:
+        return _decode_web_search_call(item)
+    if item_type == _IMAGE_GENERATION_ITEM:
+        return _decode_image_generation_call(item, response)
+    return None
 
-    def __post_init__(self) -> None:
-        raw_codecs = cast(object, self.codecs)
-        if not isinstance(raw_codecs, tuple):
-            raise TypeError("Responses provider tool codecs must be a tuple")
-        raw_values = cast(tuple[object, ...], raw_codecs)
-        by_tool: dict[ProviderToolId, OpenAIResponsesProviderToolCodec] = {}
-        by_output: dict[str, OpenAIResponsesProviderToolCodec] = {}
-        declarations: dict[str, ProviderToolId] = {}
-        prefixes: dict[str, ProviderToolId] = {}
-        codecs: list[OpenAIResponsesProviderToolCodec] = []
-        for raw_codec in raw_values:
-            if not isinstance(raw_codec, OpenAIResponsesProviderToolCodec):
-                raise TypeError(
-                    "Responses provider tool registry values must be provider tool codecs"
-                )
-            codec = raw_codec
-            codecs.append(codec)
-            declaration_types = _validate_codec_shape(codec)
-            if codec.tool in by_tool:
-                raise ValueError("Responses provider tool identities must be unique")
-            if codec.output_item_type in by_output:
-                raise ValueError("Responses provider output item types must be unique")
-            if any(
-                codec.event_prefix.startswith(prefix) or prefix.startswith(codec.event_prefix)
-                for prefix in prefixes
-            ):
-                raise ValueError("Responses provider event prefixes must not overlap")
-            for wire_type in declaration_types:
-                if wire_type in declarations:
-                    raise ValueError("Responses provider declaration types must be unique")
-                declarations[wire_type] = codec.tool
-            by_tool[codec.tool] = codec
-            by_output[codec.output_item_type] = codec
-            prefixes[codec.event_prefix] = codec.tool
-        typed_codecs = tuple(codecs)
-        object.__setattr__(self, "codecs", typed_codecs)
-        object.__setattr__(self, "_by_tool", MappingProxyType(by_tool))
-        object.__setattr__(self, "_by_output_item", MappingProxyType(by_output))
-        object.__setattr__(
-            self,
-            "_event_codecs",
-            tuple(
-                sorted(
-                    typed_codecs,
-                    key=lambda codec: len(codec.event_prefix),
-                    reverse=True,
-                )
-            ),
-        )
 
-    @property
-    def tools(self) -> frozenset[ProviderToolId]:
-        return frozenset(self._by_tool)
+def encode_provider_history(call: ProviderToolCall) -> JsonObject:
+    if call.tool == OPENAI_RESPONSES_WEB_SEARCH:
+        return _encode_web_search_history(call)
+    if call.tool == OPENAI_RESPONSES_IMAGE_GENERATION:
+        return _encode_image_generation_history(call)
+    raise _unsupported_tool(call.tool)
 
-    def codec_for_tool(self, tool: ProviderToolId) -> OpenAIResponsesProviderToolCodec:
-        try:
-            return self._by_tool[tool]
-        except KeyError as exc:
-            raise OpenAIResponsesError(
-                f"Responses profile does not support provider tool: {tool.namespace}/{tool.type}"
-            ) from exc
 
-    def codec_for_output_item(self, item_type: str) -> OpenAIResponsesProviderToolCodec | None:
-        return self._by_output_item.get(item_type)
+def provider_tool_for_output_item(item_type: str) -> ProviderToolId | None:
+    return {
+        _WEB_SEARCH_ITEM: OPENAI_RESPONSES_WEB_SEARCH,
+        _IMAGE_GENERATION_ITEM: OPENAI_RESPONSES_IMAGE_GENERATION,
+    }.get(item_type)
 
-    def codec_for_event(self, event_type: str) -> OpenAIResponsesProviderToolCodec | None:
-        return next(
-            (codec for codec in self._event_codecs if event_type.startswith(codec.event_prefix)),
-            None,
-        )
 
-    def encode_declaration(self, spec: ProviderToolSpec) -> JsonObject:
-        return self.codec_for_tool(spec.tool).encode_declaration(spec)
+def provider_tool_for_event(event_type: str) -> ProviderToolId | None:
+    if event_type.startswith("response.web_search_call."):
+        return OPENAI_RESPONSES_WEB_SEARCH
+    if event_type.startswith("response.image_generation_call."):
+        return OPENAI_RESPONSES_IMAGE_GENERATION
+    return None
 
-    def encode_choice(self, spec: ProviderToolSpec) -> JsonObject:
-        return self.codec_for_tool(spec.tool).encode_choice(spec)
 
-    def decode_call(
-        self,
-        item: Mapping[str, Any],
-        response: Mapping[str, Any],
-    ) -> ProviderToolCall | None:
-        item_type = OPENAI_RESPONSES_JSON.required_string(
-            item.get("type"),
-            "Responses output item type",
-        )
-        codec = self.codec_for_output_item(item_type)
-        return None if codec is None else codec.decode_call(item, response)
-
-    def encode_history(self, call: ProviderToolCall) -> JsonObject:
-        return self.codec_for_tool(call.tool).encode_history(call)
-
-    def request_requires_artifact_store(self, request: ModelRequest) -> bool:
-        return any(
-            self.codec_for_tool(spec.tool).request_requires_artifact_store(spec)
-            for spec in request.provider_tools
-        )
-
-    def history_requires_artifact_store(self, messages: Sequence[Message]) -> bool:
-        return any(
-            self.codec_for_tool(item.tool).history_requires_artifact_store(item)
-            for message in messages
-            if message.role == "assistant"
-            for item in message.output
-            if isinstance(item, ProviderToolCall)
-        )
-
-    def response_requires_artifact_store(self, response: ModelResponse) -> bool:
-        return any(
-            self.codec_for_tool(item.tool).response_requires_artifact_store(item)
-            for item in response.output
-            if isinstance(item, ProviderToolCall)
-        )
-
-    async def hydrate_artifact_history(
-        self,
-        request: ModelRequest,
-        store: OpenAIResponsesArtifactStore,
-        context: RunContext,
-    ) -> ModelRequest:
-        messages: list[Message] = []
-        changed = False
-        for message in request.messages:
-            if message.role != "assistant":
-                messages.append(message)
-                continue
-            output = await self._hydrate_output(message.output, store, context)
-            if output == message.output:
-                messages.append(message)
-                continue
-            changed = True
-            messages.append(Message.assistant(output, metadata=message.metadata))
-        return request if not changed else replace(request, messages=tuple(messages))
-
-    async def externalize_artifacts(
-        self,
-        response: ModelResponse,
-        store: OpenAIResponsesArtifactStore,
-        context: RunContext,
-    ) -> ModelResponse:
-        output: list[ModelOutputItem] = []
-        changed = False
-        for item in response.output:
-            if not isinstance(item, ProviderToolCall):
-                output.append(item)
-                continue
-            externalized = await self.codec_for_tool(item.tool).externalize_call(
-                item,
-                store,
-                context,
+def decode_provider_item_status(
+    item: Mapping[str, Any], tool: ProviderToolId
+) -> ProviderToolStatus:
+    if tool == OPENAI_RESPONSES_WEB_SEARCH:
+        _validate_item(item, _WEB_SEARCH_ITEM, {"id", "type", "status", "action"})
+        _web_search_action(item.get("action"))
+        return _web_search_status(item.get("status"))
+    if tool == OPENAI_RESPONSES_IMAGE_GENERATION:
+        _validate_item(item, _IMAGE_GENERATION_ITEM, {"id", "type", "status", "result"})
+        if "result" in item and item["result"] is not None:
+            OPENAI_RESPONSES_JSON.required_string(
+                item["result"], "Responses image generation result"
             )
-            changed = changed or externalized is not item
-            output.append(externalized)
-        return response if not changed else replace(response, output=tuple(output))
-
-    async def _hydrate_output(
-        self,
-        output: tuple[ModelOutputItem, ...],
-        store: OpenAIResponsesArtifactStore,
-        context: RunContext,
-    ) -> tuple[ModelOutputItem, ...]:
-        hydrated: list[ModelOutputItem] = []
-        changed = False
-        for item in output:
-            if not isinstance(item, ProviderToolCall):
-                hydrated.append(item)
-                continue
-            hydrated_call = await self.codec_for_tool(item.tool).hydrate_call(
-                item,
-                store,
-                context,
-            )
-            changed = changed or hydrated_call is not item
-            hydrated.append(hydrated_call)
-        return output if not changed else tuple(hydrated)
+        return _image_generation_status(item.get("status"))
+    raise _unsupported_tool(tool)
 
 
-def provider_status(value: object, *, label: str) -> ProviderToolStatus:
-    """Project one Responses lifecycle value into the provider-neutral enum."""
-
-    status = OPENAI_RESPONSES_JSON.required_string(value, label)
-    if status == "completed":
-        return ProviderToolStatus.COMPLETED
-    if status == "incomplete":
-        return ProviderToolStatus.INCOMPLETE
-    if status == "failed":
-        return ProviderToolStatus.FAILED
-    if status in _IN_PROGRESS_STATUSES:
-        return ProviderToolStatus.IN_PROGRESS
-    raise OpenAIResponsesError(f"unsupported {label}: {status}")
-
-
-def _validate_codec_shape(codec: OpenAIResponsesProviderToolCodec) -> frozenset[str]:
-    raw_tool = cast(object, codec.tool)
-    raw_output_item_type = cast(object, codec.output_item_type)
-    raw_event_prefix = cast(object, codec.event_prefix)
-    if not isinstance(raw_tool, ProviderToolId):
-        raise TypeError("Responses provider tool codec requires a ProviderToolId")
-    if not isinstance(raw_output_item_type, str) or not raw_output_item_type:
-        raise ValueError("Responses provider output item type must be non-empty")
-    if (
-        not isinstance(raw_event_prefix, str)
-        or not raw_event_prefix.startswith("response.")
-        or not raw_event_prefix.endswith(".")
-    ):
-        raise ValueError("Responses provider event prefix must be a response.* namespace")
-    return _nonempty_string_set(
-        codec.declaration_types,
-        "Responses provider declaration types",
+def decode_provider_stream_event(
+    event_type: str, value: Mapping[str, Any]
+) -> tuple[ProviderToolId, ProviderToolStatus, Mapping[str, object]]:
+    tool = provider_tool_for_event(event_type)
+    if tool is None:
+        raise OpenAIResponsesError(f"unsupported Responses provider event type: {event_type}")
+    suffix = event_type.rsplit(".", 1)[-1]
+    if tool == OPENAI_RESPONSES_WEB_SEARCH:
+        _validate_stream_event_fields(value, {"item_id", "output_index"}, event_type)
+        return tool, _web_search_status(suffix), {}
+    if suffix != "partial_image":
+        _validate_stream_event_fields(value, {"item_id", "output_index"}, event_type)
+        return tool, _image_generation_status(suffix), {}
+    _validate_stream_event_fields(
+        value,
+        {
+            "item_id",
+            "output_index",
+            "partial_image_b64",
+            "partial_image_index",
+            "background",
+            "output_format",
+            "quality",
+            "size",
+        },
+        event_type,
     )
+    image = OPENAI_RESPONSES_JSON.required_string(
+        value.get("partial_image_b64"), "Responses partial image base64"
+    )
+    index = _nonnegative_int(value.get("partial_image_index"), "Responses partial image index")
+    if index > 3:
+        raise OpenAIResponsesError("Responses partial image index must be at most 3")
+    data: dict[str, object] = {"base64": image, "partial_image_index": index}
+    for field, values in {
+        "background": {"auto", "opaque", "transparent"},
+        "output_format": {"png", "jpeg", "webp"},
+        "quality": {"auto", "low", "medium", "high"},
+    }.items():
+        if field in value:
+            raw = value[field]
+            if raw is None:
+                continue
+            if raw not in values:
+                raise OpenAIResponsesError(f"Responses partial image {field} is invalid")
+            data[field] = cast(str, raw)
+    if "size" in value and value["size"] is not None:
+        data["size"] = OPENAI_RESPONSES_JSON.required_string(
+            value["size"], "Responses partial image size"
+        )
+    return tool, ProviderToolStatus.IN_PROGRESS, data
 
 
 def is_terminal_provider_status(status: ProviderToolStatus | None) -> bool:
-    return status in _PROVIDER_TERMINAL_STATUSES
+    return status in _TERMINAL
 
 
-def _configuration(
-    spec: ProviderToolSpec,
-    allowed_fields: frozenset[str],
-) -> JsonObject:
-    configuration = cast(JsonObject, thaw_json_value(spec.configuration))
-    unexpected = set(configuration).difference(allowed_fields)
-    if unexpected:
-        key = min(unexpected)
-        raise OpenAIResponsesError(f"unsupported {spec.tool.type} configuration field: {key}")
-    return configuration
+def request_requires_artifact_store(request: ModelRequest) -> bool:
+    return any(spec.tool == OPENAI_RESPONSES_IMAGE_GENERATION for spec in request.provider_tools)
 
 
-def _validate_tool_identity(tool: ProviderToolId, expected_type: str) -> None:
-    raw_tool = cast(object, tool)
-    if not isinstance(raw_tool, ProviderToolId):
-        raise TypeError("Responses provider tool codec requires a ProviderToolId")
-    if tool.type != expected_type:
-        raise ValueError(f"Responses {expected_type} codec requires tool type={expected_type!r}")
+def history_requires_artifact_store(messages: Sequence[Message]) -> bool:
+    return any(
+        item.tool == OPENAI_RESPONSES_IMAGE_GENERATION and image_call_has_artifact(item)
+        for message in messages
+        if message.role == "assistant"
+        for item in message.output
+        if isinstance(item, ProviderToolCall)
+    )
 
 
-def _require_spec_identity(spec: ProviderToolSpec, tool: ProviderToolId) -> None:
-    if spec.tool != tool:
-        raise OpenAIResponsesError("Responses provider tool spec does not match its codec")
+def response_requires_artifact_store(response: ModelResponse) -> bool:
+    return any(
+        item.tool == OPENAI_RESPONSES_IMAGE_GENERATION and image_call_has_inline_result(item)
+        for item in response.output
+        if isinstance(item, ProviderToolCall)
+    )
 
 
-def _require_call_identity(call: ProviderToolCall, tool: ProviderToolId) -> None:
-    if call.tool != tool:
-        raise OpenAIResponsesError("Responses provider tool call does not match its codec")
+async def hydrate_artifact_history(
+    request: ModelRequest, store: OpenAIResponsesArtifactStore, context: RunContext
+) -> ModelRequest:
+    messages: list[Message] = []
+    changed = False
+    for message in request.messages:
+        if message.role != "assistant":
+            messages.append(message)
+            continue
+        output: list[ModelOutputItem] = []
+        for item in message.output:
+            if (
+                isinstance(item, ProviderToolCall)
+                and item.tool == OPENAI_RESPONSES_IMAGE_GENERATION
+            ):
+                hydrated = await hydrate_image_call(item, store, context)
+                changed = changed or hydrated is not item
+                output.append(hydrated)
+            else:
+                output.append(item)
+        messages.append(
+            message
+            if tuple(output) == message.output
+            else Message.assistant(output, metadata=message.metadata)
+        )
+    return request if not changed else replace(request, messages=tuple(messages))
 
 
-def _nonempty_string_set(
-    value: object,
-    label: str,
-    *,
-    allow_empty: bool = False,
-) -> frozenset[str]:
-    if not isinstance(value, frozenset):
-        raise TypeError(f"{label} must be a frozenset")
-    values = cast(frozenset[object], value)
-    if any(not isinstance(item, str) or not item for item in values):
-        raise ValueError(f"{label} must contain non-empty strings")
-    if not values and not allow_empty:
-        raise ValueError(f"{label} must not be empty")
-    return cast(frozenset[str], values)
+async def externalize_artifacts(
+    response: ModelResponse, store: OpenAIResponsesArtifactStore, context: RunContext
+) -> ModelResponse:
+    output: list[ModelOutputItem] = []
+    changed = False
+    for item in response.output:
+        if isinstance(item, ProviderToolCall) and item.tool == OPENAI_RESPONSES_IMAGE_GENERATION:
+            externalized = await externalize_image_call(item, store, context)
+            changed = changed or externalized is not item
+            output.append(externalized)
+        else:
+            output.append(item)
+    return response if not changed else replace(response, output=tuple(output))
+
+
+def _decode_web_search_call(item: Mapping[str, Any]) -> ProviderToolCall:
+    _validate_item(item, _WEB_SEARCH_ITEM, {"id", "type", "status", "action"})
+    call_id = OPENAI_RESPONSES_JSON.required_string(item.get("id"), "Responses web search call id")
+    status = _web_search_status(item.get("status"))
+    action = _web_search_action(item.get("action"))
+    return ProviderToolCall(
+        id=call_id,
+        tool=OPENAI_RESPONSES_WEB_SEARCH,
+        status=status,
+        arguments=action,
+        error=ErrorInfo("web_search_failed", "provider web_search call failed")
+        if status is ProviderToolStatus.FAILED
+        else None,
+        metadata={"responses": {"item": dict(item)}},
+    )
+
+
+def _decode_image_generation_call(
+    item: Mapping[str, Any], response: Mapping[str, Any]
+) -> ProviderToolCall:
+    _validate_item(item, _IMAGE_GENERATION_ITEM, {"id", "type", "status", "result"})
+    call_id = OPENAI_RESPONSES_JSON.required_string(
+        item.get("id"), "Responses image generation call id"
+    )
+    status = _image_generation_status(item.get("status"))
+    result = item.get("result")
+    output: tuple[ContentPart, ...] = ()
+    if result is not None:
+        image = OPENAI_RESPONSES_JSON.required_string(result, "Responses image generation result")
+        if status is ProviderToolStatus.IN_PROGRESS:
+            raise OpenAIResponsesError(
+                "in-progress Responses image generation cannot carry a final result"
+            )
+        output = (
+            ContentPart(
+                type="image",
+                data={"base64": image},
+                media_type=_resolve_image_media_type(
+                    image, _configured_image_media_type(response.get("tools"))
+                ),
+            ),
+        )
+    return ProviderToolCall(
+        id=call_id,
+        tool=OPENAI_RESPONSES_IMAGE_GENERATION,
+        status=status,
+        output=output,
+        error=ErrorInfo("image_generation_failed", "provider image_generation call failed")
+        if status is ProviderToolStatus.FAILED
+        else None,
+        metadata={"responses": {"item": _without_result(item)}},
+    )
+
+
+def _encode_web_search_history(call: ProviderToolCall) -> JsonObject:
+    _require_call_tool(call, OPENAI_RESPONSES_WEB_SEARCH)
+    if call.status is ProviderToolStatus.INCOMPLETE:
+        raise OpenAIResponsesError("Responses web_search does not support incomplete status")
+    return {
+        "type": _WEB_SEARCH_ITEM,
+        "id": call.id,
+        "status": _history_status(call, _WEB_SEARCH_ITEM, _web_search_status),
+        "action": _web_search_action(thaw_json_value(call.arguments)),
+    }
+
+
+def _encode_image_generation_history(call: ProviderToolCall) -> JsonObject:
+    _require_call_tool(call, OPENAI_RESPONSES_IMAGE_GENERATION)
+    if call.status is ProviderToolStatus.INCOMPLETE:
+        raise OpenAIResponsesError("Responses image_generation does not support incomplete status")
+    result: str | None = None
+    if call.output:
+        if len(call.output) != 1 or call.output[0].type != "image":
+            raise OpenAIResponsesError("image_generation history requires exactly one image output")
+        raw = call.output[0].data.get("base64")
+        if not isinstance(raw, str) or not raw:
+            raise OpenAIResponsesError(
+                "image_generation history image requires non-empty base64 data"
+            )
+        _resolve_image_media_type(raw, call.output[0].media_type)
+        result = raw
+    return {
+        "type": _IMAGE_GENERATION_ITEM,
+        "id": call.id,
+        "status": _history_status(call, _IMAGE_GENERATION_ITEM, _image_generation_status),
+        "result": result,
+    }
+
+
+def _configuration(spec: ProviderToolSpec) -> JsonObject:
+    if spec.tool not in SUPPORTED_PROVIDER_TOOLS:
+        raise _unsupported_tool(spec.tool)
+    return cast(JsonObject, thaw_json_value(spec.configuration))
+
+
+def _validate_web_search_configuration(configuration: Mapping[str, Any]) -> None:
+    _reject_unknown(
+        configuration,
+        {"external_web_access", "filters", "search_context_size", "user_location"},
+        "web_search configuration",
+    )
+    external = configuration.get("external_web_access")
+    if external is not None and not isinstance(external, bool):
+        raise OpenAIResponsesError("web_search external_web_access must be a bool")
+    context = configuration.get("search_context_size")
+    if context is not None and context not in {"low", "medium", "high"}:
+        raise OpenAIResponsesError("web_search search_context_size must be low, medium, or high")
+    filters = configuration.get("filters")
+    if filters is not None:
+        typed = OPENAI_RESPONSES_JSON.mapping(filters, "web_search filters")
+        _reject_unknown(typed, {"allowed_domains"}, "web_search filters")
+        domains = typed.get("allowed_domains")
+        if domains is not None and (
+            not _is_array(domains)
+            or len(cast(Sequence[object], domains)) > 100
+            or any(not isinstance(domain, str) or not domain for domain in domains)
+        ):
+            raise OpenAIResponsesError(
+                "web_search allowed_domains must contain at most 100 non-empty strings"
+            )
+    _validate_web_search_location(configuration.get("user_location"))
+
+
+def _validate_web_search_location(location: object) -> None:
+    if location is None:
+        return
+    typed = OPENAI_RESPONSES_JSON.mapping(location, "web_search user_location")
+    _reject_unknown(
+        typed, {"type", "country", "city", "region", "timezone"}, "web_search user_location"
+    )
+    if "type" in typed and typed["type"] != "approximate":
+        raise OpenAIResponsesError("web_search user_location.type must be approximate")
+    country = typed.get("country")
+    if (
+        "country" in typed
+        and country is not None
+        and (not isinstance(country, str) or len(country) != 2)
+    ):
+        raise OpenAIResponsesError("web_search user_location.country must be two letters")
+    for field in ("city", "region", "timezone"):
+        if field in typed and typed[field] is not None and not isinstance(typed[field], str):
+            raise OpenAIResponsesError(f"web_search user_location.{field} must be a string")
 
 
 def _validate_image_configuration(configuration: Mapping[str, Any]) -> None:
-    partial_images = configuration.get("partial_images")
-    if partial_images is not None and (
-        isinstance(partial_images, bool)
-        or not isinstance(partial_images, int)
-        or not 0 <= partial_images <= 3
-    ):
-        raise OpenAIResponsesError("image_generation partial_images must be between 0 and 3")
-    output_format = configuration.get("output_format")
-    if output_format is not None and output_format not in {"png", "jpeg", "webp"}:
-        raise OpenAIResponsesError("image_generation output_format must be png, jpeg, or webp")
-    output_compression = configuration.get("output_compression")
-    if output_compression is not None and (
-        isinstance(output_compression, bool)
-        or not isinstance(output_compression, int)
-        or not 0 <= output_compression <= 100
-    ):
-        raise OpenAIResponsesError("image_generation output_compression must be between 0 and 100")
-
-
-def _provider_error(item: Mapping[str, Any], tool_type: str) -> ErrorInfo:
-    raw_error = item.get("error")
-    if isinstance(raw_error, Mapping):
-        error = cast(Mapping[str, object], raw_error)
-        code_value = error.get("code")
-        message_value = error.get("message")
-        code = code_value if isinstance(code_value, str) and code_value else f"{tool_type}_failed"
-        message = (
-            message_value
-            if isinstance(message_value, str) and message_value
-            else f"provider {tool_type} call failed"
+    _reject_unknown(
+        configuration,
+        {
+            "action",
+            "background",
+            "input_fidelity",
+            "input_image_mask",
+            "model",
+            "moderation",
+            "output_compression",
+            "output_format",
+            "partial_images",
+            "quality",
+            "size",
+        },
+        "image_generation configuration",
+    )
+    for field, values in {
+        "action": {"auto", "generate", "edit"},
+        "background": {"auto", "opaque", "transparent"},
+        "input_fidelity": {"low", "high"},
+        "moderation": {"auto", "low"},
+        "output_format": {"png", "jpeg", "webp"},
+        "quality": {"auto", "low", "medium", "high"},
+    }.items():
+        if (
+            field in configuration
+            and configuration[field] is not None
+            and configuration[field] not in values
+        ):
+            raise OpenAIResponsesError(f"image_generation {field} is invalid")
+    for field in ("model", "size"):
+        if field in configuration and (
+            not isinstance(configuration[field], str) or not configuration[field]
+        ):
+            raise OpenAIResponsesError(f"image_generation {field} must be a non-empty string")
+    if "input_image_mask" in configuration:
+        typed = OPENAI_RESPONSES_JSON.mapping(
+            configuration["input_image_mask"], "image_generation input_image_mask"
         )
-        return ErrorInfo(code, message)
-    if isinstance(raw_error, str) and raw_error:
-        return ErrorInfo(f"{tool_type}_failed", raw_error)
-    return ErrorInfo(f"{tool_type}_failed", f"provider {tool_type} call failed")
+        _reject_unknown(typed, {"file_id", "image_url"}, "image_generation input_image_mask")
+        sources = [key for key in ("file_id", "image_url") if key in typed]
+        if len(sources) != 1 or not isinstance(typed[sources[0]], str) or not typed[sources[0]]:
+            raise OpenAIResponsesError(
+                "image_generation input_image_mask requires one non-empty source"
+            )
+    for field, low, high in (("partial_images", 0, 3), ("output_compression", 0, 100)):
+        if field in configuration:
+            value = configuration[field]
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise OpenAIResponsesError(f"image_generation {field} is out of range")
 
 
-def _native_item(container: Mapping[str, Any]) -> JsonObject | None:
-    raw_container = container.get("responses")
-    if not isinstance(raw_container, Mapping):
+def _web_search_action(value: object) -> JsonObject:
+    action = OPENAI_RESPONSES_JSON.mapping(value, "Responses web search action")
+    schemas = {
+        "search": {"type", "query", "queries", "sources"},
+        "open_page": {"type", "url"},
+        "find_in_page": {"type", "url", "pattern"},
+    }
+    action_type = action.get("type")
+    if action_type not in schemas:
+        raise OpenAIResponsesError("unsupported Responses web search action type")
+    _reject_unknown(action, schemas[cast(str, action_type)], f"web search {action_type} action")
+    if action_type == "search":
+        _validate_web_search_query(action)
+    else:
+        required = ("url", "pattern") if action_type == "find_in_page" else ()
+        for field in required:
+            if not isinstance(action.get(field), str):
+                raise OpenAIResponsesError(
+                    f"Responses web search {action_type}.{field} must be a string"
+                )
+        if (
+            action_type == "open_page"
+            and "url" in action
+            and action["url"] is not None
+            and not isinstance(action["url"], str)
+        ):
+            raise OpenAIResponsesError(
+                "Responses web search open_page.url must be a string or null"
+            )
+    _validate_web_search_sources(action.get("sources"))
+    return {key: thaw_json_value(raw) for key, raw in action.items()}
+
+
+def _validate_web_search_query(action: Mapping[str, Any]) -> None:
+    query = action.get("query")
+    queries = action.get("queries")
+    if query is not None and not isinstance(query, str):
+        raise OpenAIResponsesError("Responses web search search.query must be a string")
+    if queries is not None and (
+        not _is_array(queries) or any(not isinstance(x, str) for x in queries)
+    ):
+        raise OpenAIResponsesError("Responses web search search.queries must be strings")
+
+
+def _validate_web_search_sources(value: object) -> None:
+    if value is None:
+        return
+    if not _is_array(value):
+        raise OpenAIResponsesError("Responses web search search.sources must be an array")
+    for raw_source in cast(Sequence[object], value):
+        source = OPENAI_RESPONSES_JSON.mapping(raw_source, "Responses web search source")
+        _reject_unknown(source, {"type", "url"}, "Responses web search source")
+        if source.get("type") != "url":
+            raise OpenAIResponsesError("Responses web search source type must be url")
+        if not isinstance(source.get("url"), str):
+            raise OpenAIResponsesError("Responses web search source url must be a string")
+
+
+def _history_status(
+    call: ProviderToolCall,
+    item_type: str,
+    decode_status: Callable[[object], ProviderToolStatus],
+) -> str:
+    responses = call.metadata.get("responses")
+    if responses is None:
+        return call.status.value
+    typed_responses = OPENAI_RESPONSES_JSON.mapping(responses, f"Responses {item_type} metadata")
+    raw_item = typed_responses.get("item")
+    if raw_item is None:
+        return call.status.value
+    item = OPENAI_RESPONSES_JSON.mapping(raw_item, f"Responses {item_type} metadata item")
+    if item.get("type") != item_type or item.get("id") != call.id:
+        raise OpenAIResponsesError(
+            f"Responses {item_type} metadata item does not match the provider call"
+        )
+    status = OPENAI_RESPONSES_JSON.required_string(
+        item.get("status"), f"Responses {item_type} metadata status"
+    )
+    if decode_status(status) is not call.status:
+        raise OpenAIResponsesError(
+            f"Responses {item_type} metadata status does not match the provider call"
+        )
+    return status
+
+
+def _configured_image_media_type(value: object) -> str | None:
+    if value is None:
         return None
-    raw_item = cast(Mapping[str, object], raw_container).get("item")
-    if not isinstance(raw_item, Mapping):
+    if not _is_array(value):
+        raise OpenAIResponsesError("Responses tools must be an array")
+    declarations = [
+        OPENAI_RESPONSES_JSON.mapping(raw, "Responses tool")
+        for raw in cast(Sequence[object], value)
+    ]
+    images = [
+        declaration for declaration in declarations if declaration.get("type") == "image_generation"
+    ]
+    if len(images) > 1:
+        raise OpenAIResponsesError("Responses contains duplicate image_generation tools")
+    output_format = images[0].get("output_format") if images else None
+    if output_format is None:
         return None
-    return cast(JsonObject, thaw_json_value(cast(Mapping[str, object], raw_item)))
+    mapping = {"jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+    try:
+        return mapping[
+            OPENAI_RESPONSES_JSON.required_string(output_format, "Responses image output_format")
+        ]
+    except KeyError as exc:
+        raise OpenAIResponsesError("unsupported Responses image output format") from exc
+
+
+def _validate_item(item: Mapping[str, Any], expected_type: str, allowed: set[str]) -> None:
+    _reject_unknown(item, allowed, f"Responses {expected_type}")
+    if item.get("type") != expected_type:
+        raise OpenAIResponsesError(f"Responses provider item requires type={expected_type!r}")
+    OPENAI_RESPONSES_JSON.required_string(item.get("id"), f"Responses {expected_type} id")
+
+
+def _validate_stream_event_fields(
+    value: Mapping[str, Any], fields: set[str], event_type: str
+) -> None:
+    _reject_unknown(value, {"type", "sequence_number", *fields}, f"Responses {event_type}")
+
+
+def _web_search_status(value: object) -> ProviderToolStatus:
+    return _status(value, "Responses web search status", {"in_progress", "searching"})
+
+
+def _image_generation_status(value: object) -> ProviderToolStatus:
+    return _status(value, "Responses image generation status", {"in_progress", "generating"})
+
+
+def _status(value: object, label: str, active: set[str]) -> ProviderToolStatus:
+    status = OPENAI_RESPONSES_JSON.required_string(value, label)
+    if status in active:
+        return ProviderToolStatus.IN_PROGRESS
+    if status == "completed":
+        return ProviderToolStatus.COMPLETED
+    if status == "failed":
+        return ProviderToolStatus.FAILED
+    raise OpenAIResponsesError(f"unsupported {label}: {status}")
+
+
+def _require_call_tool(call: ProviderToolCall, tool: ProviderToolId) -> None:
+    if call.tool != tool:
+        raise _unsupported_tool(call.tool)
+
+
+def _unsupported_tool(tool: ProviderToolId) -> OpenAIResponsesError:
+    return OpenAIResponsesError(
+        f"Responses profile does not support provider tool: {tool.namespace}/{tool.type}"
+    )
+
+
+def _reject_unknown(value: Mapping[str, Any], allowed: set[str], label: str) -> None:
+    unknown = set(value).difference(allowed)
+    if unknown:
+        raise OpenAIResponsesError(f"{label} contains unsupported field: {min(unknown)}")
 
 
 def _without_result(item: Mapping[str, Any]) -> JsonObject:
-    return {key: value for key, value in item.items() if key != "result"}
+    return {key: thaw_json_value(value) for key, value in item.items() if key != "result"}
 
 
-def _resolve_image_media_type(image_base64: str, configured: str | None) -> str:
-    inferred = _infer_image_media_type(image_base64)
+def _resolve_image_media_type(image: str, configured: str | None) -> str:
+    inferred = _infer_image_media_type(image)
     if configured is not None and inferred is not None and configured != inferred:
-        raise OpenAIResponsesError(
-            "Responses image result does not match the configured output format"
-        )
+        raise OpenAIResponsesError("Responses image result does not match configured output format")
     return configured or inferred or "image/png"
 
 
-def _infer_image_media_type(image_base64: str) -> str | None:
+def _infer_image_media_type(image: str) -> str | None:
     try:
-        decoded = base64.b64decode(image_base64, validate=True)
+        decoded = base64.b64decode(image, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise OpenAIResponsesError("Responses image data must contain valid base64") from exc
     if decoded.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -818,18 +616,6 @@ def _infer_image_media_type(image_base64: str) -> str | None:
     if len(decoded) >= 12 and decoded.startswith(b"RIFF") and decoded[8:12] == b"WEBP":
         return "image/webp"
     return None
-
-
-def _provider_event_status(suffix: str, label: str) -> ProviderToolStatus:
-    if suffix in {"in_progress", "generating", "searching"}:
-        return ProviderToolStatus.IN_PROGRESS
-    if suffix == "completed":
-        return ProviderToolStatus.COMPLETED
-    if suffix == "incomplete":
-        return ProviderToolStatus.INCOMPLETE
-    if suffix == "failed":
-        return ProviderToolStatus.FAILED
-    raise OpenAIResponsesError(f"unsupported Responses {label} event: {suffix}")
 
 
 def _nonnegative_int(value: object, label: str) -> int:

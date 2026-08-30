@@ -1,25 +1,13 @@
-"""Immutable wire profile for OpenAI Responses-compatible APIs."""
+"""Immutable profile for the OpenAI Responses API."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import cast
 
 from jharness.kernel import ModelCapabilities, RuntimeToolKind
-from jharness.models._profiles import (
-    immutable_json_mapping,
-    immutable_string_mapping,
-    required_string,
-    string_set,
-    validate_capabilities,
-    validate_literal,
-)
-
-if TYPE_CHECKING:
-    from jharness.models.openai.responses.provider_tools import OpenAIResponsesProviderToolRegistry
-
-OpenAIResponsesReasoningHistoryMode = Literal["summary", "content"]
+from jharness.models._profiles import required_string, string_set, validate_capabilities
+from jharness.models.openai.responses.provider_tools import SUPPORTED_PROVIDER_TOOLS
 
 _TOOL_CHOICE_TYPES = frozenset({"auto", "none", "required", "runtime", "provider"})
 _DEFAULT_TOOL_CHOICE_TYPES = frozenset({"auto", "none", "required", "runtime"})
@@ -43,14 +31,18 @@ def _default_capabilities() -> ModelCapabilities:
     )
 
 
+_INCLUDE_VALUES = frozenset(
+    {
+        "message.input_image.image_url",
+        "message.output_text.logprobs",
+        "reasoning.encrypted_content",
+        "web_search_call.action.sources",
+    }
+)
+
+
 def _default_include() -> frozenset[str]:
     return frozenset({"reasoning.encrypted_content"})
-
-
-def _empty_provider_tool_registry() -> OpenAIResponsesProviderToolRegistry:
-    from jharness.models.openai.responses.provider_tools import OpenAIResponsesProviderToolRegistry
-
-    return OpenAIResponsesProviderToolRegistry()
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,22 +51,8 @@ class OpenAIResponsesProfile:
 
     name: str = "openai-responses"
     capabilities: ModelCapabilities = field(default_factory=_default_capabilities)
-    reasoning_history_mode: OpenAIResponsesReasoningHistoryMode = "summary"
-    store: bool | None = False
+    store: bool = False
     include: frozenset[str] = field(default_factory=_default_include)
-    provider_tool_registry: OpenAIResponsesProviderToolRegistry = field(
-        default_factory=_empty_provider_tool_registry
-    )
-    freeform_runtime_tool_names: frozenset[str] = field(default_factory=lambda: frozenset[str]())
-    exact_runtime_tool_choice_kinds: frozenset[RuntimeToolKind] = field(
-        default_factory=lambda: frozenset(RuntimeToolKind)
-    )
-    emit_freeform_runtime_tool_description: bool = True
-    allowed_models: frozenset[str] = field(default_factory=lambda: frozenset[str]())
-    extra_request_body: Mapping[str, Any] = field(default_factory=dict[str, Any])
-    finish_reason_map: Mapping[str, str] = field(
-        default_factory=lambda: {"max_output_tokens": "length"}
-    )
 
     def __post_init__(self) -> None:
         required_string(self.name, "profile name")
@@ -88,75 +66,21 @@ class OpenAIResponsesProfile:
         if unsupported_choices:
             choice = min(unsupported_choices)
             raise ValueError(f"unsupported OpenAI Responses tool choice type: {choice}")
-        validate_literal(
-            self.reasoning_history_mode,
-            "reasoning_history_mode",
-            {"summary", "content"},
-        )
-        raw_store = cast(object, self.store)
-        if raw_store is not None and not isinstance(raw_store, bool):
-            raise TypeError("store must be a bool or None")
-        include = string_set(self.include, "include")
-        if self.store is False and "reasoning.encrypted_content" not in include:
+        if capabilities.seed:
+            raise ValueError("OpenAI Responses does not support seed")
+        unsupported_tools = capabilities.provider_tools.difference(SUPPORTED_PROVIDER_TOOLS)
+        if unsupported_tools:
+            tool = min(unsupported_tools, key=lambda item: (item.namespace, item.type))
             raise ValueError(
-                "store=False requires reasoning.encrypted_content for stateless reasoning history"
+                f"unsupported OpenAI Responses provider tool: {tool.namespace}/{tool.type}"
+            )
+        raw_store = cast(object, self.store)
+        if not isinstance(raw_store, bool):
+            raise TypeError("store must be a bool")
+        include = string_set(self.include, "include")
+        unsupported_include = include.difference(_INCLUDE_VALUES)
+        if unsupported_include:
+            raise ValueError(
+                "unsupported OpenAI Responses include value: " + min(unsupported_include)
             )
         object.__setattr__(self, "include", include)
-        from jharness.models.openai.responses.provider_tools import (
-            OpenAIResponsesProviderToolRegistry,
-        )
-
-        raw_registry = cast(object, self.provider_tool_registry)
-        if not isinstance(raw_registry, OpenAIResponsesProviderToolRegistry):
-            raise TypeError("provider_tool_registry must be an OpenAIResponsesProviderToolRegistry")
-        if self.provider_tool_registry.tools != capabilities.provider_tools:
-            raise ValueError(
-                "provider_tool_registry must exactly match declared provider tool identities"
-            )
-        object.__setattr__(
-            self,
-            "freeform_runtime_tool_names",
-            string_set(self.freeform_runtime_tool_names, "freeform_runtime_tool_names"),
-        )
-        exact_choice_kinds = frozenset(self.exact_runtime_tool_choice_kinds)
-        if not exact_choice_kinds.issubset(capabilities.runtime_tool_kinds):
-            raise ValueError(
-                "exact_runtime_tool_choice_kinds must be a subset of runtime_tool_kinds"
-            )
-        object.__setattr__(self, "exact_runtime_tool_choice_kinds", exact_choice_kinds)
-        raw_description_policy = cast(object, self.emit_freeform_runtime_tool_description)
-        if not isinstance(raw_description_policy, bool):
-            raise TypeError("emit_freeform_runtime_tool_description must be a bool")
-        object.__setattr__(
-            self,
-            "allowed_models",
-            string_set(self.allowed_models, "allowed_models"),
-        )
-        object.__setattr__(
-            self,
-            "extra_request_body",
-            immutable_json_mapping(self.extra_request_body, "extra_request_body"),
-        )
-        object.__setattr__(
-            self,
-            "finish_reason_map",
-            immutable_string_mapping(self.finish_reason_map, "finish_reason_map"),
-        )
-
-    def validate_model(self, model: str) -> None:
-        """Reject model identifiers the compatible endpoint does not serve."""
-
-        required_string(model, "model")
-        if self.allowed_models and model not in self.allowed_models:
-            allowed = ", ".join(sorted(self.allowed_models))
-            raise ValueError(f"{self.name} only supports models: {allowed}")
-
-    def allows_freeform_runtime_tool(self, name: str) -> bool:
-        """Return whether the Responses dialect accepts this custom-tool name."""
-
-        return not self.freeform_runtime_tool_names or name in self.freeform_runtime_tool_names
-
-    def finish_reason(self, raw: str | None) -> str | None:
-        if raw is None:
-            return None
-        return self.finish_reason_map.get(raw, raw)

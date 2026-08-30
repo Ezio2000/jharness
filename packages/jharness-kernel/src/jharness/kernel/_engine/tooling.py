@@ -144,6 +144,19 @@ class ToolStep:
     def _bind(self, batch: ToolBatch) -> tuple[Prepared, ...]:
         prepared: list[Prepared] = []
         for call in batch.calls:
+            if isinstance(call, StructuredToolCall) and call.arguments is None:
+                prepared.append(
+                    Prepared(
+                        call,
+                        result=SettledResult(
+                            ToolFailure.from_error(
+                                "invalid_tool_call",
+                                "structured tool arguments are not a JSON object",
+                            )
+                        ),
+                    )
+                )
+                continue
             try:
                 binding = self._catalog.bind(call)
                 if not isinstance(cast(object, binding), ToolBinding):
@@ -554,17 +567,23 @@ async def _await_deadline(awaitable: Awaitable[Any], deadline: Deadline) -> Any:
 
 def call_data(call: RuntimeToolCall) -> Mapping[str, Any]:
     if isinstance(call, StructuredToolCall):
-        return {
+        data: dict[str, Any] = {
             "id": call.id,
             "name": call.name,
             "input_kind": "structured",
-            "arguments": call.arguments,
+            "metadata": call.metadata,
         }
+        if call.arguments is not None:
+            data["arguments"] = call.arguments
+        else:
+            data["raw_input"] = call.raw_input
+        return data
     return {
         "id": call.id,
         "name": call.name,
         "input_kind": "freeform",
         "input": call.input,
+        "metadata": call.metadata,
     }
 
 

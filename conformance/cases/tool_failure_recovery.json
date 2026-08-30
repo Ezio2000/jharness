@@ -31,7 +31,8 @@
                   "input_kind": "structured",
                   "id": "call-1",
                   "name": "fail",
-                  "arguments": {}
+                  "arguments": {},
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

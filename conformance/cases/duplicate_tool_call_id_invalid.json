@@ -11,14 +11,16 @@
         "input_kind": "structured",
         "id": "duplicate",
         "name": "echo",
-        "arguments": {}
+        "arguments": {},
+        "metadata": {}
       },
       {
         "kind": "runtime_tool_call",
         "input_kind": "structured",
         "id": "duplicate",
         "name": "echo",
-        "arguments": {}
+        "arguments": {},
+        "metadata": {}
       }
     ],
     "metadata": {}

@@ -39,7 +39,8 @@
                     ],
                     "step_delay": 0.01,
                     "cancel_text": "cancelled"
-                  }
+                  },
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

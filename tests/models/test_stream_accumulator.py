@@ -40,3 +40,25 @@ def test_delta_accumulator_handles_many_tiny_chunks_without_changing_the_result(
     call = response.runtime_tool_calls()[0]
     assert isinstance(call, StructuredToolCall)
     assert call.arguments == {"value": "y" * chunk_count}
+
+
+def test_delta_accumulator_preserves_invalid_structured_input_for_engine_settlement() -> None:
+    accumulator = DeltaAccumulator(ValueError)
+    accumulator.apply(
+        ModelRuntimeToolCallDelta(
+            output_index=0,
+            input_kind=RuntimeToolKind.STRUCTURED,
+            input_delta="not-json",
+            id="call-1",
+            name="lookup",
+        )
+    )
+    call = accumulator.response(
+        finish_reason="tool_calls",
+        model_id="model",
+        response_id="response",
+        metadata={},
+    ).runtime_tool_calls()[0]
+    assert isinstance(call, StructuredToolCall)
+    assert call.arguments is None
+    assert call.raw_input == "not-json"

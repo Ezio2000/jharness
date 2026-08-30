@@ -27,12 +27,14 @@ class. `allow_parallel_runtime_tool_calls` constrains runtime-owned calls return
 host scheduling; the count and order of provider-owned items do not prove how
 the remote provider executed them.
 
-Every complete `ModelResponse` contains one non-empty ordered `output`. Its
-items are exactly:
+Every complete `ModelResponse` contains one ordered `output`, which may be
+empty when a provider returned no assistant item (for example, a filtered
+completion). Its items are exactly:
 
 - `content`, carrying one `ContentPart`;
-- `runtime_tool_call`, carrying id, name, `input_kind`, and either structured
-  JSON `arguments` or freeform string `input`;
+- `runtime_tool_call`, carrying id, name, `input_kind`, required metadata, and
+  either structured JSON `arguments` (or malformed structured `raw_input`) or
+  freeform string `input`;
 - `provider_tool_call`, carrying id, namespaced tool identity, status,
   arguments, provider-produced content, optional failure, and metadata.
 
@@ -48,7 +50,7 @@ wire payloads and versioned tool names are adapter concerns, not portable
 message shapes.
 
 An assistant message persists that same ordered output without splitting
-content from calls. Only `runtime_tool_call` creates `ToolsPending` work.
+content from calls, including an empty output. Only `runtime_tool_call` creates `ToolsPending` work.
 Provider-tool output is projected into visible content in its output position.
 That projection may be empty when the complete response consists only of
 provider-tool facts; the ordered assistant output remains the durable result.
@@ -74,7 +76,9 @@ The provider adapter owns stream assembly and always returns one complete
 the ordered provider response. Content and reasoning deltas additionally carry
 `content_index`; runtime tool-call deltas carry `input_kind` and accumulate
 `input_delta` at their output position, interpreting it as JSON text for
-`structured` calls and literal text for `freeform` calls. Provider-tool deltas carry id,
+`structured` calls and literal text for `freeform` calls. Every runtime tool-call delta
+also carries a metadata object; fragments for one call must agree on each metadata
+value. Provider-tool deltas carry id,
 `ProviderToolId`, optional normalized status, optional provider event name, and
 opaque event data. Usage deltas merge field by field; an omitted value does not
 clear a value already reported. There is no tool invocation mode.

@@ -6,6 +6,33 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-30
+
+### Changed
+
+- OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages now encode and
+  decode only their documented protocol schemas. Provider dialect switches, permissive
+  fallback shapes, and arbitrary request-body passthrough have been removed.
+- Hosted-tool registries and public codec injection have been replaced by closed
+  protocol-owned mappings for the documented OpenAI and Anthropic tools. Profiles can
+  select supported capabilities but cannot define alternate declarations, response
+  blocks, or streaming events.
+- Runtime tool calls now distinguish parsed object arguments from malformed raw input,
+  preserve protocol metadata through streaming and history, and represent valid empty
+  assistant output without synthetic text or sentinel content.
+- Content parts now expose one normalized capability modality, including media types
+  embedded in data URLs. Image MIME artifacts remain image modalities when transported
+  by provider file id. Anthropic Messages encodes image artifacts as image file sources,
+  PDF/plain-text files as documents, and other file artifacts as container uploads.
+- Model capabilities are documented as trusted host declarations; overstating them may
+  be rejected, ignored, or degraded by the provider.
+
+### Removed
+
+- Removed the DeepSeek profiles, hosted-tool presets, protocol demo, and regression
+  fixtures. Third-party endpoints can still use a protocol adapter when they implement
+  its standard wire contract; vendor-specific behavior belongs in a separate adapter.
+
 ## [0.8.0] - 2026-08-13
 
 ### Added
@@ -258,7 +285,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Sixty-six deterministic conformance cases and a standard tool catalog.
 - Provider-neutral lifecycle, model, tool, event, wire, and trace contracts.
 
-[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Ezio2000/jharness/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Ezio2000/jharness/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Ezio2000/jharness/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Ezio2000/jharness/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/Ezio2000/jharness/compare/v0.6.0...v0.6.1

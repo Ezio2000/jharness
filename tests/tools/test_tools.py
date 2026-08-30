@@ -51,8 +51,9 @@ async def _emit_progress(_progress: Mapping[str, Any]) -> None:
 
 def _invoke(
     tool: Tool,
-    arguments: Mapping[str, Any],
+    arguments: Mapping[str, Any] | None,
     *,
+    raw_input: str | None = None,
     is_cancelled: Callable[[], bool] = lambda: False,
 ) -> ToolSuccess | ToolFailure:
     async def invoke() -> ToolSuccess | ToolFailure:
@@ -61,7 +62,9 @@ def _invoke(
             _emit_progress,
             is_cancelled,
         )
-        result = await tool.invoke(StructuredToolCall("call-1", tool.spec.name, arguments), context)
+        result = await tool.invoke(
+            StructuredToolCall("call-1", tool.spec.name, arguments, raw_input), context
+        )
         assert isinstance(result, SettledResult)
         assert isinstance(result.outcome, ToolSuccess | ToolFailure)
         return result.outcome
@@ -388,6 +391,7 @@ def test_read_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _failure(_invoke(tool, {"file_path": "missing.txt"}), "path_not_found")
     _failure(_invoke(tool, {"file_path": "."}), "not_a_file")
     _failure(_invoke(tool, {"file_path": "../outside.txt"}), "path_outside_workspace")
+    _failure(_invoke(tool, None, raw_input="not-json"), "invalid_arguments")
     _failure(_invoke(tool, {"file_path": "large.txt"}, is_cancelled=lambda: True), "cancelled")
 
     readable = tmp_path / "readable.txt"
@@ -497,6 +501,7 @@ def test_ls_failures_budgets_and_cancellation(
     _failure(_invoke(tool, {"path": "missing"}), "path_not_found")
     _failure(_invoke(tool, {"path": "file.txt"}), "not_a_directory")
     _failure(_invoke(tool, {"path": ".."}), "path_outside_workspace")
+    _failure(_invoke(tool, None, raw_input="not-json"), "invalid_arguments")
     _failure(_invoke(tool, {}, is_cancelled=lambda: True), "cancelled")
 
     (tmp_path / "second.txt").write_text("x", encoding="utf-8")
@@ -604,6 +609,7 @@ def test_glob_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _failure(_invoke(limited_tool, {"pattern": "**/**/x"}), "invalid_glob_pattern")
     _failure(_invoke(tool, {"pattern": "*", "path": "missing"}), "path_not_found")
     _failure(_invoke(tool, {"pattern": "*", "path": "file.txt"}), "not_a_directory")
+    _failure(_invoke(tool, None, raw_input="not-json"), "invalid_arguments")
     _failure(_invoke(tool, {"pattern": "*"}, is_cancelled=lambda: True), "cancelled")
 
     def fail_scan(_workspace: Workspace, _directory: Path) -> None:
@@ -787,6 +793,7 @@ def test_grep_failures_and_file_filters(tmp_path: Path) -> None:
     _failure(_invoke(tool, {"pattern": "["}), "invalid_regex")
     _failure(_invoke(tool, {"pattern": "x", "glob": "../*.py"}), "invalid_glob_pattern")
     _failure(_invoke(tool, {"pattern": "x", "path": "missing"}), "path_not_found")
+    _failure(_invoke(tool, None, raw_input="not-json"), "invalid_arguments")
     _failure(_invoke(tool, {"pattern": "x"}, is_cancelled=lambda: True), "cancelled")
     bounded = tools.GrepTool(tmp_path, max_pattern_chars=3, max_pattern_components=1)
     _failure(_invoke(bounded, {"pattern": "four"}), "invalid_regex")
