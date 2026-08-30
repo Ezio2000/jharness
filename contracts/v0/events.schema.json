@@ -152,14 +152,15 @@
     },
     "tool_call_delta": {
       "type": "object",
-      "required": ["kind", "output_index", "id", "name", "input_kind", "input_delta"],
+      "required": ["kind", "output_index", "id", "name", "input_kind", "input_delta", "metadata"],
       "properties": {
         "kind": { "const": "tool_call" },
         "output_index": { "type": "integer", "minimum": 0 },
         "id": { "type": ["string", "null"], "minLength": 1 },
         "name": { "type": ["string", "null"], "minLength": 1 },
         "input_kind": { "enum": ["structured", "freeform"] },
-        "input_delta": { "type": "string" }
+        "input_delta": { "type": "string" },
+        "metadata": { "type": "object" }
       },
       "additionalProperties": false
     },

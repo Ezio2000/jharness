@@ -56,9 +56,14 @@ class WriteTool:
         return self.workspace.root
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
-        file_path = cast(str, call.arguments["file_path"])
-        content = cast(str, call.arguments["content"])
-        expected_sha256 = cast(str | None, call.arguments["expected_sha256"])
+        arguments = call.arguments
+        if arguments is None:
+            return failure(
+                FilesystemFailure("invalid_arguments", "Write requires JSON object arguments.")
+            )
+        file_path = cast(str, arguments["file_path"])
+        content = cast(str, arguments["content"])
+        expected_sha256 = cast(str | None, arguments["expected_sha256"])
         try:
             return await run_mutation(
                 lambda cancelled_check: self._write(

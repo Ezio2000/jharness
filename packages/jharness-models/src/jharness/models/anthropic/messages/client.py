@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import TypedDict, Unpack, cast
+from collections.abc import Mapping
+from typing import TypedDict, Unpack
 
 import httpx
 
@@ -30,7 +30,7 @@ from jharness.models.anthropic.messages.stream import AnthropicMessagesStreamDec
 
 _ADDITIONAL_RETRYABLE_STATUS_CODES = frozenset({529})
 _RETRYABLE_ERROR_CODES = frozenset({"overloaded_error"})
-_REQUEST_ID_HEADERS = ("request-id", "x-request-id", "x-ds-request-id")
+_REQUEST_ID_HEADERS = ("request-id", "x-request-id")
 
 
 class _AnthropicMessagesModelOptions(TypedDict, total=False):
@@ -157,41 +157,7 @@ class AnthropicMessagesModel:
         headers = {
             "Content-Type": "application/json",
             "anthropic-version": self.profile.anthropic_version,
-            **self.profile.extra_headers,
             **self._headers,
         }
-        if _uses_file_source(payload):
-            beta_header = self.profile.file_ref_beta_header
-            if beta_header is None:
-                raise AnthropicMessagesError(
-                    f"{self.profile.name} does not support file ref inputs"
-                )
-            _ensure_header_value(headers, "anthropic-beta", beta_header)
-        if self.profile.auth_scheme == "bearer":
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        else:
-            headers["x-api-key"] = self._api_key
+        headers["x-api-key"] = self._api_key
         return headers
-
-
-def _uses_file_source(value: object) -> bool:
-    if isinstance(value, Mapping):
-        value_mapping = cast(Mapping[str, object], value)
-        if value_mapping.get("type") == "file" and isinstance(value_mapping.get("file_id"), str):
-            return True
-        return any(_uses_file_source(item) for item in value_mapping.values())
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return any(_uses_file_source(item) for item in cast(Sequence[object], value))
-    return False
-
-
-def _ensure_header_value(headers: dict[str, str], name: str, value: str) -> None:
-    expected = name.lower()
-    for key, existing in list(headers.items()):
-        if key.lower() != expected:
-            continue
-        existing_values = {item.strip() for item in existing.split(",") if item.strip()}
-        if value not in existing_values:
-            headers[key] = f"{existing}, {value}" if existing else value
-        return
-    headers[name] = value

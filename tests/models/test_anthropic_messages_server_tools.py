@@ -16,21 +16,23 @@ from jharness.kernel import (
     ProviderToolStatus,
     ToolChoice,
 )
-from jharness.models.anthropic import AnthropicMessagesCodec, AnthropicMessagesProfile
+from jharness.models.anthropic import (
+    AnthropicMessagesCodec,
+    AnthropicMessagesProfile,
+    anthropic_messages_profile,
+)
 from jharness.models.anthropic.messages.errors import AnthropicMessagesError
-from jharness.models.anthropic.messages.server_tools import anthropic_messages_web_search_codec
 from jharness.models.anthropic.messages.stream import AnthropicMessagesStreamDecoder
-from jharness.models.deepseek import deepseek_messages_profile
 
-_WEB_SEARCH = ProviderToolId("deepseek.messages", "web_search")
-_SERVER_USE = {
+_WEB_SEARCH = ProviderToolId("anthropic.messages", "web_search")
+_SERVER_USE: dict[str, Any] = {
     "type": "server_tool_use",
     "id": "server-1",
     "name": "web_search",
     "input": {"query": "JHarness"},
     "caller": {"type": "direct"},
 }
-_SERVER_RESULT = {
+_SERVER_RESULT: dict[str, Any] = {
     "type": "web_search_tool_result",
     "tool_use_id": "server-1",
     "content": [
@@ -45,11 +47,11 @@ _SERVER_RESULT = {
 
 
 def _profile() -> AnthropicMessagesProfile:
-    return deepseek_messages_profile()
+    return anthropic_messages_profile()
 
 
 def _codec() -> AnthropicMessagesCodec:
-    return AnthropicMessagesCodec(model="deepseek-v4-flash", profile=_profile())
+    return AnthropicMessagesCodec(model="claude-opus-4-6", profile=_profile())
 
 
 def _response_content(*blocks: dict[str, Any], stop_reason: str = "end_turn") -> dict[str, Any]:
@@ -57,13 +59,14 @@ def _response_content(*blocks: dict[str, Any], stop_reason: str = "end_turn") ->
         "type": "message",
         "role": "assistant",
         "id": "message-1",
-        "model": "deepseek-v4-flash",
+        "model": "claude-opus-4-6",
         "stop_reason": stop_reason,
         "content": list(blocks),
+        "usage": {"input_tokens": 1, "output_tokens": 1},
     }
 
 
-def test_deepseek_messages_encodes_web_search_and_exact_provider_choice() -> None:
+def test_anthropic_messages_encodes_web_search_and_exact_provider_choice() -> None:
     profile = _profile()
     spec = ProviderToolSpec(
         _WEB_SEARCH,
@@ -74,7 +77,7 @@ def test_deepseek_messages_encodes_web_search_and_exact_provider_choice() -> Non
     )
 
     payload = AnthropicMessagesCodec(
-        model="deepseek-v4-flash",
+        model="claude-opus-4-6",
         profile=profile,
     ).encode_request(
         ModelRequest(
@@ -89,7 +92,6 @@ def test_deepseek_messages_encodes_web_search_and_exact_provider_choice() -> Non
     )
 
     assert profile.capabilities.provider_tools == frozenset({_WEB_SEARCH})
-    assert profile.server_tools.tools == frozenset({_WEB_SEARCH})
     assert payload["tools"] == [
         {
             "type": "web_search_20250305",
@@ -101,22 +103,138 @@ def test_deepseek_messages_encodes_web_search_and_exact_provider_choice() -> Non
     assert payload["tool_choice"] == {"type": "tool", "name": "web_search"}
 
 
+def _declaration(configuration: dict[str, object]) -> dict[str, object]:
+    request = ModelRequest(
+        messages=(Message.user("search"),),
+        provider_tools=(ProviderToolSpec(_WEB_SEARCH, configuration),),
+    )
+    return cast(dict[str, object], _codec().encode_request(request)["tools"][0])
+
+
 def test_anthropic_messages_web_search_limits_response_inclusion_by_variant() -> None:
-    codec = anthropic_messages_web_search_codec(
-        _WEB_SEARCH,
-        variants=frozenset({"web_search_20250305", "web_search_20260318"}),
-    )
-
     with pytest.raises(AnthropicMessagesError, match="unsupported web_search_20250305"):
-        codec.encode_declaration(ProviderToolSpec(_WEB_SEARCH, {"response_inclusion": "all"}))
-
-    declaration = codec.encode_declaration(
-        ProviderToolSpec(
-            _WEB_SEARCH,
-            {"variant": "web_search_20260318", "response_inclusion": "all"},
-        )
+        _declaration({"response_inclusion": "all"})
+    assert (
+        _declaration({"variant": "web_search_20260318", "response_inclusion": "full"})[
+            "response_inclusion"
+        ]
+        == "full"
     )
-    assert declaration["response_inclusion"] == "all"
+
+
+@pytest.mark.parametrize(
+    "configuration, match",
+    (
+        (
+            {"allowed_domains": ["example.com"], "blocked_domains": ["blocked.example"]},
+            "mutually exclusive",
+        ),
+        ({"max_uses": 0}, "positive integer"),
+        ({"allowed_callers": ["direct"]}, "unsupported web_search configuration field"),
+        ({"defer_loading": True}, "unsupported web_search configuration field"),
+        ({"user_location": {"type": "exact"}}, "approximate"),
+        ({"user_location": {"type": "approximate"}}, "requires city"),
+        ({"user_location": {"type": "approximate", "country": "USA"}}, "two-letter ISO"),
+        ({"variant": "web_search_20260318", "response_inclusion": "all"}, "full"),
+    ),
+)
+def test_anthropic_messages_web_search_validates_official_configuration(
+    configuration: dict[str, object], match: str
+) -> None:
+    with pytest.raises(AnthropicMessagesError, match=match):
+        _declaration(configuration)
+
+
+def test_anthropic_messages_web_search_accepts_direct_configuration_only() -> None:
+    declaration = _declaration(
+        {
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            "strict": False,
+        }
+    )
+    assert declaration["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert declaration["strict"] is False
+
+
+def test_anthropic_messages_web_search_rejects_unknown_error_code() -> None:
+    result = {
+        "type": "web_search_tool_result",
+        "tool_use_id": "server-1",
+        "content": {
+            "type": "web_search_tool_result_error",
+            "error_code": "unofficial",
+        },
+    }
+
+    with pytest.raises(AnthropicMessagesError, match="error_code"):
+        _codec().decode_response(_response_content(_SERVER_USE, result, stop_reason="tool_use"))
+
+
+def test_anthropic_messages_server_tool_use_requires_object_input() -> None:
+    use = {
+        "type": "server_tool_use",
+        "id": "server-1",
+        "name": "web_search",
+        "input": "{}",
+    }
+
+    with pytest.raises(AnthropicMessagesError, match="input must be an object"):
+        _codec().decode_response(_response_content(use, stop_reason="tool_use"))
+
+
+def test_anthropic_messages_rejects_code_execution_web_search_caller() -> None:
+    use = {
+        **_SERVER_USE,
+        "caller": {"type": "code_execution_20260521", "tool_id": "exec-1"},
+    }
+
+    with pytest.raises(AnthropicMessagesError, match="direct caller has unsupported field"):
+        _codec().decode_response(_response_content(use, stop_reason="tool_use"))
+
+
+@pytest.mark.parametrize(
+    "block, match",
+    (
+        ({**_SERVER_USE, "vendor_extra": True}, "unsupported field: vendor_extra"),
+        ({**_SERVER_USE, "caller": {"type": "direct", "tool_id": "bad"}}, "unsupported field"),
+        ({**_SERVER_RESULT, "vendor_extra": True}, "unsupported field: vendor_extra"),
+    ),
+)
+def test_anthropic_messages_web_search_rejects_unknown_or_invalid_extras(
+    block: dict[str, object], match: str
+) -> None:
+    content = (block,) if block.get("type") == "server_tool_use" else (_SERVER_USE, block)
+    with pytest.raises(AnthropicMessagesError, match=match):
+        _codec().decode_response(_response_content(*content, stop_reason="tool_use"))
+
+
+_INVALID_WEB_SEARCH_CONTENT: tuple[tuple[object, str], ...] = (
+    (
+        [{"type": "web_search_result", "title": "title", "url": "https://example.com"}],
+        "encrypted_content",
+    ),
+    (
+        [{**_SERVER_RESULT["content"][0], "vendor_extra": True}],
+        "unsupported field: vendor_extra",
+    ),
+    (
+        {"type": "web_search_tool_result_error", "error_code": "invalid_input"},
+        "error_code",
+    ),
+    (dict[str, object](), "must be web_search_tool_result_error"),
+)
+
+
+@pytest.mark.parametrize(
+    "content, match",
+    _INVALID_WEB_SEARCH_CONTENT,
+)
+def test_anthropic_messages_web_search_validates_result_content(
+    content: object, match: str
+) -> None:
+    result = {**_SERVER_RESULT, "content": content}
+    with pytest.raises(AnthropicMessagesError, match=match):
+        _codec().decode_response(_response_content(_SERVER_USE, result, stop_reason="tool_use"))
 
 
 def test_anthropic_messages_server_tool_pair_terminal_and_provider_stop_not_pending() -> None:
@@ -147,7 +265,6 @@ def test_anthropic_messages_server_tool_result_error_is_terminal_failure() -> No
         "content": {
             "type": "web_search_tool_result_error",
             "error_code": "unavailable",
-            "error_message": "search temporarily unavailable",
         },
     }
 
@@ -159,7 +276,7 @@ def test_anthropic_messages_server_tool_result_error_is_terminal_failure() -> No
     assert call.status is ProviderToolStatus.FAILED
     assert call.error is not None
     assert call.error.code == "web_search.unavailable"
-    assert call.error.message == "search temporarily unavailable"
+    assert call.error.message == "unavailable"
     assert response.provider_turn_pending is False
 
 
@@ -191,8 +308,9 @@ def test_anthropic_messages_server_tool_stream_pairs_result_at_use_position() ->
                 "type": "message",
                 "role": "assistant",
                 "id": "message-1",
-                "model": "deepseek-v4-flash",
+                "model": "claude-opus-4-6",
                 "content": [],
+                "usage": {"input_tokens": 1, "output_tokens": 0},
             },
         },
     )
@@ -253,6 +371,7 @@ def test_anthropic_messages_server_tool_stream_pairs_result_at_use_position() ->
         {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 1},
         },
     )
     decoder.apply_event("message_stop", {"type": "message_stop"})
@@ -290,7 +409,10 @@ def test_anthropic_messages_unmatched_streamed_server_use_keeps_provider_turn_pe
             "message": {
                 "type": "message",
                 "role": "assistant",
+                "id": "message-2",
+                "model": "claude-opus-4-6",
                 "content": [],
+                "usage": {"input_tokens": 1, "output_tokens": 0},
             },
         },
     )
@@ -316,6 +438,7 @@ def test_anthropic_messages_unmatched_streamed_server_use_keeps_provider_turn_pe
         {
             "type": "message_delta",
             "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 1},
         },
     )
     decoder.apply_event("message_stop", {"type": "message_stop"})

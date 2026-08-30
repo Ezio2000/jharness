@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 _REGULAR_ROLES = frozenset({"system", "user", "external"})
 _ROLES = frozenset({*_REGULAR_ROLES, "assistant", "tool"})
+_MEDIA_PART_TYPES = frozenset({"image", "audio", "video"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +105,30 @@ class ContentPart:
         ):
             raise ValueError("artifact content part cannot carry duplicate or opaque fields")
 
+    @property
+    def modality(self) -> str:
+        """Return the capability modality represented by this part."""
+        for modality in _MEDIA_PART_TYPES:
+            if self.type in {modality, f"input_{modality}", f"output_{modality}"}:
+                return modality
+        media_type = self.media_type
+        if media_type is None and self.artifact is not None:
+            media_type = self.artifact.media_type
+        if media_type is None and self.uri is not None and self.uri[:5].casefold() == "data:":
+            media_type = self.uri[5:].partition(",")[0].partition(";")[0]
+        if media_type is not None:
+            family = media_type.casefold().partition("/")[0]
+            if family in _MEDIA_PART_TYPES:
+                return family
+        if (
+            self.type in {"artifact", "file"}
+            or self.artifact is not None
+            or self.uri is not None
+            or self.media_type is not None
+        ):
+            return "file"
+        return "text"
+
     @classmethod
     def text_part(
         cls,
@@ -140,12 +165,22 @@ class StructuredToolCall:
 
     id: str
     name: str
-    arguments: Mapping[str, Any] = field(default_factory=dict[str, Any])
+    arguments: Mapping[str, Any] | None = field(default_factory=dict[str, Any])
+    raw_input: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
     def __post_init__(self) -> None:
         expect_non_empty_str(self.id, "tool call id")
         expect_non_empty_str(self.name, "tool call name")
-        object.__setattr__(self, "arguments", freeze_mapping(self.arguments, "tool arguments"))
+        if self.arguments is not None and self.raw_input is not None:
+            raise ValueError("structured tool call arguments and raw_input are mutually exclusive")
+        if self.arguments is None and self.raw_input is None:
+            raise ValueError("structured tool call requires arguments or raw_input")
+        if self.arguments is not None:
+            object.__setattr__(self, "arguments", freeze_mapping(self.arguments, "tool arguments"))
+        if self.raw_input is not None:
+            expect_str(self.raw_input, "tool raw_input")
+        object.__setattr__(self, "metadata", freeze_mapping(self.metadata, "tool metadata"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,11 +190,13 @@ class FreeformToolCall:
     id: str
     name: str
     input: str
+    metadata: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
     def __post_init__(self) -> None:
         expect_non_empty_str(self.id, "tool call id")
         expect_non_empty_str(self.name, "tool call name")
         expect_str(self.input, "tool input")
+        object.__setattr__(self, "metadata", freeze_mapping(self.metadata, "tool metadata"))
 
 
 RuntimeToolCall: TypeAlias = StructuredToolCall | FreeformToolCall
@@ -400,8 +437,6 @@ def _validate_assistant_message(
 ) -> None:
     if parts:
         raise ValueError("assistant message content must be carried by ordered output")
-    if not output:
-        raise ValueError("assistant message requires output")
     if tool_call_id is not None or outcome is not None:
         raise ValueError("assistant message cannot carry tool outcome fields")
     ids = [item.id for item in output if isinstance(item, RuntimeToolCall | ProviderToolCall)]

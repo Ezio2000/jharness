@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from jharness.kernel import ContentPart, Message, ProviderToolCall, StructuredToolCall
+from jharness.kernel import (
+    ContentPart,
+    Message,
+    ProviderToolCall,
+    RuntimeToolCall,
+)
 from jharness.models.openai.chat.errors import OPENAI_CHAT_JSON, OpenAIChatError
 from jharness.models.openai.chat.profile import OpenAIChatProfile
 
 JsonValue = Any
 JsonObject = dict[str, JsonValue]
-
-_ASSISTANT_NATIVE_PART_TYPES = {"refusal"}
 
 
 def encode_chat_message(
@@ -29,47 +33,25 @@ def encode_chat_message(
             "content": _text_only_content(message.outcome.parts, "tool"),
         }
 
-    reasoning_content = None
     content_parts = message.parts
-    runtime_calls: tuple[StructuredToolCall, ...] = ()
+    runtime_calls: tuple[RuntimeToolCall, ...] = ()
     if role == "assistant":
         if any(isinstance(item, ProviderToolCall) for item in message.output):
             raise OpenAIChatError("Chat Completions cannot encode provider tool output history")
         assistant_parts = tuple(item for item in message.output if isinstance(item, ContentPart))
-        runtime_calls = _structured_runtime_calls(message)
-        reasoning_content, content_parts = _extract_assistant_reasoning(
-            assistant_parts,
-            profile,
-        )
+        runtime_calls = message.runtime_tool_calls()
+        content_parts = _without_reasoning(assistant_parts)
     content = encode_message_content(content_parts, role, profile)
     data: JsonObject = {"role": role, "content": content}
-    if role == "assistant":
-        if reasoning_content is not None:
-            data["reasoning_content"] = reasoning_content
-        if (
-            runtime_calls
-            and profile.reasoning_content_mode == "required_with_tools"
-            and reasoning_content is None
-        ):
-            raise OpenAIChatError(
-                f"{profile.name} requires non-empty reasoning content for assistant tool calls"
-            )
-        if runtime_calls:
-            from jharness.models.openai.chat.tools import (
-                encode_assistant_tool_calls,
-            )
+    if role == "assistant" and not content_parts and _assistant_content_was_null(message):
+        data["content"] = None
+    if role == "assistant" and runtime_calls:
+        from jharness.models.openai.chat.tools import encode_assistant_tool_calls
 
-            data["tool_calls"] = encode_assistant_tool_calls(runtime_calls)
-            if content == "" and profile.assistant_tool_call_content_mode == "nullable":
-                data["content"] = None
+        data["tool_calls"] = encode_assistant_tool_calls(runtime_calls)
+        if content == "":
+            data.pop("content")
     return data
-
-
-def _structured_runtime_calls(message: Message) -> tuple[StructuredToolCall, ...]:
-    calls = message.runtime_tool_calls()
-    if any(not isinstance(item, StructuredToolCall) for item in calls):
-        raise OpenAIChatError("Chat Completions cannot encode freeform runtime tool history")
-    return cast(tuple[StructuredToolCall, ...], calls)
 
 
 def encode_message_content(
@@ -77,7 +59,7 @@ def encode_message_content(
     role: str,
     profile: OpenAIChatProfile,
 ) -> str | list[JsonObject]:
-    if role == "system" and profile.system_content_mode == "string":
+    if role == "system":
         return _text_only_content(parts, "system")
     if role == "assistant":
         return _encode_assistant_content(parts)
@@ -85,9 +67,7 @@ def encode_message_content(
         return _text_only_content(parts, role)
     if not parts:
         return ""
-    if all(part.type == "text" for part in parts) and not (
-        role == "system" and profile.system_content_mode == "parts"
-    ):
+    if all(part.type == "text" for part in parts):
         return "".join(part.text or "" for part in parts)
     return [encode_content_part(part, profile) for part in parts]
 
@@ -100,73 +80,53 @@ def encode_content_part(part: ContentPart, profile: OpenAIChatProfile) -> JsonOb
             raise OpenAIChatError(f"{profile.name} does not support image input")
         uri = _required_uri(part, "image")
         return {"type": "image_url", "image_url": {"url": uri}}
-    if part.type == "video":
-        if "video" not in profile.capabilities.input_modalities:
-            raise OpenAIChatError(f"{profile.name} does not support video input")
-        uri = _required_uri(part, "video")
-        return {"type": "video_url", "video_url": {"url": uri}}
+    if part.type in {"audio", "input_audio"}:
+        if "audio" not in profile.capabilities.input_modalities:
+            raise OpenAIChatError(f"{profile.name} does not support audio input")
+        data, audio_format = _audio_data_and_format(part)
+        return {"type": "input_audio", "input_audio": {"data": data, "format": audio_format}}
     if part.type in {"artifact", "file"}:
-        if "file" not in profile.capabilities.input_modalities:
-            raise OpenAIChatError(f"{profile.name} does not support file input")
-        if part.artifact is not None:
-            return {"type": "file", "file": {"file_id": part.artifact.ref}}
-        uri = _required_uri(part, "file")
-        return {
-            "type": "file",
-            "file": {
-                "file_data": uri,
-                "filename": part.name or "file",
-            },
-        }
+        return _encode_file_content_part(part, profile)
     raise OpenAIChatError(f"unsupported content part type for Chat Completions: {part.type}")
 
 
-def decode_message_content(value: object) -> list[ContentPart]:
+def _encode_file_content_part(part: ContentPart, profile: OpenAIChatProfile) -> JsonObject:
+    artifact = part.artifact
+    _require_file_input_modality(profile)
+    if artifact is not None:
+        return {"type": "file", "file": {"file_id": artifact.ref}}
+    file_data = _base64_data(_required_uri(part, "file"), "file")
+    return {
+        "type": "file",
+        "file": {"file_data": file_data, "filename": part.name or "file"},
+    }
+
+
+def _require_file_input_modality(profile: OpenAIChatProfile) -> None:
+    if "file" not in profile.capabilities.input_modalities:
+        raise OpenAIChatError(f"{profile.name} does not support file input")
+
+
+def decode_message_content(value: object, annotations: object = None) -> list[ContentPart]:
     if value is None:
+        if annotations not in (None, []):
+            raise OpenAIChatError("chat completion annotations require string content")
         return []
     if isinstance(value, str):
-        return [ContentPart.text_part(value)] if value else []
-    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
-        raise OpenAIChatError("chat completion message content must be a string, array, or null")
-    decoded = (_decode_message_content_part(item) for item in cast(Sequence[object], value))
-    return [part for part in decoded if part is not None]
-
-
-def _decode_message_content_part(value: object) -> ContentPart | None:
-    mapping = OPENAI_CHAT_JSON.mapping(value, "chat completion content part")
-    part_type = mapping.get("type")
-    if part_type == "text":
-        return _decode_text_content_part(mapping)
-    if not isinstance(part_type, str) or not part_type:
-        raise OpenAIChatError("chat completion content part requires non-empty type")
-    if part_type not in _ASSISTANT_NATIVE_PART_TYPES:
-        raise OpenAIChatError(f"unsupported chat completion assistant content part: {part_type}")
-    return _decode_refusal_content_part(mapping)
-
-
-def _decode_text_content_part(mapping: Mapping[str, Any]) -> ContentPart | None:
-    text = mapping.get("text", "")
-    if not isinstance(text, str):
-        raise OpenAIChatError("chat completion text part must contain text string")
-    return ContentPart.text_part(text) if text else None
-
-
-def _decode_refusal_content_part(mapping: Mapping[str, Any]) -> ContentPart:
-    refusal = mapping.get("refusal")
-    if not isinstance(refusal, str) or not refusal:
-        raise OpenAIChatError("chat completion refusal part requires non-empty refusal text")
-    return ContentPart(
-        type="refusal",
-        text=refusal,
-        data={"openai": dict(mapping)},
-    )
+        return [
+            ContentPart.text_part(
+                value,
+                metadata={"openai": {"annotations": _annotations(annotations)}},
+            )
+        ]
+    raise OpenAIChatError("chat completion message content must be a string or null")
 
 
 def decode_message_refusal(value: object) -> list[ContentPart]:
     if value is None:
         return []
-    if not isinstance(value, str) or not value:
-        raise OpenAIChatError("chat completion message refusal must be a non-empty string or null")
+    if not isinstance(value, str):
+        raise OpenAIChatError("chat completion message refusal must be a string or null")
     block = {"type": "refusal", "refusal": value}
     return [ContentPart(type="refusal", text=value, data={"openai": block})]
 
@@ -177,49 +137,27 @@ def _encode_assistant_content(
     if not parts:
         return ""
     if all(part.type == "text" for part in parts):
-        return "".join(part.text or "" for part in parts)
-    blocks: list[JsonObject] = []
-    for part in parts:
-        if part.type == "text":
-            blocks.append({"type": "text", "text": part.text or ""})
-            continue
-        if part.type != "refusal":
+        if any(_text_annotations(part) for part in parts):
             raise OpenAIChatError(
-                f"unsupported assistant content part for Chat Completions: {part.type}"
+                "Chat Completions cannot replay assistant message annotations in a standard request"
             )
-        wire_block = _wire_block(part)
-        if wire_block is None:
-            refusal = part.text
-            if not isinstance(refusal, str) or not refusal:
-                raise OpenAIChatError(
-                    "assistant refusal parts require non-empty text or OpenAI data"
-                )
-            wire_block = {"type": "refusal", "refusal": refusal}
-        blocks.append(wire_block)
-    return blocks
+        return "".join(part.text or "" for part in parts)
+    if len(parts) != 1 or parts[0].type != "refusal":
+        raise OpenAIChatError("assistant history must contain text parts only or one refusal part")
+    part = parts[0]
+    wire_block = _wire_block(part)
+    if wire_block is None:
+        refusal = part.text
+        if not isinstance(refusal, str):
+            raise OpenAIChatError("assistant refusal parts require text or OpenAI data")
+        wire_block = {"type": "refusal", "refusal": refusal}
+    return [wire_block]
 
 
-def _extract_assistant_reasoning(
-    parts: Sequence[ContentPart],
-    profile: OpenAIChatProfile,
-) -> tuple[str | None, tuple[ContentPart, ...]]:
-    reasoning_parts = [part for part in parts if part.type == "reasoning"]
-    if not reasoning_parts:
-        return None, tuple(parts)
-    if profile.reasoning_content_mode == "live_only":
-        raise OpenAIChatError(
-            f"{profile.name} does not support reasoning content in assistant messages"
-        )
-    chunks: list[str] = []
-    for part in reasoning_parts:
-        if not isinstance(part.text, str):
-            raise OpenAIChatError("assistant reasoning parts require a text string")
-        chunks.append(part.text)
-    reasoning_content = "".join(chunks)
-    return (
-        reasoning_content or None,
-        tuple(part for part in parts if part.type != "reasoning"),
-    )
+def _without_reasoning(parts: Sequence[ContentPart]) -> tuple[ContentPart, ...]:
+    if any(part.type == "reasoning" for part in parts):
+        raise OpenAIChatError("Chat Completions does not support assistant reasoning history")
+    return tuple(parts)
 
 
 def _wire_block(part: ContentPart) -> JsonObject | None:
@@ -228,14 +166,82 @@ def _wire_block(part: ContentPart) -> JsonObject | None:
         return None
     block = OPENAI_CHAT_JSON.mapping(raw, "OpenAI-native content part")
     block_type = block.get("type")
-    if block_type not in _ASSISTANT_NATIVE_PART_TYPES:
+    if block_type != "refusal":
         raise OpenAIChatError(f"unsupported OpenAI-native assistant content part: {block_type}")
     if block_type != part.type:
         raise OpenAIChatError("OpenAI-native content type must match the ContentPart type")
+    unexpected = set(block).difference({"type", "refusal"})
+    if unexpected:
+        raise OpenAIChatError(
+            "OpenAI-native refusal contains unsupported field: " + min(unexpected)
+        )
     refusal = block.get("refusal")
-    if not isinstance(refusal, str) or not refusal:
-        raise OpenAIChatError("OpenAI-native refusal parts require non-empty refusal text")
-    return dict(block)
+    if not isinstance(refusal, str):
+        raise OpenAIChatError("OpenAI-native refusal parts require refusal text")
+    return {"type": "refusal", "refusal": refusal}
+
+
+def _annotations(value: object) -> list[JsonObject]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise OpenAIChatError("chat completion annotations must be an array")
+    annotations: list[JsonObject] = []
+    for raw in cast(list[object], value):
+        annotation = OPENAI_CHAT_JSON.mapping(raw, "chat completion annotation")
+        if set(annotation) != {"type", "url_citation"} or annotation.get("type") != "url_citation":
+            raise OpenAIChatError("unsupported chat completion annotation")
+        citation = OPENAI_CHAT_JSON.mapping(
+            annotation.get("url_citation"), "chat completion url_citation"
+        )
+        if set(citation) != {"start_index", "end_index", "title", "url"}:
+            raise OpenAIChatError("chat completion url_citation has unsupported fields")
+        start = citation.get("start_index")
+        end = citation.get("end_index")
+        if (
+            isinstance(start, bool)
+            or not isinstance(start, int)
+            or isinstance(end, bool)
+            or not isinstance(end, int)
+            or start < 0
+            or end < start
+        ):
+            raise OpenAIChatError("chat completion url_citation indexes are invalid")
+        title = citation.get("title")
+        url = citation.get("url")
+        if not isinstance(title, str) or not isinstance(url, str):
+            raise OpenAIChatError("chat completion url_citation title and url must be strings")
+        annotations.append(
+            {
+                "type": "url_citation",
+                "url_citation": {
+                    "start_index": start,
+                    "end_index": end,
+                    "title": title,
+                    "url": url,
+                },
+            }
+        )
+    return annotations
+
+
+def _text_annotations(part: ContentPart) -> object:
+    native: object = part.metadata.get("openai")
+    if not isinstance(native, Mapping):
+        return None
+    return cast(Mapping[str, Any], native).get("annotations")
+
+
+def _assistant_content_was_null(message: Message) -> bool:
+    marker: object = message.metadata.get("openai_chat")
+    if marker is None:
+        return False
+    if not isinstance(marker, Mapping):
+        raise OpenAIChatError("OpenAI Chat assistant history marker must be an object")
+    mapping = cast(Mapping[str, Any], marker)
+    if set(mapping) != {"content_null"} or mapping.get("content_null") is not True:
+        raise OpenAIChatError("invalid OpenAI Chat assistant history marker")
+    return True
 
 
 def _text_only_content(parts: Sequence[ContentPart], role: str) -> str:
@@ -249,3 +255,31 @@ def _required_uri(part: ContentPart, label: str) -> str:
     if part.uri is None:
         raise OpenAIChatError(f"{label} input requires a uri")
     return part.uri
+
+
+def _audio_data_and_format(part: ContentPart) -> tuple[str, str]:
+    uri = _required_uri(part, "audio")
+    media_type = part.media_type
+    if media_type is None and uri[:5].casefold() == "data:":
+        media_type = uri[5:].partition(",")[0].partition(";")[0]
+    if not isinstance(media_type, str):
+        raise OpenAIChatError("audio input requires media_type or a data URI media type")
+    normalized = media_type.casefold()
+    audio_formats = {"audio/wav": "wav", "audio/mpeg": "mp3", "audio/mp3": "mp3"}
+    audio_format = audio_formats.get(normalized)
+    if audio_format is None:
+        raise OpenAIChatError("Chat Completions input_audio supports WAV or MP3 only")
+    return _base64_data(uri, "audio"), audio_format
+
+
+def _base64_data(value: str, label: str) -> str:
+    encoded = value
+    if value[:5].casefold() == "data:":
+        header, separator, encoded = value.partition(",")
+        if not separator or "base64" not in header.casefold().split(";")[1:]:
+            raise OpenAIChatError(f"{label} data URI must use base64 encoding")
+    try:
+        base64.b64decode(encoded, validate=True)
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise OpenAIChatError(f"{label} input requires base64 data, not a URL") from exc
+    return encoded

@@ -1,4 +1,4 @@
-"""HTTP client for OpenAI-compatible Responses APIs."""
+"""HTTP client for the OpenAI Responses API."""
 
 from __future__ import annotations
 
@@ -27,10 +27,17 @@ from jharness.models.openai.responses.artifacts import OpenAIResponsesArtifactSt
 from jharness.models.openai.responses.codec import OpenAIResponsesCodec
 from jharness.models.openai.responses.errors import OpenAIResponsesError
 from jharness.models.openai.responses.profile import OpenAIResponsesProfile
+from jharness.models.openai.responses.provider_tools import (
+    externalize_artifacts,
+    history_requires_artifact_store,
+    hydrate_artifact_history,
+    request_requires_artifact_store,
+    response_requires_artifact_store,
+)
 from jharness.models.openai.responses.stream import OpenAIResponsesStreamDecoder
 
 _DEFAULT_IMAGE_RESPONSE_LIMIT = 64 * 1024 * 1024
-_REQUEST_ID_HEADERS = ("x-request-id", "request-id", "x-ds-request-id")
+_REQUEST_ID_HEADERS = ("x-request-id", "request-id")
 
 
 class _OpenAIResponsesModelOptions(TypedDict, total=False):
@@ -45,7 +52,7 @@ class _OpenAIResponsesModelOptions(TypedDict, total=False):
 
 
 class OpenAIResponsesModel:
-    """Model implementation backed by an OpenAI-compatible Responses endpoint."""
+    """Model implementation backed by an OpenAI Responses endpoint."""
 
     def __init__(
         self,
@@ -111,16 +118,15 @@ class OpenAIResponsesModel:
         if not stream and emit_delta is not None:
             raise ValueError("emit_delta requires stream=True")
         artifact_store = self._artifact_store
-        registry = self.profile.provider_tool_registry
-        needs_artifacts = registry.request_requires_artifact_store(
+        needs_artifacts = request_requires_artifact_store(
             request
-        ) or registry.history_requires_artifact_store(request.messages)
+        ) or history_requires_artifact_store(request.messages)
         if artifact_store is None and needs_artifacts:
             raise ValueError("Responses provider artifacts require an OpenAIResponsesArtifactStore")
         wire_request = (
             request
             if artifact_store is None
-            else await registry.hydrate_artifact_history(request, artifact_store, context)
+            else await hydrate_artifact_history(request, artifact_store, context)
         )
         if stream:
             decoder = OpenAIResponsesStreamDecoder(self.codec, self.profile)
@@ -162,16 +168,13 @@ class OpenAIResponsesModel:
             )
         if artifact_store is None:
             return response
-        return await registry.externalize_artifacts(response, artifact_store, context)
+        return await externalize_artifacts(response, artifact_store, context)
 
     def _decode_response(self, value: Mapping[str, Any]) -> ModelResponse:
         return self._require_safe_artifacts(self.codec.decode_response(value))
 
     def _require_safe_artifacts(self, response: ModelResponse) -> ModelResponse:
-        if (
-            self._artifact_store is None
-            and self.profile.provider_tool_registry.response_requires_artifact_store(response)
-        ):
+        if self._artifact_store is None and response_requires_artifact_store(response):
             raise OpenAIResponsesError(
                 "Responses returned inline provider artifact data without an "
                 "OpenAIResponsesArtifactStore"

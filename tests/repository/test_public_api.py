@@ -4,7 +4,6 @@ import importlib
 import subprocess
 import sys
 from importlib.util import find_spec
-from typing import get_args
 
 import conformance
 import jharness.kernel as kernel
@@ -116,12 +115,7 @@ def test_only_documented_model_namespaces_are_public() -> None:
             "OpenAIResponsesError",
             "OpenAIResponsesModel",
             "OpenAIResponsesProfile",
-            "OpenAIResponsesProviderToolStreamUpdate",
             "OpenAIResponsesArtifactStore",
-            "OpenAIResponsesImageGenerationTool",
-            "OpenAIResponsesProviderToolCodec",
-            "OpenAIResponsesProviderToolRegistry",
-            "OpenAIResponsesWebSearchTool",
             "openai_responses_image_generation",
             "openai_responses_profile",
             "openai_responses_web_search",
@@ -132,34 +126,14 @@ def test_only_documented_model_namespaces_are_public() -> None:
             "AnthropicMessagesError",
             "AnthropicMessagesModel",
             "AnthropicMessagesProfile",
-            "AnthropicMessagesServerToolCodec",
-            "AnthropicMessagesServerToolRegistry",
             "anthropic_messages_profile",
             "anthropic_messages_web_search",
-            "anthropic_messages_web_search_codec",
-        },
-        "jharness.models.deepseek": {
-            "DEEPSEEK_MESSAGES_WEB_SEARCH",
-            "DEEPSEEK_RESPONSES_WEB_SEARCH",
-            "DeepSeekResponsesEffort",
-            "DeepSeekThinkingEffort",
-            "deepseek_chat_profile",
-            "deepseek_messages_profile",
-            "deepseek_messages_web_search",
-            "deepseek_responses_profile",
-            "deepseek_responses_web_search",
         },
     }
     for namespace, expected in expected_exports.items():
         module = importlib.import_module(namespace)
         assert set(module.__all__) == expected
         assert all(hasattr(module, name) for name in expected)
-
-    deepseek = importlib.import_module("jharness.models.deepseek")
-    assert frozenset(get_args(deepseek.DeepSeekThinkingEffort)) == frozenset({"high", "max"})
-    assert frozenset(get_args(deepseek.DeepSeekResponsesEffort)) == frozenset(
-        {"none", "low", "high", "xhigh", "max"}
-    )
 
     legacy_exports = {
         "jharness.models.openai": {
@@ -182,13 +156,6 @@ def test_only_documented_model_namespaces_are_public() -> None:
             "AnthropicServerToolCodec",
             "AnthropicServerToolRegistry",
             "anthropic_web_search_codec",
-        },
-        "jharness.models.deepseek": {
-            "DEEPSEEK_ANTHROPIC_WEB_SEARCH",
-            "deepseek_anthropic_profile",
-            "deepseek_anthropic_web_search",
-            "deepseek_openai_chat_profile",
-            "deepseek_openai_responses_profile",
         },
     }
     for namespace, legacy in legacy_exports.items():

@@ -31,7 +31,8 @@
                   "input_kind": "structured",
                   "id": "call-1",
                   "name": "not_registered",
-                  "arguments": {}
+                  "arguments": {},
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

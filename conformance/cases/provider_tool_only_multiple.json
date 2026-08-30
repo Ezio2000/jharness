@@ -23,7 +23,7 @@
       "provider_tools": [
         {
           "tool": {
-            "namespace": "deepseek.responses",
+            "namespace": "example.provider",
             "type": "web_search"
           },
           "configuration": {}
@@ -39,7 +39,7 @@
                   "kind": "provider_tool_call",
                   "id": "provider-search-1",
                   "tool": {
-                    "namespace": "deepseek.responses",
+                    "namespace": "example.provider",
                     "type": "web_search"
                   },
                   "status": "completed",
@@ -59,7 +59,7 @@
                   "kind": "provider_tool_call",
                   "id": "provider-search-2",
                   "tool": {
-                    "namespace": "deepseek.responses",
+                    "namespace": "example.provider",
                     "type": "web_search"
                   },
                   "status": "completed",
@@ -76,7 +76,7 @@
               ],
               "finish_reason": "stop",
               "usage": null,
-              "model_id": "deepseek-v4-flash",
+              "model_id": "example-model",
               "response_id": "fixture-provider-only-response",
               "provider_turn_pending": false,
               "metadata": {}

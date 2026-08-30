@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from jharness.kernel import Message, ModelRequest, ToolChoice
+from jharness.kernel import Message, ModelRequest, ProviderToolId, ToolChoice
 from jharness.models.anthropic import (
     ANTHROPIC_MESSAGES_WEB_SEARCH,
     AnthropicMessagesCodec,
@@ -21,14 +22,13 @@ def test_anthropic_messages_preset_installs_web_search_without_changing_generic_
 
     assert generic.capabilities.provider_tools == frozenset()
     assert "provider" not in generic.capabilities.tool_choice_types
-    assert generic.server_tools.tools == frozenset()
+    assert generic.capabilities.output_modalities == frozenset({"text", "file"})
 
     assert official.name == "anthropic-messages"
     assert official.capabilities.provider_tools == frozenset({ANTHROPIC_MESSAGES_WEB_SEARCH})
     assert official.capabilities.tool_choice_types == (
         generic.capabilities.tool_choice_types | {"provider"}
     )
-    assert official.server_tools.tools == frozenset({ANTHROPIC_MESSAGES_WEB_SEARCH})
 
 
 def test_anthropic_messages_web_search_factory_owns_configuration() -> None:
@@ -90,7 +90,7 @@ def test_anthropic_messages_preset_supports_current_web_search_variants(
 ) -> None:
     configuration: dict[str, Any] = {"variant": variant}
     if variant == "web_search_20260318":
-        configuration["response_inclusion"] = "all"
+        configuration["response_inclusion"] = "full"
     request = ModelRequest(
         messages=(Message.user("Search the web"),),
         provider_tools=(anthropic_messages_web_search(configuration),),
@@ -103,7 +103,7 @@ def test_anthropic_messages_preset_supports_current_web_search_variants(
 
     expected = {"type": variant, "name": "web_search"}
     if variant == "web_search_20260318":
-        expected["response_inclusion"] = "all"
+        expected["response_inclusion"] = "full"
     assert payload["tools"] == [expected]
 
 
@@ -132,3 +132,14 @@ def test_generic_anthropic_messages_profile_rejects_web_search_spec() -> None:
             model="claude",
             profile=AnthropicMessagesProfile(),
         ).encode_request(request)
+
+
+def test_anthropic_messages_profile_rejects_nonstandard_provider_tool_capability() -> None:
+    base = AnthropicMessagesProfile()
+    with pytest.raises(ValueError, match="unsupported Anthropic Messages provider tool"):
+        AnthropicMessagesProfile(
+            capabilities=replace(
+                base.capabilities,
+                provider_tools=frozenset({ProviderToolId("vendor.messages", "search")}),
+            )
+        )

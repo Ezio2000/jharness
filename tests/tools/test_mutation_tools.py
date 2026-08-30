@@ -45,8 +45,9 @@ def _path_based_parent(
 
 def _invoke(
     tool: Tool,
-    arguments: Mapping[str, Any],
+    arguments: Mapping[str, Any] | None,
     *,
+    raw_input: str | None = None,
     is_cancelled: Callable[[], bool] = lambda: False,
     through_registry: bool = False,
 ) -> ToolSuccess | ToolFailure:
@@ -56,7 +57,7 @@ def _invoke(
             _emit_progress,
             is_cancelled,
         )
-        call = StructuredToolCall("mutation-call", tool.spec.name, arguments)
+        call = StructuredToolCall("mutation-call", tool.spec.name, arguments, raw_input)
         if through_registry:
             catalog = await ToolRegistry((tool,)).open_catalog()
             result = await catalog.bind(call).invoke(context)
@@ -196,6 +197,11 @@ def test_mutation_tool_specs_are_exact_and_registry_validates_them(tmp_path: Pat
     )
     assert text == "Created catalog.txt (5 bytes)."
     assert result["operation"] == "created"
+
+
+def test_mutation_tools_reject_non_json_object_arguments(tmp_path: Path) -> None:
+    for tool in (EditTool(tmp_path), WriteTool(tmp_path)):
+        _failure(_invoke(tool, None, raw_input="not-json"), "invalid_arguments")
 
 
 def test_read_reports_sha256_of_all_raw_bytes_for_partial_bom_read(tmp_path: Path) -> None:

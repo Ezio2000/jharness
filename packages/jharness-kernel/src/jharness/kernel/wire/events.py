@@ -232,7 +232,9 @@ def _decode_model_delta(value: object) -> dict[str, Any]:
         data = object_fields(
             raw,
             "tool call delta",
-            frozenset({"kind", "output_index", "id", "name", "input_kind", "input_delta"}),
+            frozenset(
+                {"kind", "output_index", "id", "name", "input_kind", "input_delta", "metadata"}
+            ),
         )
         input_kind = enum_string(
             data["input_kind"],
@@ -250,6 +252,7 @@ def _decode_model_delta(value: object) -> dict[str, Any]:
             "name": optional_string(data["name"], "tool call delta name", non_empty=True),
             "input_kind": input_kind,
             "input_delta": string(data["input_delta"], "input_delta"),
+            "metadata": json_object(data["metadata"], "tool call delta metadata"),
         }
     if kind == "reasoning":
         data = object_fields(

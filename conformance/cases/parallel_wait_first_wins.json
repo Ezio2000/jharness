@@ -34,7 +34,8 @@
                   "arguments": {
                     "delay": 0.02,
                     "wait_id": "first"
-                  }
+                  },
+                  "metadata": {}
                 },
                 {
                   "kind": "runtime_tool_call",
@@ -44,7 +45,8 @@
                   "arguments": {
                     "delay": 0.01,
                     "wait_id": "second"
-                  }
+                  },
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

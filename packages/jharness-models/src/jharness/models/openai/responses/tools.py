@@ -1,4 +1,4 @@
-"""Tool conversion for OpenAI-compatible Responses APIs."""
+"""Tool conversion for the OpenAI Responses API."""
 
 from __future__ import annotations
 
@@ -16,6 +16,10 @@ from jharness.kernel import (
 )
 from jharness.models.openai.responses.errors import OpenAIResponsesError
 from jharness.models.openai.responses.profile import OpenAIResponsesProfile
+from jharness.models.openai.responses.provider_tools import (
+    encode_provider_choice,
+    encode_provider_declaration,
+)
 
 JsonObject = dict[str, Any]
 
@@ -27,12 +31,16 @@ def encode_tools(
     provider_tools: Sequence[ProviderToolSpec],
     profile: OpenAIResponsesProfile,
 ) -> list[JsonObject]:
-    """Encode runtime- and provider-owned declarations through their wire dialects."""
+    """Encode runtime declarations and the fixed standard hosted-tool set."""
 
     encoded = [_encode_runtime_tool(tool, profile) for tool in runtime_tools]
-    encoded.extend(
-        profile.provider_tool_registry.encode_declaration(tool) for tool in provider_tools
-    )
+    for tool in provider_tools:
+        if tool.tool not in profile.capabilities.provider_tools:
+            raise OpenAIResponsesError(
+                "Responses profile does not support provider tool: "
+                f"{tool.tool.namespace}/{tool.tool.type}"
+            )
+        encoded.append(encode_provider_declaration(tool))
     names = [tool.name for tool in runtime_tools]
     if len(names) != len(set(names)):
         raise OpenAIResponsesError("Responses runtime tool names must be unique")
@@ -72,15 +80,6 @@ def _encode_runtime_tool_choice(
     selected = next((tool for tool in runtime_tools if tool.name == choice.name), None)
     if selected is None:
         raise OpenAIResponsesError(f"tool_choice names an unavailable runtime tool: {choice.name}")
-    kind = (
-        RuntimeToolKind.STRUCTURED
-        if isinstance(selected, StructuredToolSpec)
-        else RuntimeToolKind.FREEFORM
-    )
-    if kind not in profile.exact_runtime_tool_choice_kinds:
-        raise OpenAIResponsesError(
-            f"{profile.name} does not support exact {kind.value} runtime tool choice"
-        )
     return {
         "type": "function" if isinstance(selected, StructuredToolSpec) else "custom",
         "name": selected.name,
@@ -102,15 +101,13 @@ def _encode_provider_tool_choice(
         raise OpenAIResponsesError(
             f"tool_choice names an unavailable provider tool: {choice.provider_tool}"
         )
-    return profile.provider_tool_registry.encode_choice(selected)
+    return encode_provider_choice(selected)
 
 
 def _encode_runtime_tool(
     tool: RuntimeToolSpec,
     profile: OpenAIResponsesProfile,
 ) -> JsonObject:
-    if _TOOL_NAME.fullmatch(tool.name) is None:
-        raise OpenAIResponsesError("Responses runtime tool names must match ^[A-Za-z0-9_-]{1,128}$")
     kind = (
         RuntimeToolKind.STRUCTURED
         if isinstance(tool, StructuredToolSpec)
@@ -119,17 +116,16 @@ def _encode_runtime_tool(
     if kind not in profile.capabilities.runtime_tool_kinds:
         raise OpenAIResponsesError(f"{profile.name} does not support {kind.value} runtime tools")
     if isinstance(tool, StructuredToolSpec):
+        if _TOOL_NAME.fullmatch(tool.name) is None:
+            raise OpenAIResponsesError("Responses function names must match ^[A-Za-z0-9_-]{1,128}$")
+        parameters = thaw_json_value(tool.input_schema)
+        if not isinstance(parameters, dict):
+            raise OpenAIResponsesError("Responses function parameters must be an object")
         return {
             "type": "function",
             "name": tool.name,
             "description": tool.description,
-            "parameters": thaw_json_value(tool.input_schema),
+            "parameters": parameters,
+            "strict": False,
         }
-    if not profile.allows_freeform_runtime_tool(tool.name):
-        raise OpenAIResponsesError(
-            f"{profile.name} does not support freeform runtime tool: {tool.name}"
-        )
-    declaration: JsonObject = {"type": "custom", "name": tool.name}
-    if profile.emit_freeform_runtime_tool_description:
-        declaration["description"] = tool.description
-    return declaration
+    return {"type": "custom", "name": tool.name, "description": tool.description}

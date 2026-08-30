@@ -37,7 +37,7 @@
         "model": { "type": ["string", "null"] },
         "temperature": { "type": ["number", "null"] },
         "top_p": { "type": ["number", "null"] },
-        "max_output_tokens": { "type": ["integer", "null"], "minimum": 1 },
+        "max_output_tokens": { "type": ["integer", "null"], "minimum": 0 },
         "stop": {
           "oneOf": [
             {

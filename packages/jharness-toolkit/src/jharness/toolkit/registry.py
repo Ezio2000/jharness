@@ -124,6 +124,10 @@ class _Catalog:
         if entry is None:
             raise ToolError(f"unknown tool: {call.name}")
         if isinstance(call, StructuredToolCall) and isinstance(entry.spec, StructuredToolSpec):
+            if call.raw_input is not None:
+                raise ToolError("tool call arguments are not a JSON object")
+            if call.arguments is None:
+                raise ToolError("tool call requires structured arguments")
             validator = cast(Validator, entry.input_validator)
             try:
                 validator.validate(thaw_json_value(call.arguments))

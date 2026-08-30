@@ -118,30 +118,17 @@ class BashTool:
         return self.workspace.root
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
-        command_value = call.arguments.get("command")
-        working_directory_value = call.arguments.get("working_directory", ".")
-        if (
-            not isinstance(command_value, str)
-            or not command_value
-            or len(command_value) > self.max_command_chars
-        ):
-            return _failure(
-                "invalid_command",
-                "Command is empty or exceeds the configured character limit.",
-            )
-        command = command_value
+        inputs = _validated_inputs(call, self.max_command_chars)
+        if isinstance(inputs, SettledResult):
+            return inputs
+        command, working_directory = inputs
         if "\x00" in command:
             return _failure("invalid_command", "Command contains a null character.")
-        if (
-            not isinstance(working_directory_value, str)
-            or not working_directory_value
-            or "\x00" in working_directory_value
-        ):
+        if "\x00" in working_directory:
             return _failure(
                 "invalid_working_directory",
                 "Working directory must be non-empty text without null characters.",
             )
-        working_directory = working_directory_value
         if context.cancel_requested:
             return _failure("cancelled", "Bash was cancelled.")
         try:
@@ -263,10 +250,32 @@ def _failure(
     message: str,
     *,
     structured_content: object = None,
-) -> ToolResult:
+) -> SettledResult:
     return SettledResult(
         ToolFailure.from_error(code, message, structured_content=structured_content)
     )
+
+
+def _validated_inputs(
+    call: StructuredToolCall,
+    max_command_chars: int,
+) -> tuple[str, str] | SettledResult:
+    arguments = call.arguments
+    if arguments is None:
+        return _failure("invalid_command", "Bash requires JSON object arguments.")
+    command = arguments.get("command")
+    if not isinstance(command, str) or not command or len(command) > max_command_chars:
+        return _failure(
+            "invalid_command",
+            "Command is empty or exceeds the configured character limit.",
+        )
+    working_directory = arguments.get("working_directory", ".")
+    if not isinstance(working_directory, str) or not working_directory:
+        return _failure(
+            "invalid_working_directory",
+            "Working directory must be non-empty text without null characters.",
+        )
+    return command, working_directory
 
 
 def _spec(max_command_chars: int) -> StructuredToolSpec:

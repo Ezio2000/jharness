@@ -83,6 +83,7 @@ from jharness.kernel import (
 from jharness.kernel._digest import compose_call_id_digest
 from jharness.kernel._engine.change import Change
 from jharness.kernel._engine.change import reduce as reduce_change
+from jharness.kernel._engine.tooling import call_data
 from jharness.kernel.errors import RepositoryError
 from jharness.kernel.wire import decode_checkpoint, encode_checkpoint
 
@@ -188,6 +189,28 @@ def test_message_content_and_tool_result_have_one_authoritative_shape() -> None:
     assert thaw_json_value(success.structured_content) == {"count": 1}
 
 
+@pytest.mark.parametrize(
+    ("part", "modality"),
+    (
+        (ContentPart.text_part("hello"), "text"),
+        (ContentPart("provider_opaque_text", data={"opaque": True}), "text"),
+        (ContentPart("input_audio"), "audio"),
+        (ContentPart("output_video"), "video"),
+        (
+            ContentPart.artifact_part(ArtifactRef("image-file", media_type="IMAGE/PNG")),
+            "image",
+        ),
+        (ContentPart("file", uri="DATA:IMAGE/GIF;base64,AA=="), "image"),
+        (ContentPart("file", uri="https://example.test/report.pdf"), "file"),
+    ),
+)
+def test_content_part_has_one_normalized_capability_modality(
+    part: ContentPart,
+    modality: str,
+) -> None:
+    assert part.modality == modality
+
+
 def test_closed_tool_results_and_approval_decisions() -> None:
     failure = ToolFailure.from_error("bad_input", "bad")
     accepted = ToolAccepted(
@@ -227,10 +250,16 @@ def test_flat_state_and_selector_invariants() -> None:
 def test_model_tool_and_limit_values_are_strict() -> None:
     usage = ModelUsage(input_tokens=2, output_tokens=3, total_tokens=5)
     assert ModelUsage(total_tokens=1).add(usage).total_tokens == 6
-    response = ModelResponse((ContentPart.text_part("done"),), usage=usage)
-    assert response.to_assistant_message().role == "assistant"
+    response = ModelResponse(
+        (ContentPart.text_part("done"),),
+        usage=usage,
+        metadata={"provider": {"response_id": "r-1"}},
+    )
+    assistant = response.to_assistant_message()
+    assert assistant.role == "assistant"
+    assert assistant.metadata == response.metadata
     assert ModelCapabilities(streaming=True).streaming
-    assert ModelOptions(max_output_tokens=1).max_output_tokens == 1
+    assert ModelOptions(max_output_tokens=0).max_output_tokens == 0
     assert ResponseFormat("json_schema", {"type": "object"}, True).strict
     spec = StructuredToolSpec(
         "lookup",
@@ -244,6 +273,34 @@ def test_model_tool_and_limit_values_are_strict() -> None:
         ToolExecution("parallel")
     with pytest.raises(TypeError):
         ModelUsage(total_tokens=True)  # type: ignore[arg-type]
+
+
+def test_runtime_tool_call_event_data_uses_one_structured_input_shape() -> None:
+    parsed = StructuredToolCall("parsed", "lookup", {"query": "x"})
+    malformed = StructuredToolCall("malformed", "lookup", None, "{not-json")
+
+    assert call_data(parsed) == {
+        "id": "parsed",
+        "name": "lookup",
+        "input_kind": "structured",
+        "arguments": {"query": "x"},
+        "metadata": {},
+    }
+    assert call_data(malformed) == {
+        "id": "malformed",
+        "name": "lookup",
+        "input_kind": "structured",
+        "raw_input": "{not-json",
+        "metadata": {},
+    }
+
+
+def test_empty_model_response_projects_to_durable_assistant_message() -> None:
+    response = ModelResponse((), finish_reason="content_filter", metadata={"provider": "x"})
+
+    assistant = response.to_assistant_message()
+    assert assistant == Message.assistant((), metadata={"provider": "x"})
+    assert response.visible_parts() == ()
 
 
 def test_model_capabilities_validate_exact_tool_choice_inventory() -> None:
@@ -377,7 +434,7 @@ def test_provider_tool_incomplete_is_terminal_without_becoming_failure() -> None
     partial = ContentPart.text_part("partial provider result")
     call = ProviderToolCall(
         "provider-incomplete",
-        ProviderToolId("deepseek.responses", "web_search"),
+        ProviderToolId("example.provider", "web_search"),
         ProviderToolStatus.INCOMPLETE,
         output=(partial,),
     )

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Set
 from importlib.util import find_spec
-from typing import cast, get_args
+from typing import cast
 
 
 def _load_required_types() -> tuple[object, ...]:
@@ -51,7 +50,6 @@ def _load_required_types() -> tuple[object, ...]:
 def _require_exports(
     module: object,
     expected: set[str],
-    legacy: Set[str] = frozenset(),
 ) -> None:
     module_name = getattr(module, "__name__", repr(module))
     exports = getattr(module, "__all__", None)
@@ -65,14 +63,11 @@ def _require_exports(
         raise TypeError(f"{module_name} exports differ: {exports!r}")
     if missing := sorted(name for name in expected if not hasattr(module, name)):
         raise TypeError(f"{module_name} is missing exports: {missing}")
-    if leaked := sorted(name for name in legacy if hasattr(module, name)):
-        raise TypeError(f"{module_name} retains legacy exports: {leaked}")
 
 
 def _verify_model_namespaces() -> None:
     import jharness.models.anthropic as anthropic
     import jharness.models.anthropic.messages as anthropic_messages
-    import jharness.models.deepseek as deepseek
     import jharness.models.openai as openai
     import jharness.models.openai.chat as openai_chat
     import jharness.models.openai.responses as openai_responses
@@ -90,27 +85,10 @@ def _verify_model_namespaces() -> None:
             "OpenAIResponsesError",
             "OpenAIResponsesModel",
             "OpenAIResponsesProfile",
-            "OpenAIResponsesProviderToolStreamUpdate",
             "OpenAIResponsesArtifactStore",
-            "OpenAIResponsesImageGenerationTool",
-            "OpenAIResponsesProviderToolCodec",
-            "OpenAIResponsesProviderToolRegistry",
-            "OpenAIResponsesWebSearchTool",
             "openai_responses_image_generation",
             "openai_responses_profile",
             "openai_responses_web_search",
-        },
-        {
-            "ProviderStreamUpdate",
-            "ResponsesArtifactStore",
-            "ResponsesImageGenerationTool",
-            "ResponsesProviderToolCodec",
-            "ResponsesProviderToolRegistry",
-            "ResponsesWebSearchTool",
-            "OpenAIChatCompletionsCodec",
-            "OpenAIChatCompletionsError",
-            "OpenAIChatCompletionsModel",
-            "OpenAIChatCompletionsProfile",
         },
     )
     _require_exports(
@@ -121,73 +99,18 @@ def _verify_model_namespaces() -> None:
             "AnthropicMessagesError",
             "AnthropicMessagesModel",
             "AnthropicMessagesProfile",
-            "AnthropicMessagesServerToolCodec",
-            "AnthropicMessagesServerToolRegistry",
             "anthropic_messages_profile",
             "anthropic_messages_web_search",
-            "anthropic_messages_web_search_codec",
-        },
-        {
-            "AnthropicCodec",
-            "AnthropicError",
-            "AnthropicModel",
-            "AnthropicProfile",
-            "AnthropicServerToolCodec",
-            "AnthropicServerToolRegistry",
-            "anthropic_web_search_codec",
         },
     )
-    _require_exports(
-        deepseek,
-        {
-            "DEEPSEEK_MESSAGES_WEB_SEARCH",
-            "DEEPSEEK_RESPONSES_WEB_SEARCH",
-            "DeepSeekResponsesEffort",
-            "DeepSeekThinkingEffort",
-            "deepseek_chat_profile",
-            "deepseek_messages_profile",
-            "deepseek_messages_web_search",
-            "deepseek_responses_profile",
-            "deepseek_responses_web_search",
-        },
-        {
-            "DEEPSEEK_ANTHROPIC_WEB_SEARCH",
-            "deepseek_anthropic_profile",
-            "deepseek_anthropic_web_search",
-            "deepseek_openai_chat_profile",
-            "deepseek_openai_responses_profile",
-        },
-    )
-    if frozenset(get_args(deepseek.DeepSeekThinkingEffort)) != frozenset({"high", "max"}):
-        raise TypeError("DeepSeek thinking effort values differ")
-    if frozenset(get_args(deepseek.DeepSeekResponsesEffort)) != frozenset(
-        {"none", "low", "high", "xhigh", "max"}
-    ):
-        raise TypeError("DeepSeek Responses effort values differ")
     for implementation in (openai_chat, openai_responses, anthropic_messages):
         _require_exports(implementation, set())
-    for legacy_module in (
-        "jharness.models.anthropic.errors",
-        "jharness.models.anthropic.messages_api",
-        "jharness.models.anthropic.profiles",
-        "jharness.models.openai.chat_completions",
-        "jharness.models.openai.errors",
-        "jharness.models.openai.profiles",
-        "jharness.models.openai.responses_api",
-    ):
-        if find_spec(legacy_module) is not None:
-            raise TypeError(f"legacy model module remains importable: {legacy_module}")
 
 
 def _load_profiles() -> tuple[object, ...]:
     from jharness.models.anthropic import (
         AnthropicMessagesProfile,
         anthropic_messages_profile,
-    )
-    from jharness.models.deepseek import (
-        deepseek_chat_profile,
-        deepseek_messages_profile,
-        deepseek_responses_profile,
     )
     from jharness.models.openai import (
         OpenAIChatProfile,
@@ -201,11 +124,6 @@ def _load_profiles() -> tuple[object, ...]:
         openai_responses_profile(),
         AnthropicMessagesProfile(),
         anthropic_messages_profile(),
-        deepseek_chat_profile(),
-        deepseek_chat_profile(thinking=True),
-        deepseek_messages_profile(),
-        deepseek_messages_profile(thinking=True),
-        deepseek_responses_profile(effort="none"),
     )
     expected_types = (
         OpenAIChatProfile,
@@ -213,11 +131,6 @@ def _load_profiles() -> tuple[object, ...]:
         OpenAIResponsesProfile,
         AnthropicMessagesProfile,
         AnthropicMessagesProfile,
-        OpenAIChatProfile,
-        OpenAIChatProfile,
-        AnthropicMessagesProfile,
-        AnthropicMessagesProfile,
-        OpenAIResponsesProfile,
     )
     if not all(
         isinstance(cast(object, profile), expected)
@@ -231,11 +144,6 @@ def _load_profiles() -> tuple[object, ...]:
         "openai-responses",
         "anthropic-messages",
         "anthropic-messages",
-        "deepseek-chat",
-        "deepseek-chat-thinking",
-        "deepseek-messages",
-        "deepseek-messages-thinking",
-        "deepseek-responses",
     )
     if names != expected_names:
         raise TypeError(f"profile names differ: {names!r}")
@@ -267,12 +175,8 @@ def _verify_provider_tool_presets() -> tuple[object, ...]:
         raise TypeError("generic Anthropic Messages profile unexpectedly enables provider tools")
     if openai_profile.capabilities.provider_tools != openai_tools:
         raise TypeError("OpenAI Responses hosted-tool preset identities differ")
-    if openai_profile.provider_tool_registry.tools != openai_tools:
-        raise TypeError("OpenAI Responses hosted-tool preset registry differs")
     if anthropic_profile.capabilities.provider_tools != frozenset({ANTHROPIC_MESSAGES_WEB_SEARCH}):
         raise TypeError("Anthropic Messages hosted-tool preset identities differ")
-    if anthropic_profile.server_tools.tools != frozenset({ANTHROPIC_MESSAGES_WEB_SEARCH}):
-        raise TypeError("Anthropic Messages hosted-tool preset registry differs")
     specs = (
         openai_responses_web_search(),
         openai_responses_image_generation(),

@@ -1,7 +1,8 @@
-"""Typed SSE event conversion for compatible Responses APIs."""
+"""Typed SSE event conversion for the OpenAI Responses API."""
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -15,15 +16,30 @@ from jharness.kernel import (
     ModelResponse,
     ModelRuntimeToolCallDelta,
     ModelUsageDelta,
+    ProviderToolId,
     ProviderToolStatus,
     RuntimeToolKind,
 )
-from jharness.models.openai.responses.codec import OpenAIResponsesCodec, decode_usage
+from jharness.models.openai.responses.codec import (
+    OpenAIResponsesCodec,
+    decode_usage,
+    validate_response_fields,
+)
 from jharness.models.openai.responses.errors import OPENAI_RESPONSES_JSON, OpenAIResponsesError
+from jharness.models.openai.responses.messages import (
+    validate_output_content_part,
+    validate_output_message_item,
+    validate_output_text_annotation,
+    validate_reasoning_item,
+    validate_runtime_tool_call_item,
+)
 from jharness.models.openai.responses.profile import OpenAIResponsesProfile
 from jharness.models.openai.responses.provider_tools import (
-    OpenAIResponsesProviderToolCodec,
+    decode_provider_item_status,
+    decode_provider_stream_event,
     is_terminal_provider_status,
+    provider_tool_for_event,
+    provider_tool_for_output_item,
 )
 
 
@@ -34,7 +50,7 @@ class _ItemState:
     call_id: str | None = None
     name: str | None = None
     runtime_kind: RuntimeToolKind | None = None
-    provider_codec: OpenAIResponsesProviderToolCodec | None = None
+    provider_tool: ProviderToolId | None = None
     status: ProviderToolStatus | None = None
     closed: bool = False
 
@@ -55,7 +71,7 @@ class OpenAIResponsesStreamDecoder:
     ) -> None:
         self._codec = codec
         self._profile = profile
-        self._phase: Literal["initial", "active", "terminal"] = "initial"
+        self._phase: Literal["initial", "queued", "active", "terminal"] = "initial"
         self._response_id: str | None = None
         self._sequence_number: int | None = None
         self._items: dict[int, _ItemState] = {}
@@ -74,28 +90,35 @@ class OpenAIResponsesStreamDecoder:
         if self._phase == "terminal":
             raise OpenAIResponsesError("Responses stream emitted an event after termination")
         event_type = _event_type(event_name, value)
+        _validate_event_fields(event_type, value)
         self._validate_sequence_number(value)
         if event_type == "response.created":
-            self._response_event(value, expected_status="in_progress", created=True)
+            self._response_created(value)
+            return False, []
+        if event_type == "response.queued":
+            self._response_event(value, expected_status="queued", created=False)
             return False, []
         if event_type == "response.in_progress":
             self._response_event(value, expected_status="in_progress", created=False)
             return False, []
+        if event_type == "error":
+            message = cast(str, value["message"])
+            code = value.get("code")
+            detail = f" ({code})" if isinstance(code, str) else ""
+            raise OpenAIResponsesError(f"Responses stream error{detail}: {message}")
         self._require_started(event_type)
         handler = self._event_handlers().get(event_type)
         if handler is not None:
             return False, handler(value)
-        provider_codec = self._profile.provider_tool_registry.codec_for_event(event_type)
-        if provider_codec is not None:
-            return False, self._provider_tool_event(provider_codec, event_type, value)
+        provider_tool = provider_tool_for_event(event_type)
+        if provider_tool is not None:
+            return False, self._provider_tool_event(provider_tool, event_type, value)
         if event_type in {
             "response.completed",
             "response.incomplete",
             "response.failed",
         }:
             return True, self._terminal_event(event_type, value)
-        if event_type == "error":
-            raise OpenAIResponsesError("Responses stream emitted an error event")
         raise OpenAIResponsesError(f"unsupported Responses stream event type: {event_type}")
 
     def _event_handlers(self) -> Mapping[str, Any]:
@@ -156,11 +179,16 @@ class OpenAIResponsesStreamDecoder:
             if self._phase != "initial":
                 raise OpenAIResponsesError("Responses stream response.created appeared twice")
         elif self._phase == "initial":
-            raise OpenAIResponsesError("Responses response.in_progress requires response.created")
+            raise OpenAIResponsesError("Responses stream event requires response.created")
+        elif expected_status == "in_progress" and self._phase not in {"queued", "active"}:
+            raise OpenAIResponsesError("Responses response.in_progress has an invalid transition")
+        elif expected_status == "queued" and self._phase != "queued":
+            raise OpenAIResponsesError("Responses response.queued has an invalid transition")
         response = OPENAI_RESPONSES_JSON.mapping(
             value.get("response"),
             "Responses stream response",
         )
+        validate_response_fields(response, terminal=False)
         if response.get("object") != "response" or response.get("status") != expected_status:
             raise OpenAIResponsesError(
                 "Responses stream response requires object='response' and "
@@ -173,7 +201,16 @@ class OpenAIResponsesStreamDecoder:
         if self._response_id is not None and self._response_id != response_id:
             raise OpenAIResponsesError("Responses stream response id changed")
         self._response_id = response_id
-        self._phase = "active"
+        self._phase = "queued" if expected_status == "queued" else "active"
+
+    def _response_created(self, value: Mapping[str, Any]) -> None:
+        response = OPENAI_RESPONSES_JSON.mapping(value.get("response"), "Responses stream response")
+        status = response.get("status")
+        if status not in {"queued", "in_progress"}:
+            raise OpenAIResponsesError(
+                "Responses response.created requires status='queued' or 'in_progress'"
+            )
+        self._response_event(value, expected_status=cast(str, status), created=True)
 
     def _output_item_added(self, value: Mapping[str, Any]) -> list[ModelDelta]:
         output_index = _output_index(value)
@@ -195,13 +232,18 @@ class OpenAIResponsesStreamDecoder:
             raise OpenAIResponsesError("Responses output item id must be unique")
         state = _ItemState(item_id, item_type)
         self._items[output_index] = state
-        if item_type in {"message", "reasoning"}:
+        if item_type == "message":
+            validate_output_message_item(item)
+            return []
+        if item_type == "reasoning":
+            validate_reasoning_item(item, self._profile, require_replay_state=False)
             return []
         runtime_kind = {
             "function_call": RuntimeToolKind.STRUCTURED,
             "custom_tool_call": RuntimeToolKind.FREEFORM,
         }.get(item_type)
         if runtime_kind is not None:
+            native_item = validate_runtime_tool_call_item(item, item_type)
             if runtime_kind not in self._profile.capabilities.runtime_tool_kinds:
                 raise OpenAIResponsesError(
                     f"{self._profile.name} does not support {runtime_kind.value} runtime tools"
@@ -215,15 +257,8 @@ class OpenAIResponsesStreamDecoder:
                 item.get("name"),
                 "Responses runtime tool call name",
             )
-            if (
-                runtime_kind is RuntimeToolKind.FREEFORM
-                and not self._profile.allows_freeform_runtime_tool(state.name)
-            ):
-                raise OpenAIResponsesError(
-                    f"{self._profile.name} does not support freeform runtime tool: {state.name}"
-                )
             input_field = "arguments" if runtime_kind is RuntimeToolKind.STRUCTURED else "input"
-            input_value = item.get(input_field, "")
+            input_value = item.get(input_field)
             if not isinstance(input_value, str):
                 raise OpenAIResponsesError(
                     f"Responses runtime tool call {input_field} must be a string"
@@ -235,18 +270,23 @@ class OpenAIResponsesStreamDecoder:
                     input_delta=input_value,
                     id=state.call_id,
                     name=state.name,
+                    metadata={"responses": {"item": native_item}},
                 )
             ]
-        provider_codec = self._profile.provider_tool_registry.codec_for_output_item(item_type)
-        if provider_codec is not None:
-            state.provider_codec = provider_codec
-            update = provider_codec.stream_item_update(item)
+        provider_tool = provider_tool_for_output_item(item_type)
+        if provider_tool is not None:
+            if provider_tool not in self._profile.capabilities.provider_tools:
+                raise OpenAIResponsesError(
+                    f"{self._profile.name} does not support provider tool "
+                    f"{provider_tool.namespace}/{provider_tool.type}"
+                )
+            state.provider_tool = provider_tool
+            status = decode_provider_item_status(item, provider_tool)
             return self._changed_provider_status(
                 output_index,
                 state,
-                update.status,
+                status,
                 "response.output_item.added",
-                data=update.data,
             )
         raise OpenAIResponsesError(f"unsupported Responses streamed output item: {item_type}")
 
@@ -258,6 +298,12 @@ class OpenAIResponsesStreamDecoder:
             "Responses completed output item",
         )
         self._validate_item_identity(state, item)
+        if state.runtime_kind is not None:
+            validate_runtime_tool_call_item(item, state.item_type)
+        elif state.item_type == "message":
+            validate_output_message_item(item)
+        elif state.item_type == "reasoning":
+            validate_reasoning_item(item, self._profile, require_replay_state=True)
         if any(
             index == output_index and not part.closed for (index, _), part in self._parts.items()
         ) or any(
@@ -265,20 +311,19 @@ class OpenAIResponsesStreamDecoder:
             for (index, _), part in self._summary_parts.items()
         ):
             raise OpenAIResponsesError("Responses output item completed with open content parts")
-        if state.provider_codec is None:
+        if state.provider_tool is None:
             state.closed = True
             return []
-        update = state.provider_codec.stream_item_update(item)
-        if not is_terminal_provider_status(update.status):
+        status = decode_provider_item_status(item, state.provider_tool)
+        if not is_terminal_provider_status(status):
             raise OpenAIResponsesError(
                 "Responses provider output_item.done requires a terminal status"
             )
         deltas = self._changed_provider_status(
             output_index,
             state,
-            update.status,
+            status,
             "response.output_item.done",
-            data=update.data,
         )
         state.closed = True
         return deltas
@@ -305,10 +350,8 @@ class OpenAIResponsesStreamDecoder:
             value.get("part"),
             "Responses content part",
         )
-        part_type = OPENAI_RESPONSES_JSON.required_string(
-            part.get("type"),
-            "Responses content part type",
-        )
+        validated_part = validate_output_content_part(part)
+        part_type = cast(str, validated_part["type"])
         if part_type not in allowed_types:
             raise OpenAIResponsesError(f"unsupported Responses content part: {part_type}")
         key = (output_index, content_index)
@@ -344,8 +387,18 @@ class OpenAIResponsesStreamDecoder:
             value.get("part"),
             "Responses reasoning summary part",
         )
+        unexpected = set(part).difference({"type", "text"})
+        if unexpected:
+            raise OpenAIResponsesError(
+                "Responses reasoning summary part contains unsupported field: " + min(unexpected)
+            )
         if part.get("type") != "summary_text" or not isinstance(part.get("text"), str):
             raise OpenAIResponsesError("Responses reasoning summary requires summary_text")
+        status = value.get("status")
+        if "status" in value and (not done or status not in {None, "incomplete"}):
+            raise OpenAIResponsesError(
+                "Responses reasoning_summary_part.done status must be incomplete or null"
+            )
         key = (output_index, summary_index)
         existing = self._summary_parts.get(key)
         if not done:
@@ -379,6 +432,8 @@ class OpenAIResponsesStreamDecoder:
         delta = value.get("delta")
         if not isinstance(delta, str):
             raise OpenAIResponsesError("Responses content delta requires a string")
+        if expected_wire_type == "output_text" and "logprobs" in value:
+            _validate_stream_logprobs(value.get("logprobs"))
         if not delta:
             return []
         return [
@@ -406,14 +461,7 @@ class OpenAIResponsesStreamDecoder:
             value.get("annotation_index"),
             "Responses annotation_index",
         )
-        annotation = OPENAI_RESPONSES_JSON.mapping(
-            value.get("annotation"),
-            "Responses output text annotation",
-        )
-        OPENAI_RESPONSES_JSON.required_string(
-            annotation.get("type"),
-            "Responses output text annotation type",
-        )
+        validate_output_text_annotation(value.get("annotation"))
         return []
 
     def _reasoning_delta(
@@ -504,28 +552,30 @@ class OpenAIResponsesStreamDecoder:
 
     def _provider_tool_event(
         self,
-        codec: OpenAIResponsesProviderToolCodec,
+        tool: ProviderToolId,
         event_type: str,
         value: Mapping[str, Any],
     ) -> list[ModelDelta]:
-        output_index, state = self._provider_event_item(value, codec)
-        update = codec.stream_event_update(event_type, value)
+        output_index, state = self._provider_event_item(value, tool)
+        decoded_tool, status, data = decode_provider_stream_event(event_type, value)
+        if decoded_tool != tool:
+            raise OpenAIResponsesError("Responses provider event dispatch changed")
         return self._changed_provider_status(
             output_index,
             state,
-            update.status,
+            status,
             event_type,
-            data=update.data,
+            data=data,
         )
 
     def _provider_event_item(
         self,
         value: Mapping[str, Any],
-        codec: OpenAIResponsesProviderToolCodec,
+        tool: ProviderToolId,
     ) -> tuple[int, _ItemState]:
         output_index = _output_index(value)
         state = self._open_item(output_index)
-        if state.provider_codec is not codec:
+        if state.provider_tool != tool:
             raise OpenAIResponsesError(
                 "Responses provider event does not match its output item codec"
             )
@@ -570,12 +620,12 @@ class OpenAIResponsesStreamDecoder:
         event: str,
         data: Mapping[str, object],
     ) -> ModelProviderToolCallDelta:
-        if state.provider_codec is None:
-            raise OpenAIResponsesError("Responses provider delta requires a registered codec")
+        if state.provider_tool is None:
+            raise OpenAIResponsesError("Responses provider delta requires a supported tool")
         return ModelProviderToolCallDelta(
             output_index=output_index,
             id=state.item_id,
-            tool=state.provider_codec.tool,
+            tool=state.provider_tool,
             status=state.status,
             event=event,
             data=data,
@@ -636,8 +686,7 @@ class OpenAIResponsesStreamDecoder:
             "response.reasoning_text.done": "text",
             "response.refusal.done": "refusal",
         }[event_type]
-        if not isinstance(value.get(field), str):
-            raise OpenAIResponsesError(f"Responses {event_type} requires {field}")
+        _validate_done_payload(event_type, value, state, field)
         self._done_events.add(done_key)
         return []
 
@@ -682,8 +731,10 @@ class OpenAIResponsesStreamDecoder:
                 raise OpenAIResponsesError("Responses terminal output index was not streamed")
             item = OPENAI_RESPONSES_JSON.mapping(raw_item, "Responses terminal output item")
             self._validate_item_identity(state, item)
-            if state.provider_codec is not None:
-                terminal_status = state.provider_codec.stream_item_update(item).status
+            if state.runtime_kind is not None:
+                validate_runtime_tool_call_item(item, state.item_type)
+            if state.provider_tool is not None:
+                terminal_status = decode_provider_item_status(item, state.provider_tool)
                 if terminal_status is not state.status:
                     raise OpenAIResponsesError(
                         "Responses terminal provider tool status does not match output_item.done"
@@ -712,8 +763,6 @@ class OpenAIResponsesStreamDecoder:
 
     def _validate_sequence_number(self, value: Mapping[str, Any]) -> None:
         raw = value.get("sequence_number")
-        if raw is None:
-            return
         sequence_number = _nonnegative_int(raw, "Responses sequence_number")
         if self._sequence_number is not None and sequence_number <= self._sequence_number:
             raise OpenAIResponsesError("Responses sequence_number must increase")
@@ -728,6 +777,91 @@ def _event_type(event_name: str | None, value: Mapping[str, Any]) -> str:
     if event_name is not None and event_name != event_type:
         raise OpenAIResponsesError("Responses SSE event name must match the payload type")
     return event_type
+
+
+def _validate_event_fields(  # noqa: C901
+    event_type: str, value: Mapping[str, Any]
+) -> None:
+    base = {"type", "sequence_number"}
+    response_events = {
+        "response.created",
+        "response.queued",
+        "response.in_progress",
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+    }
+    item_events = {"response.output_item.added", "response.output_item.done"}
+    content_events = {"response.content_part.added", "response.content_part.done"}
+    summary_events = {
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
+    }
+    if event_type in response_events:
+        allowed = base | {"response"}
+    elif event_type in item_events:
+        allowed = base | {"output_index", "item"}
+    elif event_type in content_events:
+        allowed = base | {"item_id", "output_index", "content_index", "part"}
+    elif event_type in summary_events:
+        allowed = base | {"item_id", "output_index", "summary_index", "part"}
+        if event_type == "response.reasoning_summary_part.done":
+            allowed.add("status")
+    elif event_type == "response.output_text.annotation.added":
+        allowed = base | {
+            "item_id",
+            "output_index",
+            "content_index",
+            "annotation_index",
+            "annotation",
+        }
+    elif event_type in {
+        "response.output_text.delta",
+        "response.refusal.delta",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+    }:
+        index = "summary_index" if "summary" in event_type else "content_index"
+        allowed = base | {"item_id", "output_index", index, "delta"}
+        if event_type == "response.output_text.delta":
+            allowed.add("logprobs")
+    elif event_type in {
+        "response.function_call_arguments.delta",
+        "response.custom_tool_call_input.delta",
+    }:
+        allowed = base | {"item_id", "output_index", "delta"}
+    elif event_type == "response.function_call_arguments.done":
+        allowed = base | {"item_id", "output_index", "arguments", "name"}
+    elif event_type == "response.custom_tool_call_input.done":
+        allowed = base | {"item_id", "output_index", "input"}
+    elif event_type in {
+        "response.output_text.done",
+        "response.refusal.done",
+        "response.reasoning_text.done",
+        "response.reasoning_summary_text.done",
+    }:
+        field = "refusal" if event_type == "response.refusal.done" else "text"
+        index = "summary_index" if "summary" in event_type else "content_index"
+        allowed = base | {"item_id", "output_index", index, field}
+        if event_type == "response.output_text.done":
+            allowed.add("logprobs")
+    elif event_type == "error":
+        allowed = base | {"code", "message", "param"}
+        if not isinstance(value.get("message"), str):
+            raise OpenAIResponsesError("Responses error event requires message")
+        for field in ("code", "param"):
+            if field in value and value[field] is not None and not isinstance(value[field], str):
+                raise OpenAIResponsesError(
+                    f"Responses error event {field} must be a string or null"
+                )
+    else:
+        # The fixed hosted-tool dispatch validates its own event variants.
+        return
+    unexpected = set(value).difference(allowed)
+    if unexpected:
+        raise OpenAIResponsesError(
+            f"Responses {event_type} contains unsupported field: {min(unexpected)}"
+        )
 
 
 def _output_index(value: Mapping[str, Any]) -> int:
@@ -751,6 +885,70 @@ def _validate_item_id(value: Mapping[str, Any], state: _ItemState) -> None:
     )
     if item_id != state.item_id:
         raise OpenAIResponsesError("Responses event item_id changed")
+
+
+def _validate_done_payload(
+    event_type: str,
+    value: Mapping[str, Any],
+    state: _ItemState,
+    field: str,
+) -> None:
+    if not isinstance(value.get(field), str):
+        raise OpenAIResponsesError(f"Responses {event_type} requires {field}")
+    if event_type == "response.function_call_arguments.done":
+        name = OPENAI_RESPONSES_JSON.required_string(
+            value.get("name"),
+            "Responses function_call_arguments.done name",
+        )
+        if name != state.name:
+            raise OpenAIResponsesError("Responses function_call_arguments.done name changed")
+    if event_type == "response.output_text.done" and "logprobs" in value:
+        _validate_stream_logprobs(value.get("logprobs"))
+
+
+def _validate_stream_logprobs(value: object) -> None:
+    if not _is_array(value):
+        raise OpenAIResponsesError("Responses stream logprobs must be an array")
+    for raw in cast(Sequence[object], value):
+        _validate_stream_logprob(raw)
+
+
+def _validate_stream_logprob(value: object) -> None:
+    logprob = OPENAI_RESPONSES_JSON.mapping(value, "Responses stream logprob")
+    unexpected = set(logprob).difference({"token", "logprob", "top_logprobs"})
+    if unexpected:
+        raise OpenAIResponsesError(
+            "Responses stream logprob contains unsupported field: " + min(unexpected)
+        )
+    if not isinstance(logprob.get("token"), str):
+        raise OpenAIResponsesError("Responses stream logprob token must be a string")
+    score = logprob.get("logprob")
+    if isinstance(score, bool) or not isinstance(score, int | float) or not math.isfinite(score):
+        raise OpenAIResponsesError("Responses stream logprob must be a finite number")
+    top_value = logprob.get("top_logprobs")
+    if top_value is None:
+        return
+    if not _is_array(top_value):
+        raise OpenAIResponsesError("Responses stream top_logprobs must be an array or null")
+    for raw_top in cast(Sequence[object], top_value):
+        _validate_stream_top_logprob(raw_top)
+
+
+def _validate_stream_top_logprob(value: object) -> None:
+    top = OPENAI_RESPONSES_JSON.mapping(value, "Responses stream top_logprob")
+    unexpected = set(top).difference({"token", "logprob"})
+    if unexpected:
+        raise OpenAIResponsesError(
+            "Responses stream top_logprob contains unsupported field: " + min(unexpected)
+        )
+    token = top.get("token")
+    if token is not None and not isinstance(token, str):
+        raise OpenAIResponsesError("Responses stream top_logprob token must be a string or null")
+    score = top.get("logprob")
+    if score is not None and (
+        isinstance(score, bool) or not isinstance(score, int | float) or not math.isfinite(score)
+    ):
+        raise OpenAIResponsesError("Responses stream top_logprob must be a finite number or null")
 
 
 def _is_array(value: object) -> bool:

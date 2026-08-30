@@ -21,14 +21,32 @@ from jharness.kernel import (
     ProviderToolStatus,
     RuntimeToolKind,
     StructuredToolCall,
+    thaw_json_value,
 )
-from jharness.models.anthropic.messages.codec import decode_usage
+from jharness.models.anthropic.messages.codec import (
+    decode_container_id,
+    decode_stop_details,
+    decode_usage,
+    reject_unknown_message_fields,
+    validate_stop_reason,
+    validate_stop_sequence,
+)
 from jharness.models.anthropic.messages.errors import (
     ANTHROPIC_MESSAGES_JSON,
     AnthropicMessagesError,
 )
+from jharness.models.anthropic.messages.messages import validate_citations
 from jharness.models.anthropic.messages.profile import AnthropicMessagesProfile
-from jharness.models.anthropic.messages.server_tools import AnthropicMessagesServerToolCodec
+from jharness.models.anthropic.messages.server_tools import (
+    ANTHROPIC_MESSAGES_WEB_SEARCH,
+)
+from jharness.models.anthropic.messages.server_tools import (
+    decode_call as decode_web_search_call,
+)
+from jharness.models.anthropic.messages.server_tools import (
+    is_result_type as is_web_search_result_type,
+)
+from jharness.models.anthropic.messages.tools import decode_tool_uses
 
 JsonObject = dict[str, Any]
 
@@ -44,7 +62,6 @@ class _BlockState:
     native_data: JsonObject = field(default_factory=dict[str, Any])
     call_id: str | None = None
     name: str | None = None
-    server_codec: AnthropicMessagesServerToolCodec | None = None
 
 
 class AnthropicMessagesStreamDecoder:
@@ -56,6 +73,8 @@ class AnthropicMessagesStreamDecoder:
         self._raw_stop_reason: str | None = None
         self._model: str | None = None
         self._response_id: str | None = None
+        self._container_id: str | None = None
+        self._stop_details: JsonObject | None = None
         self._usage: ModelUsage | None = None
         self._blocks: dict[int, _BlockState] = {}
         self._output: dict[int, ContentPart | StructuredToolCall | ProviderToolCall] = {}
@@ -73,6 +92,7 @@ class AnthropicMessagesStreamDecoder:
             raise AnthropicMessagesError("Anthropic stream emitted an event after message_stop")
         event_type = _event_type(event_name, value)
         if event_type == "ping":
+            _require_exact_fields(value, {"type"}, "ping")
             return False, []
         if event_type == "message_start":
             return False, self._message_start_events(value)
@@ -86,7 +106,7 @@ class AnthropicMessagesStreamDecoder:
         if event_type == "message_delta":
             return False, self._message_delta_events(value)
         if event_type == "message_stop":
-            self._message_stop()
+            self._message_stop(value)
             return True, []
         if event_type == "error":
             raise AnthropicMessagesError("Anthropic stream error event")
@@ -112,6 +132,16 @@ class AnthropicMessagesStreamDecoder:
                     "provider": self._profile.name,
                     "type": "message",
                     "role": "assistant",
+                    **(
+                        {"anthropic": {"container_id": self._container_id}}
+                        if self._container_id is not None
+                        else {}
+                    ),
+                    **(
+                        {"stop_details": self._stop_details}
+                        if self._stop_details is not None
+                        else {}
+                    ),
                 },
             )
         except (TypeError, ValueError) as exc:
@@ -123,7 +153,10 @@ class AnthropicMessagesStreamDecoder:
         if self._phase != "initial":
             raise AnthropicMessagesError("Anthropic stream message_start appeared more than once")
         self._phase = "active"
+        if set(value) != {"type", "message"}:
+            raise AnthropicMessagesError("Anthropic message_start has unsupported fields")
         message = ANTHROPIC_MESSAGES_JSON.mapping(value.get("message"), "Anthropic stream message")
+        reject_unknown_message_fields(message, stream_start=True)
         if message.get("type") != "message":
             raise AnthropicMessagesError("Anthropic stream message_start requires type='message'")
         if message.get("role") != "assistant":
@@ -133,18 +166,25 @@ class AnthropicMessagesStreamDecoder:
             raise AnthropicMessagesError("Anthropic stream message_start content must be an array")
         if content:
             raise AnthropicMessagesError("Anthropic stream message_start content must be empty")
-        if message.get("id") is not None:
-            self._response_id = ANTHROPIC_MESSAGES_JSON.required_string(
-                message.get("id"), "Anthropic stream message id"
-            )
-        if message.get("model") is not None:
-            self._model = ANTHROPIC_MESSAGES_JSON.required_string(
-                message.get("model"), "Anthropic stream model"
-            )
-        return self._usage_events(message.get("usage"))
+        self._response_id = ANTHROPIC_MESSAGES_JSON.required_string(
+            message.get("id"), "Anthropic stream message id"
+        )
+        self._model = ANTHROPIC_MESSAGES_JSON.required_string(
+            message.get("model"), "Anthropic stream model"
+        )
+        self._container_id = decode_container_id(
+            message.get("container"), "Anthropic stream container"
+        )
+        if "usage" not in message:
+            raise AnthropicMessagesError("Anthropic stream message_start requires usage")
+        self._stop_details = decode_stop_details(message.get("stop_details"))
+        return self._usage_events(message.get("usage"), delta=False)
 
-    def _content_block_start_events(self, value: Mapping[str, Any]) -> list[ModelDelta]:
+    def _content_block_start_events(  # noqa: C901
+        self, value: Mapping[str, Any]
+    ) -> list[ModelDelta]:
         self._require_active("content_block_start")
+        _require_exact_fields(value, {"type", "index", "content_block"}, "content_block_start")
         wire_index = _event_index(value)
         if wire_index in self._blocks:
             raise AnthropicMessagesError(
@@ -156,9 +196,12 @@ class AnthropicMessagesStreamDecoder:
         block_type = _required_type(
             block.get("type"), "Anthropic content block requires non-empty type"
         )
-        result_codec = self._profile.server_tools.codec_for_result_type(block_type)
-        if result_codec is not None:
-            return self._server_result_start(wire_index, block, result_codec)
+        if is_web_search_result_type(block_type):
+            return self._server_result_start(wire_index, block)
+        if block_type == "fallback":
+            raise AnthropicMessagesError(
+                "Anthropic fallback blocks require an unenabled beta feature"
+            )
         output_index = self._allocate_output_index()
         state = _BlockState(block_type=block_type, output_index=output_index)
         self._blocks[wire_index] = state
@@ -169,15 +212,27 @@ class AnthropicMessagesStreamDecoder:
                 raise AnthropicMessagesError(f"Anthropic {block_type} block requires {field_name}")
             state.text_chunks.append(initial)
             state.populated = bool(initial)
+            if block_type == "text":
+                unknown = set(block).difference({"type", "text", "citations"})
+                if unknown:
+                    raise AnthropicMessagesError(
+                        f"Anthropic text block has unsupported field: {min(unknown)}"
+                    )
+                citations = block.get("citations")
+                validate_citations(citations)
+                if citations is not None:
+                    state.native_data["citations"] = [
+                        dict(cast(Mapping[str, Any], item))
+                        for item in cast(Sequence[object], citations)
+                    ]
             if block_type == "thinking":
-                state.native_data = {
-                    key: value for key, value in block.items() if key not in {"type", "thinking"}
-                }
+                _set_initial_thinking_signature(state, block)
             return _text_deltas(output_index, initial, block_type)
         if block_type == "redacted_thinking":
-            data = ANTHROPIC_MESSAGES_JSON.required_string(
-                block.get("data"), "Anthropic redacted_thinking data"
-            )
+            _require_exact_fields(block, {"type", "data"}, "redacted_thinking block")
+            data = block.get("data")
+            if not isinstance(data, str):
+                raise AnthropicMessagesError("Anthropic redacted_thinking data must be a string")
             state.populated = True
             state.native_data = dict(block)
             self._output[output_index] = ContentPart(
@@ -192,6 +247,22 @@ class AnthropicMessagesStreamDecoder:
                     data={"anthropic": {"type": "redacted_thinking", "data": data}},
                 )
             ]
+        if block_type == "container_upload":
+            unknown = set(block).difference({"type", "file_id"})
+            if unknown:
+                raise AnthropicMessagesError(
+                    f"Anthropic container_upload block has unsupported field: {min(unknown)}"
+                )
+            file_id = ANTHROPIC_MESSAGES_JSON.required_string(
+                block.get("file_id"), "Anthropic container_upload file_id"
+            )
+            from jharness.kernel import ArtifactRef
+
+            state.populated = True
+            self._output[output_index] = ContentPart.artifact_part(
+                ArtifactRef(file_id, metadata={"anthropic": dict(block)})
+            )
+            return []
         if block_type == "tool_use":
             return self._runtime_tool_start(state, block)
         if block_type == "server_tool_use":
@@ -209,7 +280,11 @@ class AnthropicMessagesStreamDecoder:
         state.name = ANTHROPIC_MESSAGES_JSON.required_string(
             block.get("name"), "Anthropic tool_use name"
         )
-        initial = _initial_input(block.get("input", {}), "Anthropic tool_use input")
+        decoded = decode_tool_uses((block,))[0]
+        initial = _initial_input(decoded.arguments, "Anthropic tool_use input")
+        native = decoded.metadata.get("anthropic")
+        if native is not None:
+            state.native_data["tool_use_metadata"] = dict(cast(Mapping[str, Any], native))
         state.input_chunks.append(initial)
         state.populated = True
         return [
@@ -219,6 +294,7 @@ class AnthropicMessagesStreamDecoder:
                 input_delta=initial,
                 id=state.call_id,
                 name=state.name,
+                metadata=decoded.metadata,
             )
         ]
 
@@ -233,27 +309,27 @@ class AnthropicMessagesStreamDecoder:
         name = ANTHROPIC_MESSAGES_JSON.required_string(
             block.get("name"), "Anthropic server tool use name"
         )
-        codec = self._profile.server_tools.codec_for_call_name(name)
-        if codec is None:
+        if name != "web_search":
             raise AnthropicMessagesError(f"unsupported Anthropic server tool call: {name}")
         if call_id in self._provider_output_indexes:
             raise AnthropicMessagesError(f"duplicate Anthropic server tool use id: {call_id}")
-        initial = _initial_input(block.get("input", {}), "Anthropic server tool input")
+        if "input" not in block:
+            raise AnthropicMessagesError("Anthropic server tool use requires input")
+        initial = _initial_input(block["input"], "Anthropic server tool input")
         state.call_id = call_id
         state.name = name
-        state.server_codec = codec
         state.input_chunks.append(initial)
         state.populated = True
         use = dict(block)
         use["input"] = {}
         self._provider_uses[call_id] = use
         self._provider_output_indexes[call_id] = state.output_index
-        self._output[state.output_index] = codec.decode_call(use, None)
+        self._output[state.output_index] = decode_web_search_call(use, None)
         return [
             ModelProviderToolCallDelta(
                 output_index=state.output_index,
                 id=call_id,
-                tool=codec.tool,
+                tool=ANTHROPIC_MESSAGES_WEB_SEARCH,
                 status=ProviderToolStatus.IN_PROGRESS,
                 event="input.started",
                 data={"name": name, "input_delta": initial},
@@ -264,7 +340,6 @@ class AnthropicMessagesStreamDecoder:
         self,
         wire_index: int,
         block: Mapping[str, Any],
-        codec: AnthropicMessagesServerToolCodec,
     ) -> list[ModelDelta]:
         call_id = ANTHROPIC_MESSAGES_JSON.required_string(
             block.get("tool_use_id"),
@@ -279,25 +354,23 @@ class AnthropicMessagesStreamDecoder:
             name = ANTHROPIC_MESSAGES_JSON.required_string(
                 use.get("name"), "Anthropic server tool use name"
             )
-            use_codec = self._profile.server_tools.codec_for_call_name(name)
-            if use_codec is not codec:
+            if name != "web_search":
                 raise AnthropicMessagesError(
                     "Anthropic server tool result belongs to a different tool"
                 )
-        call = codec.decode_call(use, block)
+        call = decode_web_search_call(use, block)
         self._output[output_index] = call
         self._blocks[wire_index] = _BlockState(
             block_type=cast(str, block["type"]),
             output_index=output_index,
             populated=True,
-            server_codec=codec,
             call_id=call_id,
         )
         return [
             ModelProviderToolCallDelta(
                 output_index=output_index,
                 id=call_id,
-                tool=codec.tool,
+                tool=ANTHROPIC_MESSAGES_WEB_SEARCH,
                 status=call.status,
                 event="result",
                 data={"result": dict(block)},
@@ -306,6 +379,7 @@ class AnthropicMessagesStreamDecoder:
 
     def _content_block_delta_events(self, value: Mapping[str, Any]) -> list[ModelDelta]:
         self._require_active("content_block_delta")
+        _require_exact_fields(value, {"type", "index", "delta"}, "content_block_delta")
         wire_index = _event_index(value)
         state = self._open_block(wire_index, "delta")
         delta = ANTHROPIC_MESSAGES_JSON.mapping(value.get("delta"), "Anthropic content block delta")
@@ -314,17 +388,22 @@ class AnthropicMessagesStreamDecoder:
             "Anthropic content block delta requires non-empty type",
         )
         if delta_type == "text_delta":
+            _require_exact_fields(delta, {"type", "text"}, "text_delta")
             return self._text_delta(state, delta, "text", "text")
         if delta_type == "thinking_delta":
+            _require_exact_fields(delta, {"type", "thinking"}, "thinking_delta")
             return self._text_delta(state, delta, "thinking", "thinking")
         if delta_type == "signature_delta":
+            _require_exact_fields(delta, {"type", "signature"}, "signature_delta")
             if state.block_type != "thinking":
                 raise AnthropicMessagesError("Anthropic signature_delta requires a thinking block")
             signature = delta.get("signature")
             if not isinstance(signature, str):
                 raise AnthropicMessagesError("Anthropic signature delta requires signature")
-            if not signature:
-                return []
+            if "signature" in state.native_data:
+                raise AnthropicMessagesError(
+                    "Anthropic thinking block emitted signature more than once"
+                )
             state.native_data["signature"] = signature
             return [
                 ModelContentDelta(
@@ -340,8 +419,10 @@ class AnthropicMessagesStreamDecoder:
                 )
             ]
         if delta_type == "citations_delta":
+            _require_exact_fields(delta, {"type", "citation"}, "citations_delta")
             return self._citation_delta(state, delta)
         if delta_type == "input_json_delta":
+            _require_exact_fields(delta, {"type", "partial_json"}, "input_json_delta")
             return self._input_delta(state, delta)
         raise AnthropicMessagesError(
             f"unsupported Anthropic content block delta type: {delta_type}"
@@ -376,6 +457,7 @@ class AnthropicMessagesStreamDecoder:
         if not isinstance(citation, Mapping):
             raise AnthropicMessagesError("Anthropic citations_delta requires citation")
         citation_mapping = cast(Mapping[str, object], citation)
+        validate_citations((citation_mapping,))
         citations = cast(object, state.native_data.setdefault("citations", []))
         if not isinstance(citations, list):
             raise AnthropicMessagesError("Anthropic text citation state must be an array")
@@ -413,13 +495,13 @@ class AnthropicMessagesStreamDecoder:
                     input_delta=partial,
                 )
             ]
-        if state.call_id is None or state.server_codec is None:
+        if state.call_id is None:
             raise AnthropicMessagesError("Anthropic server tool input delta lacks call identity")
         return [
             ModelProviderToolCallDelta(
                 output_index=state.output_index,
                 id=state.call_id,
-                tool=state.server_codec.tool,
+                tool=ANTHROPIC_MESSAGES_WEB_SEARCH,
                 status=ProviderToolStatus.IN_PROGRESS,
                 event="input.delta",
                 data={"input_delta": partial},
@@ -428,19 +510,14 @@ class AnthropicMessagesStreamDecoder:
 
     def _content_block_stop(self, value: Mapping[str, Any]) -> None:
         self._require_active("content_block_stop")
+        _require_exact_fields(value, {"type", "index"}, "content_block_stop")
         wire_index = _event_index(value)
         state = self._open_block(wire_index, "stop")
-        if not state.populated:
-            raise AnthropicMessagesError(
-                f"Anthropic {state.block_type} content block completed without data"
-            )
         if state.block_type in {"text", "thinking"}:
             text = "".join(state.text_chunks)
-            if not text and not (
-                state.block_type == "thinking" and state.native_data.get("signature")
-            ):
+            if state.block_type == "thinking" and "signature" not in state.native_data:
                 raise AnthropicMessagesError(
-                    f"Anthropic {state.block_type} content block requires content before stop"
+                    "Anthropic thinking block requires a signature before stop"
                 )
             if state.block_type == "text":
                 metadata = (
@@ -476,10 +553,11 @@ class AnthropicMessagesStreamDecoder:
             id=state.call_id,
             name=state.name,
             arguments=arguments,
+            metadata=cast(Mapping[str, Any], state.native_data.get("tool_use_metadata", {})),
         )
 
     def _commit_server_tool(self, state: _BlockState) -> None:
-        if state.call_id is None or state.server_codec is None:
+        if state.call_id is None:
             raise AnthropicMessagesError("Anthropic streamed server tool call lacks identity")
         arguments = _parse_input(
             state.input_chunks,
@@ -487,7 +565,7 @@ class AnthropicMessagesStreamDecoder:
         )
         use = self._provider_uses[state.call_id]
         use["input"] = arguments
-        self._output[state.output_index] = state.server_codec.decode_call(use, None)
+        self._output[state.output_index] = decode_web_search_call(use, None)
 
     def _message_delta_events(self, value: Mapping[str, Any]) -> list[ModelDelta]:
         self._require_active("message_delta")
@@ -495,34 +573,47 @@ class AnthropicMessagesStreamDecoder:
             raise AnthropicMessagesError(
                 "Anthropic message_delta requires all content blocks to stop"
             )
+        if set(value) != {"type", "delta", "usage"}:
+            raise AnthropicMessagesError("Anthropic message_delta has unsupported fields")
         delta = ANTHROPIC_MESSAGES_JSON.mapping(value.get("delta"), "Anthropic message delta")
-        stop_reason = ANTHROPIC_MESSAGES_JSON.required_string(
+        unknown = set(delta).difference(
+            {"container", "stop_details", "stop_reason", "stop_sequence"}
+        )
+        if unknown:
+            raise AnthropicMessagesError(
+                f"Anthropic message_delta has unsupported delta field: {min(unknown)}"
+            )
+        stop_reason = validate_stop_reason(
             delta.get("stop_reason"), "Anthropic message_delta stop_reason"
         )
+        validate_stop_sequence(stop_reason, delta.get("stop_sequence"))
+        container_id = decode_container_id(
+            delta.get("container"), "Anthropic stream delta container"
+        )
+        if container_id is not None:
+            self._container_id = container_id
+        stop_details = decode_stop_details(delta.get("stop_details"))
+        if stop_details is not None:
+            self._stop_details = stop_details
         if self._raw_stop_reason is not None:
             raise AnthropicMessagesError(
                 "Anthropic stream emitted more than one terminal message_delta"
             )
         self._raw_stop_reason = stop_reason
-        self._finish_reason = self._profile.finish_reason(stop_reason)
+        self._finish_reason = stop_reason
         self._phase = "delta_seen"
-        return self._usage_events(value.get("usage"))
+        return self._usage_events(value.get("usage"), delta=True)
 
-    def _message_stop(self) -> None:
+    def _message_stop(self, value: Mapping[str, Any]) -> None:
+        _require_exact_fields(value, {"type"}, "message_stop")
         if self._phase == "initial":
             raise AnthropicMessagesError("Anthropic message_stop requires message_start")
         if self._phase != "delta_seen" or self._finish_reason is None:
             raise AnthropicMessagesError("Anthropic message_stop requires a terminal message_delta")
-        if not self._output:
-            raise AnthropicMessagesError("Anthropic stream completed without output")
         self._phase = "stopped"
 
-    def _usage_events(self, value: object) -> list[ModelDelta]:
-        if self._profile.stream_usage_mode == "omit":
-            return []
-        usage = decode_usage(value)
-        if usage is None:
-            return []
+    def _usage_events(self, value: object, *, delta: bool) -> list[ModelDelta]:
+        usage = decode_usage(value, delta=delta)
         self._usage = _merge_usage(self._usage, usage)
         return [ModelUsageDelta(usage=self._usage)]
 
@@ -564,7 +655,23 @@ def _initial_input(value: object, label: str) -> str:
         raise AnthropicMessagesError(f"{label} must be an object")
     if not value:
         return ""
-    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+    return json.dumps(
+        thaw_json_value(cast(Mapping[str, Any], value)), separators=(",", ":"), sort_keys=True
+    )
+
+
+def _set_initial_thinking_signature(state: _BlockState, block: Mapping[str, Any]) -> None:
+    unknown = set(block).difference({"type", "thinking", "signature"})
+    if unknown:
+        raise AnthropicMessagesError(
+            f"Anthropic thinking block has unsupported field: {min(unknown)}"
+        )
+    signature = block.get("signature")
+    if signature is None:
+        return
+    if not isinstance(signature, str):
+        raise AnthropicMessagesError("Anthropic thinking signature must be a string")
+    state.native_data["signature"] = signature
 
 
 def _parse_input(chunks: Sequence[str], label: str) -> Mapping[str, Any]:
@@ -616,6 +723,15 @@ def _event_index(value: Mapping[str, Any]) -> int:
     if index < 0:
         raise AnthropicMessagesError("Anthropic stream event index must be >= 0")
     return index
+
+
+def _require_exact_fields(value: Mapping[str, object], allowed: set[str], label: str) -> None:
+    unknown = set(value).difference(allowed)
+    if unknown:
+        raise AnthropicMessagesError(f"Anthropic {label} has unsupported field: {min(unknown)}")
+    missing = allowed.difference(value)
+    if missing:
+        raise AnthropicMessagesError(f"Anthropic {label} requires field: {min(missing)}")
 
 
 def _required_type(value: object, error_message: str) -> str:

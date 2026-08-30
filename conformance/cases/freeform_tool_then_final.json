@@ -29,7 +29,8 @@
               "id": "freeform-call-1",
               "name": "freeform_echo",
               "input_kind": "freeform",
-              "input_delta": "*** Begin Patch\n*** End Patch"
+              "input_delta": "*** Begin Patch\n*** End Patch",
+              "metadata": {}
             }
           ],
           "outcome": {
@@ -41,7 +42,8 @@
                   "input_kind": "freeform",
                   "id": "freeform-call-1",
                   "name": "freeform_echo",
-                  "input": "*** Begin Patch\n*** End Patch"
+                  "input": "*** Begin Patch\n*** End Patch",
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",
@@ -84,8 +86,14 @@
         "tool_calls": 1,
         "final_text": "done",
         "model_request_roles": [
-          ["user"],
-          ["user", "assistant", "tool"]
+          [
+            "user"
+          ],
+          [
+            "user",
+            "assistant",
+            "tool"
+          ]
         ],
         "fact_kinds": [
           "started",
@@ -93,8 +101,15 @@
           "tool_batch",
           "model_turn"
         ],
-        "message_roles": ["user", "assistant", "tool", "assistant"],
-        "tool_outcome_kinds": ["success"]
+        "message_roles": [
+          "user",
+          "assistant",
+          "tool",
+          "assistant"
+        ],
+        "tool_outcome_kinds": [
+          "success"
+        ]
       }
     }
   ]

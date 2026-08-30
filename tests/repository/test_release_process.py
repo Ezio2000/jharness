@@ -39,7 +39,6 @@ _REQUIRED_MODEL_FILES = {
     "anthropic/messages/__init__.py",
     "anthropic/messages/presets.py",
     "decorators.py",
-    "deepseek/__init__.py",
     "openai/__init__.py",
     "openai/chat/__init__.py",
     "openai/responses/__init__.py",
@@ -432,9 +431,7 @@ def test_testpypi_smoke_project_pins_all_distributions() -> None:
     assert "openai_responses_image_generation" in installed_api
     assert "anthropic_messages_profile" in installed_api
     assert "anthropic_messages_web_search" in installed_api
-    assert "deepseek_responses_profile" in installed_api
-    for namespace in ("jharness.models.anthropic", "jharness.models.deepseek"):
-        assert namespace in installed_api
+    assert "jharness.models.anthropic" in installed_api
     assert script.count('{{ index = "testpypi" }}') == 5
 
 

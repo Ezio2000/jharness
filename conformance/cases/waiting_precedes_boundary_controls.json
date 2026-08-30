@@ -34,7 +34,8 @@
                   "arguments": {
                     "delay": 0.03,
                     "wait_id": "tool-wait"
-                  }
+                  },
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

@@ -39,7 +39,8 @@
                       4
                     ],
                     "burst": true
-                  }
+                  },
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

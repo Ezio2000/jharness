@@ -6,24 +6,9 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
-from jharness.kernel import ProviderToolId, ProviderToolSpec
+from jharness.kernel import ProviderToolSpec
 from jharness.models.anthropic.messages.profile import AnthropicMessagesProfile
-from jharness.models.anthropic.messages.server_tools import (
-    AnthropicMessagesServerToolRegistry,
-    anthropic_messages_web_search_codec,
-)
-
-ANTHROPIC_MESSAGES_WEB_SEARCH = ProviderToolId(
-    "anthropic.messages",
-    "web_search",
-)
-_ANTHROPIC_MESSAGES_WEB_SEARCH_VARIANTS = frozenset(
-    {
-        "web_search_20250305",
-        "web_search_20260209",
-        "web_search_20260318",
-    }
-)
+from jharness.models.anthropic.messages.server_tools import ANTHROPIC_MESSAGES_WEB_SEARCH
 
 
 def anthropic_messages_web_search(
@@ -47,13 +32,5 @@ def anthropic_messages_profile() -> AnthropicMessagesProfile:
             base.capabilities,
             tool_choice_types=base.capabilities.tool_choice_types | {"provider"},
             provider_tools=frozenset({ANTHROPIC_MESSAGES_WEB_SEARCH}),
-        ),
-        server_tools=AnthropicMessagesServerToolRegistry(
-            (
-                anthropic_messages_web_search_codec(
-                    ANTHROPIC_MESSAGES_WEB_SEARCH,
-                    variants=_ANTHROPIC_MESSAGES_WEB_SEARCH_VARIANTS,
-                ),
-            )
         ),
     )

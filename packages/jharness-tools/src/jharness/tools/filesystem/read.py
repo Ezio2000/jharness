@@ -71,9 +71,14 @@ class ReadTool:
         return self.workspace.root
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
-        file_path = cast(str, call.arguments["file_path"])
-        offset = cast(int, call.arguments.get("offset", 1))
-        limit = cast(int, call.arguments.get("limit", self.default_limit))
+        arguments = call.arguments
+        if arguments is None:
+            return failure(
+                FilesystemFailure("invalid_arguments", "Read requires JSON object arguments.")
+            )
+        file_path = cast(str, arguments["file_path"])
+        offset = cast(int, arguments.get("offset", 1))
+        limit = cast(int, arguments.get("limit", self.default_limit))
         try:
             return await run_blocking(
                 lambda cancelled_check: self._read(file_path, offset, limit, cancelled_check),

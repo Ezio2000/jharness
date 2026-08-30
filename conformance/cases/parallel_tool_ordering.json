@@ -34,7 +34,8 @@
                   "arguments": {
                     "delay": 0.03,
                     "text": "one"
-                  }
+                  },
+                  "metadata": {}
                 },
                 {
                   "kind": "runtime_tool_call",
@@ -44,7 +45,8 @@
                   "arguments": {
                     "delay": 0.01,
                     "text": "two"
-                  }
+                  },
+                  "metadata": {}
                 },
                 {
                   "kind": "runtime_tool_call",
@@ -54,7 +56,8 @@
                   "arguments": {
                     "delay": 0.02,
                     "text": "three"
-                  }
+                  },
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",

@@ -48,8 +48,9 @@ def _bash_path() -> Path:
 
 async def _invoke_async(
     tool: Tool,
-    arguments: Mapping[str, Any],
+    arguments: Mapping[str, Any] | None,
     *,
+    raw_input: str | None = None,
     is_cancelled: Callable[[], bool] = lambda: False,
     through_registry: bool = False,
 ) -> ToolSuccess | ToolFailure:
@@ -58,7 +59,7 @@ async def _invoke_async(
         _emit_progress,
         is_cancelled,
     )
-    call = StructuredToolCall("bash-call", tool.spec.name, arguments)
+    call = StructuredToolCall("bash-call", tool.spec.name, arguments, raw_input)
     if through_registry:
         catalog = await ToolRegistry((tool,)).open_catalog()
         result = await catalog.bind(call).invoke(context)
@@ -71,8 +72,9 @@ async def _invoke_async(
 
 def _invoke(
     tool: Tool,
-    arguments: Mapping[str, Any],
+    arguments: Mapping[str, Any] | None,
     *,
+    raw_input: str | None = None,
     is_cancelled: Callable[[], bool] = lambda: False,
     through_registry: bool = False,
 ) -> ToolSuccess | ToolFailure:
@@ -80,6 +82,7 @@ def _invoke(
         _invoke_async(
             tool,
             arguments,
+            raw_input=raw_input,
             is_cancelled=is_cancelled,
             through_registry=through_registry,
         )
@@ -291,6 +294,7 @@ def test_bash_direct_invocation_returns_stable_validation_failures(tmp_path: Pat
 
     for arguments, code in invalid:
         _failure(_invoke(tool, arguments), code)
+    _failure(_invoke(tool, None, raw_input="not-json"), "invalid_command")
     _failure(_invoke(tool, {"command": "true"}, is_cancelled=lambda: True), "cancelled")
 
 

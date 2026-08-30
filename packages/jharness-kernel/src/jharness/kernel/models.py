@@ -55,9 +55,9 @@ class ModelOptions:
             expect_number(self.top_p, "top_p")
         if (
             self.max_output_tokens is not None
-            and expect_int(self.max_output_tokens, "max_output_tokens") < 1
+            and expect_int(self.max_output_tokens, "max_output_tokens") < 0
         ):
-            raise ValueError("max_output_tokens must be >= 1")
+            raise ValueError("max_output_tokens must be >= 0")
         if self.stop is not None:
             object.__setattr__(self, "stop", expect_instance_tuple(self.stop, str, "stop"))
         expect_optional_int(self.seed, "seed")
@@ -427,8 +427,6 @@ class ModelResponse:
 
     def __post_init__(self) -> None:
         output = _model_output(self.output, "model response output")
-        if not output:
-            raise ValueError("model response requires output")
         ids = [item.id for item in output if isinstance(item, RuntimeToolCall | ProviderToolCall)]
         if len(ids) != len(set(ids)):
             raise ValueError("model response tool call ids must be unique")
@@ -455,7 +453,7 @@ class ModelResponse:
     def to_assistant_message(self) -> Message:
         """Project the complete response into durable conversation history."""
 
-        return Message.assistant(self.output)
+        return Message.assistant(self.output, metadata=self.metadata)
 
     def runtime_tool_calls(self) -> tuple[RuntimeToolCall, ...]:
         """Return calls that the JHarness runtime must execute."""
@@ -500,6 +498,7 @@ class ModelRuntimeToolCallDelta:
     input_delta: str
     id: str | None = None
     name: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
     def __post_init__(self) -> None:
         expect_nonnegative_int(self.output_index, "tool call delta output_index")
@@ -511,6 +510,11 @@ class ModelRuntimeToolCallDelta:
             expect_str(self.name, "tool call delta name")
         if self.id == "" or self.name == "":
             raise ValueError("tool call delta id and name must not be empty")
+        object.__setattr__(
+            self,
+            "metadata",
+            freeze_mapping(self.metadata, "tool call delta metadata"),
+        )
 
 
 @dataclass(frozen=True, slots=True)

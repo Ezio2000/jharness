@@ -30,7 +30,6 @@ REQUIRED_COMPONENT_FILES: dict[str, set[str]] = {
         "anthropic/messages/__init__.py",
         "anthropic/messages/presets.py",
         "decorators.py",
-        "deepseek/__init__.py",
         "openai/__init__.py",
         "openai/chat/__init__.py",
         "openai/responses/__init__.py",

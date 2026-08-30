@@ -235,10 +235,17 @@ def write_tool_call(writer: DigestWriter, value: RuntimeToolCall) -> None:
     writer.string(value.name)
     if isinstance(value, StructuredToolCall):
         writer.field("arguments")
-        writer.json(value.arguments)
+        if value.arguments is None:
+            writer.none()
+        else:
+            writer.json(value.arguments)
+        writer.field("raw_input")
+        write_optional_string(writer, value.raw_input)
     else:
         writer.field("input")
         writer.string(value.input)
+    writer.field("metadata")
+    writer.json(value.metadata)
 
 
 def _write_provider_tool_call(writer: DigestWriter, value: ProviderToolCall) -> None:

@@ -34,7 +34,8 @@
                   "arguments": {
                     "delay": 0.1,
                     "text": "too late"
-                  }
+                  },
+                  "metadata": {}
                 }
               ],
               "finish_reason": "tool_calls",
