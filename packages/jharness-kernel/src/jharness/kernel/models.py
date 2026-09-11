@@ -28,6 +28,7 @@ from jharness.kernel.messages import (
     ProviderToolStatus,
     RuntimeToolCall,
     RuntimeToolKind,
+    validate_model_output,
 )
 
 if TYPE_CHECKING:
@@ -261,17 +262,6 @@ def _validate_tool_choice_capabilities(
         raise ValueError("model tool_choice_types cannot include provider without provider_tools")
 
 
-def _model_output(value: object, label: str) -> tuple[ModelOutputItem, ...]:
-    if not isinstance(value, tuple):
-        raise TypeError(f"{label} must be a tuple")
-    items = cast(tuple[object, ...], value)
-    if any(
-        not isinstance(item, ContentPart | RuntimeToolCall | ProviderToolCall) for item in items
-    ):
-        raise TypeError(f"{label} contains an unsupported item")
-    return cast(tuple[ModelOutputItem, ...], items)
-
-
 @dataclass(frozen=True, slots=True)
 class ModelCapabilities:
     """Immutable advertised model capabilities."""
@@ -426,7 +416,7 @@ class ModelResponse:
     metadata: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
     def __post_init__(self) -> None:
-        output = _model_output(self.output, "model response output")
+        output = validate_model_output(self.output, "model response output")
         ids = [item.id for item in output if isinstance(item, RuntimeToolCall | ProviderToolCall)]
         if len(ids) != len(set(ids)):
             raise ValueError("model response tool call ids must be unique")

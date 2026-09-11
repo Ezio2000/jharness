@@ -47,6 +47,7 @@ from jharness.models.openai import (
     OpenAIResponsesProfile,
 )
 from jharness.models.openai.responses.stream import OpenAIResponsesStreamDecoder
+from tests.models.support import terminal_response
 
 _OPENAI_WEB = ProviderToolId("openai.responses", "web_search")
 _OPENAI_IMAGE = ProviderToolId("openai.responses", "image_generation")
@@ -168,32 +169,13 @@ class _FailingArtifactStore(_MemoryOpenAIResponsesArtifactStore):
         raise OSError("artifact load failed")
 
 
-def _terminal_response(
-    output: list[dict[str, Any]],
-    *,
-    model: str = "gpt-test",
-    status: str = "completed",
-    tools: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+def _message(message_id: str, content: list[dict[str, Any]], *, status: str) -> dict[str, Any]:
     return {
-        "id": "resp-1",
-        "object": "response",
-        "created_at": 1,
-        "completed_at": 2,
+        "id": message_id,
+        "type": "message",
         "status": status,
-        "error": None,
-        "incomplete_details": ({"reason": "max_output_tokens"} if status == "incomplete" else None),
-        "model": model,
-        "output": output,
-        "previous_response_id": None,
-        "tools": [] if tools is None else tools,
-        "usage": {
-            "input_tokens": 3,
-            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
-            "output_tokens": 2,
-            "total_tokens": 5,
-            "output_tokens_details": {"reasoning_tokens": 1},
-        },
+        "role": "assistant",
+        "content": content,
     }
 
 
@@ -234,9 +216,9 @@ def test_openai_responses_default_profile_is_conservative_and_stateless() -> Non
         "summary": [{"type": "summary_text", "text": "summary"}],
     }
     with pytest.raises(OpenAIResponsesError, match="encrypted_content"):
-        codec.decode_response(_terminal_response([reasoning]))
+        codec.decode_response(terminal_response([reasoning]))
     reasoning["encrypted_content"] = "encrypted-state"
-    response = codec.decode_response(_terminal_response([reasoning]))
+    response = codec.decode_response(terminal_response([reasoning]))
     assert response.metadata["provider"] == "openai-responses"
     replay = codec.encode_request(
         ModelRequest(messages=(Message.user("hello"), response.to_assistant_message()))
@@ -247,7 +229,7 @@ def test_openai_responses_default_profile_is_conservative_and_stateless() -> Non
 
 
 def test_openai_responses_retains_validated_standard_response_envelope() -> None:
-    wire = _terminal_response([])
+    wire = terminal_response([])
     wire.update(
         {
             "service_tier": "priority",
@@ -273,15 +255,13 @@ def test_openai_responses_retains_validated_standard_response_envelope() -> None
 def test_openai_responses_incomplete_details_are_closed_schema(
     reason: str | None, finish_reason: str
 ) -> None:
-    response = _terminal_response(
+    response = terminal_response(
         [
-            {
-                "id": "msg-incomplete",
-                "type": "message",
-                "status": "incomplete",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "partial", "annotations": []}],
-            }
+            _message(
+                "msg-incomplete",
+                [{"type": "output_text", "text": "partial", "annotations": []}],
+                status="incomplete",
+            )
         ],
         status="incomplete",
     )
@@ -420,7 +400,7 @@ def test_openai_responses_requires_its_protocol_minimum_output_token_limit() -> 
 
 def test_openai_responses_strict_envelope_usage_and_empty_output() -> None:
     codec = OpenAIResponsesCodec(model="gpt-test")
-    empty = _terminal_response([])
+    empty = terminal_response([])
     response = codec.decode_response(empty)
     assert response.output == ()
     with pytest.raises(OpenAIResponsesError, match="unsupported field"):
@@ -449,7 +429,7 @@ def test_openai_responses_strict_envelope_usage_and_empty_output() -> None:
         "arguments": "",
     }
     call = cast(
-        StructuredToolCall, codec.decode_response(_terminal_response([function_item])).output[0]
+        StructuredToolCall, codec.decode_response(terminal_response([function_item])).output[0]
     )
     assert call.arguments is None and call.raw_input == ""
 
@@ -481,17 +461,17 @@ def test_openai_responses_provider_calls_reject_nonstandard_items_and_actions() 
     codec = OpenAIResponsesCodec(model="gpt-test", profile=_openai_web_profile())
     base_web = {"id": "ws-1", "type": "web_search_call", "status": "completed"}
     with pytest.raises(OpenAIResponsesError, match="action"):
-        codec.decode_response(_terminal_response([base_web]))
+        codec.decode_response(terminal_response([base_web]))
     with pytest.raises(OpenAIResponsesError, match="action type"):
-        codec.decode_response(_terminal_response([{**base_web, "action": {"type": "other"}}]))
+        codec.decode_response(terminal_response([{**base_web, "action": {"type": "other"}}]))
     with pytest.raises(OpenAIResponsesError, match="unsupported field"):
         codec.decode_response(
-            _terminal_response(
+            terminal_response(
                 [{**base_web, "action": {"type": "search", "query": "q"}, "vendor": True}]
             )
         )
     decoded = codec.decode_response(
-        _terminal_response(
+        terminal_response(
             [
                 {
                     **base_web,
@@ -506,11 +486,11 @@ def test_openai_responses_provider_calls_reject_nonstandard_items_and_actions() 
     )
     assert decoded.provider_tool_calls()[0].arguments["queries"] == ["q1", "q2"]
     assert codec.decode_response(
-        _terminal_response([{**base_web, "action": {"type": "open_page", "url": None}}])
+        terminal_response([{**base_web, "action": {"type": "open_page", "url": None}}])
     ).provider_tool_calls()
     with pytest.raises(OpenAIResponsesError, match="source url"):
         codec.decode_response(
-            _terminal_response(
+            terminal_response(
                 [
                     {
                         **base_web,
@@ -551,7 +531,7 @@ def test_openai_responses_web_search_uses_only_stable_configuration_and_call_fie
         "status": "completed",
         "action": {"type": "search", "queries": ["bridge"]},
     }
-    call = codec.decode_response(_terminal_response([item])).provider_tool_calls()[0]
+    call = codec.decode_response(terminal_response([item])).provider_tool_calls()[0]
     assert call.arguments["queries"] == ["bridge"]
     replay = codec.encode_request(
         ModelRequest(messages=(Message.user("find"), Message.assistant((call,))))
@@ -612,7 +592,7 @@ def test_openai_responses_web_search_uses_only_stable_configuration_and_call_fie
         decoder,
         "response.completed",
         3,
-        response=_terminal_response([item]),
+        response=terminal_response([item]),
     )
     assert terminal is True
     assert decoder.completed_response().output[0] == call
@@ -632,19 +612,19 @@ def test_openai_responses_web_search_uses_only_stable_configuration_and_call_fie
                 )
             )
     with pytest.raises(OpenAIResponsesError, match="unsupported field"):
-        codec.decode_response(_terminal_response([{**item, "results": [{"type": "image_result"}]}]))
+        codec.decode_response(terminal_response([{**item, "results": [{"type": "image_result"}]}]))
 
     image_codec = OpenAIResponsesCodec(
         model="gpt-test", profile=_openai_feature_profile(image_generation=True)
     )
     base_image = {"id": "ig-1", "type": "image_generation_call", "status": "failed"}
-    assert image_codec.decode_response(_terminal_response([base_image])).provider_tool_calls()
+    assert image_codec.decode_response(terminal_response([base_image])).provider_tool_calls()
     with pytest.raises(OpenAIResponsesError, match="unsupported field"):
         image_codec.decode_response(
-            _terminal_response([{**base_image, "result": None, "vendor": True}])
+            terminal_response([{**base_image, "result": None, "vendor": True}])
         )
     with pytest.raises(OpenAIResponsesError, match="incomplete"):
-        image_codec.decode_response(_terminal_response([{**base_image, "status": "incomplete"}]))
+        image_codec.decode_response(terminal_response([{**base_image, "status": "incomplete"}]))
     assert image_codec.encode_request(
         ModelRequest(
             messages=(Message.user("draw"),),
@@ -695,7 +675,7 @@ def test_openai_responses_custom_tool_terminal_history_and_output_round_trip() -
         "input": "*** Begin Patch\n*** End Patch",
     }
 
-    response = codec.decode_response(_terminal_response([wire_item]))
+    response = codec.decode_response(terminal_response([wire_item]))
 
     call = cast(FreeformToolCall, response.runtime_tool_calls()[0])
     assert (call.id, call.name, call.input) == (
@@ -790,7 +770,7 @@ def test_openai_responses_custom_tool_stream_round_trip() -> None:
         decoder,
         "response.completed",
         5,
-        response=_terminal_response([final_item]),
+        response=terminal_response([final_item]),
     )
 
     assert terminal is True
@@ -886,7 +866,7 @@ def test_openai_responses_rejects_non_native_assistant_history() -> None:
 def test_openai_responses_replays_standard_message_phase_and_incomplete_status() -> None:
     codec = OpenAIResponsesCodec(model="gpt-test")
     response = codec.decode_response(
-        _terminal_response(
+        terminal_response(
             [
                 {
                     "id": "msg-1",
@@ -960,7 +940,7 @@ def test_openai_responses_accepts_exact_custom_tool_choice() -> None:
 
 async def test_openai_responses_nonstream_client_preserves_interleaved_output_order() -> None:
     captured: dict[str, object] = {}
-    wire_response = _terminal_response(
+    wire_response = terminal_response(
         [
             {
                 "id": "ws-1",
@@ -968,26 +948,22 @@ async def test_openai_responses_nonstream_client_preserves_interleaved_output_or
                 "status": "completed",
                 "action": {"type": "search", "query": "first"},
             },
-            {
-                "id": "msg-1",
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "one", "annotations": []}],
-            },
+            _message(
+                "msg-1",
+                [{"type": "output_text", "text": "one", "annotations": []}],
+                status="completed",
+            ),
             {
                 "id": "ws-2",
                 "type": "web_search_call",
                 "status": "failed",
                 "action": {"type": "search", "query": "second"},
             },
-            {
-                "id": "msg-2",
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "two", "annotations": []}],
-            },
+            _message(
+                "msg-2",
+                [{"type": "output_text", "text": "two", "annotations": []}],
+                status="completed",
+            ),
         ],
         model="gpt-test",
     )
@@ -1037,7 +1013,7 @@ def test_openai_responses_terminal_function_call_preserves_optional_status() -> 
 
     for status in ("in_progress", "completed", "incomplete"):
         response = codec.decode_response(
-            _terminal_response(
+            terminal_response(
                 [
                     {
                         "id": "fc-1",
@@ -1054,7 +1030,7 @@ def test_openai_responses_terminal_function_call_preserves_optional_status() -> 
         assert call.metadata["responses"]["item"]["status"] == status
 
     response = codec.decode_response(
-        _terminal_response(
+        terminal_response(
             [
                 {
                     "id": "fc-1",
@@ -1076,7 +1052,7 @@ def test_openai_responses_terminal_function_call_preserves_optional_status() -> 
 
     with pytest.raises(OpenAIResponsesError, match="incomplete Responses"):
         codec.decode_response(
-            _terminal_response(
+            terminal_response(
                 [
                     {
                         "id": "fc-1",
@@ -1104,7 +1080,7 @@ def test_openai_responses_runtime_calls_round_trip_standard_metadata_and_raw_arg
         "caller": {"type": "program", "caller_id": "program-1"},
         "namespace": "tools",
     }
-    response = codec.decode_response(_terminal_response([item]))
+    response = codec.decode_response(terminal_response([item]))
     call = cast(StructuredToolCall, response.runtime_tool_calls()[0])
     assert call.arguments is None and call.raw_input == "{"
     payload = codec.encode_request(
@@ -1112,10 +1088,10 @@ def test_openai_responses_runtime_calls_round_trip_standard_metadata_and_raw_arg
     )
     assert cast(list[dict[str, Any]], payload["input"])[1] == item
     with pytest.raises(OpenAIResponsesError, match="unsupported field"):
-        codec.decode_response(_terminal_response([{**item, "reasoning_content": "vendor"}]))
+        codec.decode_response(terminal_response([{**item, "reasoning_content": "vendor"}]))
     with pytest.raises(OpenAIResponsesError, match="custom_tool_call contains unsupported field"):
         codec.decode_response(
-            _terminal_response(
+            terminal_response(
                 [
                     {
                         "id": "ct-1",
@@ -1138,7 +1114,7 @@ def test_openai_responses_reasoning_preserves_an_absent_status() -> None:
         "type": "reasoning",
         "summary": [{"type": "summary_text", "text": "summary"}],
     }
-    response = codec.decode_response(_terminal_response([reasoning]))
+    response = codec.decode_response(terminal_response([reasoning]))
     payload = codec.encode_request(
         ModelRequest(messages=(Message.user("q"), response.to_assistant_message()))
     )
@@ -1228,7 +1204,7 @@ def test_openai_responses_reasoning_sse_tracks_open_part_and_uses_terminal_respo
         decoder,
         "response.completed",
         9,
-        response=_terminal_response([reasoning_item]),
+        response=terminal_response([reasoning_item]),
     )
 
     assert len(reasoning_deltas) == 1
@@ -1292,7 +1268,7 @@ def test_openai_responses_web_search_completed_lifecycle_is_terminal() -> None:
         decoder,
         "response.completed",
         4,
-        response=_terminal_response([final_item]),
+        response=terminal_response([final_item]),
     )
 
     deltas = [added[0], lifecycle[0]]
@@ -1483,7 +1459,7 @@ def test_openai_responses_terminal_response_accepts_provider_status_matching_out
         decoder,
         "response.completed",
         3,
-        response=_terminal_response([final_item], model="gpt-test"),
+        response=terminal_response([final_item], model="gpt-test"),
     )
 
     assert terminal is True
@@ -1539,7 +1515,7 @@ def test_openai_responses_terminal_response_rejects_provider_status_mismatching_
             decoder,
             "response.completed",
             3,
-            response=_terminal_response([terminal_item], model="gpt-test"),
+            response=terminal_response([terminal_item], model="gpt-test"),
         )
 
 
@@ -1557,13 +1533,7 @@ def test_openai_responses_output_text_annotation_event_validates_the_open_messag
         "response.output_item.added",
         1,
         output_index=0,
-        item={
-            "id": "msg-1",
-            "type": "message",
-            "status": "in_progress",
-            "role": "assistant",
-            "content": [],
-        },
+        item=_message("msg-1", [], status="in_progress"),
     )
     _stream_event(
         decoder,
@@ -1608,13 +1578,7 @@ def test_openai_responses_output_text_annotation_event_validates_the_open_messag
 def test_openai_responses_text_stream_validates_nested_standard_shapes() -> None:
     codec = OpenAIResponsesCodec(model="gpt-test")
     decoder = OpenAIResponsesStreamDecoder(codec, codec.profile)
-    initial_item: dict[str, Any] = {
-        "id": "msg-stream",
-        "type": "message",
-        "status": "in_progress",
-        "role": "assistant",
-        "content": [],
-    }
+    initial_item: dict[str, Any] = _message("msg-stream", [], status="in_progress")
     final_part: dict[str, Any] = {
         "type": "output_text",
         "text": "hello",
@@ -1699,7 +1663,7 @@ def test_openai_responses_text_stream_validates_nested_standard_shapes() -> None
         decoder,
         "response.completed",
         7,
-        response=_terminal_response([final_item]),
+        response=terminal_response([final_item]),
     )
     assert terminal is True
 
@@ -1770,7 +1734,7 @@ def test_openai_responses_provider_only_terminal_response_is_valid() -> None:
         model="gpt-test",
         profile=profile,
     ).decode_response(
-        _terminal_response(
+        terminal_response(
             [
                 {
                     "id": "ws-1",
@@ -1791,12 +1755,9 @@ def test_openai_responses_provider_only_terminal_response_is_valid() -> None:
 
 def test_openai_responses_validates_and_replays_output_text_metadata() -> None:
     codec = OpenAIResponsesCodec(model="gpt-test")
-    item = {
-        "id": "msg-metadata",
-        "type": "message",
-        "status": "completed",
-        "role": "assistant",
-        "content": [
+    item = _message(
+        "msg-metadata",
+        [
             {
                 "type": "output_text",
                 "text": "source",
@@ -1828,8 +1789,9 @@ def test_openai_responses_validates_and_replays_output_text_metadata() -> None:
                 ],
             }
         ],
-    }
-    response = codec.decode_response(_terminal_response([item]))
+        status="completed",
+    )
+    response = codec.decode_response(terminal_response([item]))
     replay = codec.encode_request(
         ModelRequest(messages=(Message.user("question"), response.to_assistant_message()))
     )
@@ -1848,17 +1810,7 @@ def test_openai_responses_rejects_nonstandard_output_metadata(content: dict[str,
     codec = OpenAIResponsesCodec(model="gpt-test")
     with pytest.raises(OpenAIResponsesError, match="unsupported"):
         codec.decode_response(
-            _terminal_response(
-                [
-                    {
-                        "id": "msg-invalid",
-                        "type": "message",
-                        "status": "completed",
-                        "role": "assistant",
-                        "content": [content],
-                    }
-                ]
-            )
+            terminal_response([_message("msg-invalid", [content], status="completed")])
         )
 
 
@@ -1871,17 +1823,17 @@ def test_openai_responses_reasoning_requires_summary_and_closed_blocks() -> None
         "encrypted_content": "encrypted",
     }
     with pytest.raises(OpenAIResponsesError, match="requires summary"):
-        codec.decode_response(_terminal_response([invalid]))
+        codec.decode_response(terminal_response([invalid]))
     invalid["summary"] = [{"type": "summary_text", "text": "x", "vendor": True}]
     with pytest.raises(OpenAIResponsesError, match="unsupported field"):
-        codec.decode_response(_terminal_response([invalid]))
+        codec.decode_response(terminal_response([invalid]))
 
 
 def test_openai_responses_replays_stored_reasoning_without_encrypted_content() -> None:
     profile = OpenAIResponsesProfile(store=True, include=frozenset())
     codec = OpenAIResponsesCodec(model="gpt-test", profile=profile)
     response = codec.decode_response(
-        _terminal_response(
+        terminal_response(
             [
                 {
                     "id": "reasoning-stored",
@@ -1902,7 +1854,7 @@ def test_openai_responses_replays_stored_reasoning_without_encrypted_content() -
             model="gpt-test",
             profile=_openai_web_profile(),
         ).decode_response(
-            _terminal_response(
+            terminal_response(
                 [
                     {
                         "id": "ws-2",
@@ -2016,15 +1968,13 @@ async def test_runtime_sends_file_typed_image_data_url_as_responses_image() -> N
         captured["body"] = json.loads(raw.content)
         return httpx.Response(
             200,
-            json=_terminal_response(
+            json=terminal_response(
                 [
-                    {
-                        "id": "msg-1",
-                        "type": "message",
-                        "status": "completed",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "done", "annotations": []}],
-                    }
+                    _message(
+                        "msg-1",
+                        [{"type": "output_text", "text": "done", "annotations": []}],
+                        status="completed",
+                    )
                 ],
                 model="vision-test",
             ),
@@ -2062,7 +2012,7 @@ def test_openai_responses_image_generation_decodes_media_type_and_replays_base64
         model="gpt-test",
         profile=_openai_feature_profile(image_generation=True),
     )
-    wire = _terminal_response(
+    wire = terminal_response(
         [
             {
                 "id": "ig-1",
@@ -2097,7 +2047,7 @@ def test_openai_responses_image_generation_decodes_media_type_and_replays_base64
         "result": _JPEG_BASE64,
     }
 
-    mismatched = _terminal_response(
+    mismatched = terminal_response(
         cast(list[dict[str, Any]], wire["output"]),
         tools=[{"type": "image_generation", "output_format": "png"}],
     )
@@ -2112,7 +2062,7 @@ async def test_openai_responses_image_generation_externalizes_and_hydrates_artif
     store = _MemoryOpenAIResponsesArtifactStore()
     captured: list[dict[str, Any]] = []
     responses = [
-        _terminal_response(
+        terminal_response(
             [
                 {
                     "id": "ig-1",
@@ -2123,15 +2073,13 @@ async def test_openai_responses_image_generation_externalizes_and_hydrates_artif
             ],
             tools=[{"type": "image_generation", "output_format": "jpeg"}],
         ),
-        _terminal_response(
+        terminal_response(
             [
-                {
-                    "id": "msg-2",
-                    "type": "message",
-                    "status": "completed",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "saved", "annotations": []}],
-                }
+                _message(
+                    "msg-2",
+                    [{"type": "output_text", "text": "saved", "annotations": []}],
+                    status="completed",
+                )
             ]
         ),
     ]
@@ -2211,7 +2159,7 @@ async def test_openai_responses_image_generation_externalizes_and_hydrates_artif
 
 async def test_openai_responses_unrequested_inline_image_result_requires_artifact_store() -> None:
     profile = _openai_feature_profile(image_generation=True)
-    wire = _terminal_response(
+    wire = terminal_response(
         [
             {
                 "id": "ig-unrequested",
@@ -2300,7 +2248,7 @@ async def test_openai_responses_image_artifact_store_return_is_fully_validated(
     message: str,
 ) -> None:
     profile = _openai_feature_profile(image_generation=True)
-    wire = _terminal_response(
+    wire = terminal_response(
         [
             {
                 "id": "ig-invalid-artifact",
@@ -2339,7 +2287,7 @@ async def test_openai_responses_image_artifact_store_return_is_fully_validated(
 
 async def test_openai_responses_image_artifact_save_failure_aborts_the_model_response() -> None:
     profile = _openai_feature_profile(image_generation=True)
-    wire = _terminal_response(
+    wire = terminal_response(
         [
             {
                 "id": "ig-save-failure",
@@ -2477,7 +2425,7 @@ async def test_openai_responses_terminal_partial_or_failed_image_results_are_ext
         "status": status,
         "result": _JPEG_BASE64,
     }
-    wire = _terminal_response(
+    wire = terminal_response(
         [item],
         tools=[{"type": "image_generation", "output_format": "jpeg"}],
     )
@@ -2520,7 +2468,7 @@ async def test_openai_responses_streamed_image_result_is_externalized_after_live
         "status": "completed",
         "result": _JPEG_BASE64,
     }
-    terminal = _terminal_response(
+    terminal = terminal_response(
         [final_item],
         tools=[{"type": "image_generation", "output_format": "jpeg"}],
     )

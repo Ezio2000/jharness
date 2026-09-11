@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TypedDict, Unpack
-
-import httpx
+from typing import Unpack
 
 from jharness.kernel import (
     DeltaSink,
@@ -16,6 +13,7 @@ from jharness.kernel import (
     RunContext,
 )
 from jharness.models._http import (
+    ModelClientOptions,
     ModelErrorPolicy,
     decode_json_object,
     invoke_json_model,
@@ -31,14 +29,8 @@ from jharness.models.openai.chat.stream import OpenAIChatStreamDecoder
 _REQUEST_ID_HEADERS = ("x-request-id",)
 
 
-class _OpenAIChatModelOptions(TypedDict, total=False):
+class _OpenAIChatModelOptions(ModelClientOptions, total=False):
     profile: OpenAIChatProfile | None
-    timeout: float | httpx.Timeout | None
-    headers: Mapping[str, str] | None
-    client: httpx.AsyncClient | None
-    max_response_body_bytes: int
-    max_sse_line_bytes: int
-    max_sse_event_bytes: int
 
 
 class OpenAIChatModel:
@@ -65,12 +57,8 @@ class OpenAIChatModel:
         self.model = config.model
         self.profile = config.profile
         self.codec = OpenAIChatCodec(model=config.model, profile=config.profile)
-        self._timeout = config.timeout
-        self._max_response_body_bytes = config.max_response_body_bytes
-        self._max_sse_line_bytes = config.max_sse_line_bytes
-        self._max_sse_event_bytes = config.max_sse_event_bytes
+        self._transport = config.transport
         self._headers = dict(config.headers)
-        self._client = config.client
         self._errors = ModelErrorPolicy(
             provider=config.profile.name,
             codec_error=OpenAIChatError,
@@ -95,8 +83,7 @@ class OpenAIChatModel:
         if stream:
             decoder = OpenAIChatStreamDecoder(self.profile)
             return await invoke_sse_model(
-                client=self._client,
-                timeout=self._timeout,
+                transport=self._transport,
                 context=context,
                 url=self._chat_completions_url(),
                 payload=lambda: self.codec.encode_request(request, stream=True),
@@ -106,13 +93,9 @@ class OpenAIChatModel:
                 emit_delta=emit_delta,
                 errors=self._errors,
                 incomplete_error="chat completion stream ended before [DONE]",
-                max_response_body_bytes=self._max_response_body_bytes,
-                max_sse_line_bytes=self._max_sse_line_bytes,
-                max_sse_event_bytes=self._max_sse_event_bytes,
             )
         return await invoke_json_model(
-            client=self._client,
-            timeout=self._timeout,
+            transport=self._transport,
             context=context,
             url=self._chat_completions_url(),
             payload=lambda: self.codec.encode_request(request, stream=False),
@@ -120,7 +103,6 @@ class OpenAIChatModel:
             decode=self.codec.decode_response,
             errors=self._errors,
             response_shape_error="chat completion response must be an object",
-            max_response_body_bytes=self._max_response_body_bytes,
         )
 
     def _decode_sse_data(

@@ -8,13 +8,10 @@ from typing import Any, cast
 import pytest
 
 from jharness.kernel import (
-    Checkpoint,
     ContentPart,
     DeltaSink,
-    Event,
     EventKind,
     Failed,
-    Invocation,
     Message,
     Model,
     ModelCapabilities,
@@ -41,6 +38,7 @@ from jharness.tools.agent import (
     extract_agent_wait,
     resume_agent,
 )
+from tests.support import collect_invocation
 
 
 class _Backend:
@@ -248,13 +246,6 @@ class _MultipleAgentCallsModel(Model):
         )
 
 
-async def _collect(invocation: Invocation) -> tuple[Checkpoint, list[Event]]:
-    events = invocation.events()
-    result_task = asyncio.create_task(invocation.result())
-    observed = [event async for event in events]
-    return await result_task, observed
-
-
 def _runtime(model: Model, *tools: object) -> Runtime:
     return Runtime(
         model=model,
@@ -287,7 +278,7 @@ def test_runtime_agent_wait_wire_roundtrip_and_fresh_runtime_resume(
 
     initial_model = _WaitingAgentModel(tool_name, arguments)
     paused, events = asyncio.run(
-        _collect(_runtime(initial_model, tool).start((Message.user("Delegate work"),)))
+        collect_invocation(_runtime(initial_model, tool).start((Message.user("Delegate work"),)))
     )
     assert isinstance(paused.snapshot.state, Suspended)
     assert paused.snapshot.state.resume_to.kind == "planning"
@@ -308,7 +299,7 @@ def test_runtime_agent_wait_wire_roundtrip_and_fresh_runtime_resume(
     )
     resumed_model = _WaitingAgentModel(tool_name, arguments)
     completed, resume_events = asyncio.run(
-        _collect(resume_agent(_runtime(resumed_model, tool), restored, completion))
+        collect_invocation(resume_agent(_runtime(resumed_model, tool), restored, completion))
     )
     assert completed.snapshot.status == "completed"
     assert resumed_model.observed_completion is not None
@@ -362,7 +353,7 @@ def test_runtime_agent_get_then_cancel_observes_acknowledged_cancellation() -> N
 def test_runtime_disallowed_multiple_foreground_agents_fail_before_start() -> None:
     backend = _Backend(AgentSnapshot("unused", "One", "running", False))
     checkpoint, events = asyncio.run(
-        _collect(
+        collect_invocation(
             _runtime(_MultipleAgentCallsModel(), AgentTool(backend)).start(
                 (Message.user("Delegate one task"),)
             )

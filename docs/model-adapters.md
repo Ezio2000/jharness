@@ -52,38 +52,21 @@ model = OpenAIResponsesModel(
 )
 ```
 
-Profiles declare endpoint capabilities and request-shape differences. The runtime
-checks those capabilities before invocation instead of guessing from a model name.
-Every profile carries one immutable `ModelCapabilities` value, and the model client
-returns that same value unchanged. There is no second set of per-feature profile
-booleans for the client to translate.
+Each profile owns one immutable `ModelCapabilities`, returned unchanged by its client.
+The runtime checks requests against that declaration before network invocation.
+Capabilities are host assertions for the exact model and endpoint, not live discovery:
+an overstated profile may still be rejected, ignored, or degraded by the provider.
 
-Built-in profile identifiers use the same concise API vocabulary as their Python
-types: `openai-chat`, `openai-responses`, and `anthropic-messages`.
+`profile.name` identifies the adapter in `ModelResponse.metadata["provider"]` and
+`ModelErrorInfo.provider`. `to_assistant_message()` preserves it in durable history and
+traces. Defaults are `openai-chat`, `openai-responses`, and `anthropic-messages`.
 
-`profile.name` is an observable adapter identity, not a display label or a supplier
-field. It is emitted as `ModelResponse.metadata["provider"]` and
-`ModelErrorInfo.provider`. `ModelResponse.to_assistant_message()` copies response
-metadata onto the assistant turn, so checkpoints, history, and traces retain this
-identity without a second compatibility field.
-
-The default `OpenAIResponsesProfile` is deliberately conservative: text input and
-output, runtime functions, streaming, and usage only. It does not claim image/file
-input, structured output, JSON mode, or provider-hosted tools for an arbitrary model
-identifier. `AnthropicMessagesProfile` likewise advertises no hosted tool by default.
-The official `openai_responses_profile()` and `anthropic_messages_profile()` factories
-enable the corresponding protocol-owned hosted-tool identities. Hosted-tool wire
-mapping is closed over the documented protocol schema; profiles cannot install custom
-codecs or alternate field sets. Selecting an official profile is the host's explicit
-confirmation that its chosen endpoint and model support those advertised capabilities.
-
-Capabilities are trusted host declarations, not results of endpoint discovery. The
-runtime rejects a request that exceeds the selected profile before network invocation,
-but it cannot prove that an advertised capability is implemented by the configured
-model. If a profile overstates support, the provider may reject the request, silently
-ignore the field or tool, or return a normal response after degrading the input. Keep
-generic profiles conservative and opt in only to capabilities verified for the exact
-model and endpoint.
+The default `OpenAIResponsesProfile` supports text input/output, runtime function and
+custom tools, streaming, and usage. It enables no image/file input, structured output,
+JSON mode, or hosted tools. `AnthropicMessagesProfile` also enables no hosted tools.
+Official profile factories declare the supported hosted-tool identities; select them
+only when the endpoint and model implement their advertised capabilities. Profiles
+configure the standard protocol wire and cannot inject custom codecs or field sets.
 
 For example, narrow Chat Completions to text input while retaining its other default
 capabilities:
@@ -103,60 +86,35 @@ text_only = OpenAIChatProfile(
 )
 ```
 
-`ModelCapabilities.tool_choice_types` declares the exact accepted choice vocabulary;
-`parallel_runtime_tool_calls` and `parallel_runtime_tool_call_control` describe runtime-owned calls
-only. The latter says whether a model that may return parallel runtime calls can honor
-`allow_parallel_runtime_tool_calls=False`; provider-only selection neither requires that
-control nor emits its wire field. `seed` declares whether `ModelOptions.seed` is
-accepted. Each adapter has one standard protocol wire shape; profiles declare model
-capabilities and documented request options, not alternate provider dialects.
+`tool_choice_types` declares the accepted choice vocabulary. The capability flags
+`parallel_runtime_tool_calls` and `parallel_runtime_tool_call_control` apply to runtime
+calls; the latter controls whether `allow_parallel_runtime_tool_calls=False` is
+supported. Provider-only selection neither requires that control nor emits its wire
+field. `seed` declares support for `ModelOptions.seed`.
 
 ## Capability and Execution Boundaries
 
-The kernel values deliberately do not copy a supplier's feature list:
+Native modalities describe what the model understands or produces. Runtime tools are
+executed by JHarness; provider-hosted tools are executed remotely. A hosted image tool
+can therefore return an image even when the model's native output modality is text.
+The [architecture](architecture.md#model-boundary) defines these kernel values and
+ownership boundaries.
 
-| Capability | How it is declared | Who performs it |
-| --- | --- | --- |
-| Image understanding | `"image"` in `ModelCapabilities.input_modalities` and an image `ContentPart` in the request | The model |
-| Native image output | `"image"` in `ModelCapabilities.output_modalities` | The model |
-| Host function call | `RuntimeToolSpec` (`StructuredToolSpec` or `FreeformToolSpec`) in `ModelRequest.runtime_tools`; returned as the matching `RuntimeToolCall` | JHarness runtime and the host tool catalog |
-| Hosted image generation or web search | Namespaced `ProviderToolId` in `ModelCapabilities.provider_tools`, requested with `ProviderToolSpec`, and returned as `ProviderToolCall` | The remote provider |
-| Mixed protocol result | `ModelResponse.output` containing ordered `ContentPart`, `RuntimeToolCall`, and `ProviderToolCall` values | The adapter maps it; the kernel preserves it |
+| Adapter/profile | Default model input | Native model output | Runtime tools | Hosted tools |
+| --- | --- | --- | --- | --- |
+| OpenAI Chat | Text, image | Text | Function calls | None |
+| Anthropic Messages | Text, image, file | Text, container-upload file references | Client `tool_use` | Official web-search preset |
+| OpenAI Responses default | Text | Text | Function and custom calls | None |
+| OpenAI Responses official/explicit | Host-declared subset of text, image, file | Text | Function and custom calls | Official web-search and image-generation presets |
 
-A hosted image-generation result may contain an image in
-`ProviderToolCall.output` even when the model itself advertises only text output. The
-provider tool declaration says how and where the image is produced; it is not a
-substitute for declaring image understanding.
-
-The current adapters expose these boundaries as follows:
-
-| Adapter/profile | Default model input | Native model output | Runtime tools | Provider-hosted tools | Conversation rule |
-| --- | --- | --- | --- | --- | --- |
-| OpenAI Chat | Text and image | Text | Function tools | None | Complete JHarness history is encoded as messages |
-| Anthropic Messages | Text, image, and file | Text and container-upload file references | Client `tool_use` blocks | Official web-search preset | Complete JHarness history is encoded as Messages blocks |
-| OpenAI Responses default | Text | Text | Function and custom tools | None | Complete ordered history is encoded as Responses input items with `store=false`; encrypted reasoning is requested for stateless replay |
-| OpenAI Responses official/explicit profile | Host-declared subset of text, image, and file | Text | Function and custom tools | Official web-search and image-generation presets | Profile storage policy and complete ordered history are authoritative |
-
-Profiles remain authoritative. The runtime rejects request modalities and tool
-identities that the selected explicit profile does not advertise before network
-invocation.
-
-### Profile Ownership
-
-| Layer | Declares | Must not do |
-| --- | --- | --- |
-| Kernel `ModelCapabilities` | Exact model modalities, tool-choice types, runtime/provider tools, parallel behavior, structured output, seed, streaming, and usage | Name a supplier or encode HTTP/SSE fields |
-| Protocol profile | One `ModelCapabilities` plus immutable wire policies for Chat Completions, Responses, or Messages | Duplicate capabilities as `supports_*` flags |
-| Official preset factory | Add documented hosted-tool identities and model capabilities | Add undocumented wire variants or infer behavior from model names |
-| Protocol codec/client | Consume the profile, validate wire data, and expose `profile.capabilities` unchanged | Infer features from model names or translate a second capability representation |
+All adapters encode complete JHarness history. Responses storage and stateless
+reasoning replay are described under [storage policy](#responses-storage-policy).
 
 ### Hosted-Tool Presets
 
-Official hosted-tool presets are supplier-owned declarations in `jharness-models`.
-They are not local tools and never enter JHarness binding, approval, batching, or
-execution. A supplier profile declares what may be requested; the
-`Runtime(..., provider_tools=...)` argument still declares what this invocation
-actually enables.
+A profile declares which provider tools may be requested;
+`Runtime(..., provider_tools=...)` enables them for the invocation. Hosted presets
+bypass local binding, approval, batching, and execution.
 
 OpenAI Responses exposes web search and image generation:
 
@@ -223,11 +181,9 @@ The Anthropic preset accepts the current `web_search_20250305`,
 the basic `web_search_20250305` declaration; select a later capability-keyed variant
 explicitly when the chosen model and deployment support it.
 
-Constructing either official profile sends no tool declaration by itself. The generic
-`OpenAIResponsesProfile()` and `AnthropicMessagesProfile()` classes remain available
-for narrower, host-composed capability sets. A third-party endpoint can use an adapter
-through `base_url` and `model` only when it implements that protocol's standard wire
-contract; vendor-specific deviations belong in a separate user-owned adapter.
+The generic profile classes allow narrower capability sets. Third-party endpoints
+must implement the selected protocol's standard wire contract; vendor-specific
+deviations require a user-owned adapter.
 
 ### Vision and Hosted Image Generation
 
@@ -352,25 +308,19 @@ runtime = Runtime(
 )
 ```
 
-The client persists the decoded image before returning `ModelResponse` and replaces
-its inline base64 with an `ArtifactRef`. Before a later model turn, it loads that
-artifact into an invocation-local wire request. Durable checkpoints and repository
-history therefore never retain generated image base64. Partial streaming images remain
-live-only. The JHarness tool registry is not involved.
+The client saves decoded image bytes before returning `ModelResponse`, replacing
+base64 with an `ArtifactRef`. Later turns load those bytes into an invocation-local
+request. Durable history contains references; partial streaming images remain live-only.
 
-`call_id` is provider-controlled and response-scoped. An artifact store must not use it
-as a filesystem path or assume it is globally unique. A successful save is durable;
-repeated saves of the same bytes are idempotent, and an existing reference is never
-reassigned to different content. The returned `ArtifactRef` must remain stable across
-process restarts and carry exact `size_bytes` and SHA-256 metadata. A load either returns
-the exact referenced bytes or fails the model turn.
+The store must durably and idempotently save bytes, keep references stable across
+restarts, and return exact `size_bytes` and SHA-256 metadata. Loads return the exact
+referenced bytes or fail the turn. Provider-controlled, response-scoped `call_id` values
+are neither filesystem paths nor globally unique storage keys.
 
-Artifact saving happens before the response checkpoint is committed. Cancellation,
-subsequent validation failure, or repository failure can therefore leave an unreferenced
-save. The host must retain reachable artifacts for at least as long as their checkpoints,
-configure the same store when recovering a run, and garbage-collect staged artifacts
-that never become reachable from committed history. Content-addressed storage, as in the
-example, makes repeated saves safe and simplifies that cleanup.
+Saving precedes checkpoint commit, so cancellation, validation, or repository failure
+can leave unreferenced artifacts. Retain reachable artifacts for the checkpoint
+lifetime, use the same store during recovery, and collect uncommitted saves.
+Content-addressed storage, as above, supports idempotency and cleanup.
 
 ### Responses Storage Policy
 
@@ -417,6 +367,9 @@ cancellation propagate unchanged.
 
 ## Ordered Responses and Streaming
 
+Use `runtime_tool_calls()`, `provider_tool_calls()`, and `visible_parts()` to project
+the ordered output without maintaining separate result arrays.
+
 Chat Completions and Messages are normalized into the same ordered kernel result as
 Responses. Messages retains native block order; Chat Completions places its content
 before the provider-ordered call array because that wire protocol exposes them as
@@ -447,15 +400,8 @@ and SSE event defaults to 64 MiB because an image-generation result can contain 
 image data. Every bound is configurable with the corresponding positive
 `max_response_body_bytes`, `max_sse_line_bytes`, or `max_sse_event_bytes` option.
 
-Provider HTTP/SSE envelopes and codecs stay in `jharness.models`. An adapter may retain
-selected native item data in explicit `ContentPart.data`, `metadata`, or
-`ProviderToolCall` fields when the complete ordered history must round-trip, but those
-opaque details do not become general kernel semantics. The package implements OpenAI
-Chat Completions, Anthropic Messages, and OpenAI Responses. Hosted tools
-are available only when explicitly advertised by the selected profile and requested
-through `ProviderToolSpec`. Responses implements fixed official mappings for image
-generation and web search; Anthropic Messages implements its fixed official web-search
-mapping. Profiles cannot inject alternate declarations, result blocks, lifecycle
-events, or configuration fields. Chat Completions remains a runtime-tool protocol.
-Provider-managed conversation state, batch jobs, and file-upload management remain
-outside this package.
+Adapters retain selected native data in `ContentPart.data`, `metadata`, or
+`ProviderToolCall` fields for complete history round-trips. These fields do not add
+provider-specific kernel semantics. Hosted-tool mappings are fixed by each protocol;
+Chat Completions supports runtime tools only. Provider-managed conversation state,
+batch jobs, and file-upload management remain outside this package.

@@ -96,104 +96,108 @@ def _invoke(
     )
 
 
+def _question(kind: str, prompt: str, **fields: Any) -> dict[str, Any]:
+    return {"id": "q", "kind": kind, "prompt": prompt, **fields}
+
+
+def _ab_options() -> list[dict[str, str]]:
+    return [{"value": "a", "label": "A"}, {"value": "b", "label": "B"}]
+
+
 def _all_questions() -> list[dict[str, Any]]:
     return [
-        {
-            "id": "confirmed",
-            "kind": "confirm",
-            "prompt": "Proceed?",
-            "description": "Confirm the complete operation",
-            "required": True,
-            "default": False,
-        },
-        {
-            "id": "database",
-            "kind": "single_choice",
-            "prompt": "Choose a database",
-            "required": True,
-            "options": [
-                {
-                    "value": "postgres",
-                    "label": "PostgreSQL",
-                    "description": "Server database",
-                },
+        _question(
+            "confirm",
+            "Proceed?",
+            id="confirmed",
+            description="Confirm the complete operation",
+            required=True,
+            default=False,
+        ),
+        _question(
+            "single_choice",
+            "Choose a database",
+            id="database",
+            required=True,
+            options=[
+                {"value": "postgres", "label": "PostgreSQL", "description": "Server database"},
                 {"value": "sqlite", "label": "SQLite"},
             ],
-            "allow_custom": True,
-            "default": "postgres",
-        },
-        {
-            "id": "features",
-            "kind": "multiple_choice",
-            "prompt": "Choose features",
-            "required": True,
-            "options": [
+            allow_custom=True,
+            default="postgres",
+        ),
+        _question(
+            "multiple_choice",
+            "Choose features",
+            id="features",
+            required=True,
+            options=[
                 {"value": "cache", "label": "Cache"},
                 {"value": "audit", "label": "Audit"},
                 {"value": "search", "label": "Search"},
             ],
-            "allow_custom": False,
-            "min_selections": 1,
-            "max_selections": 2,
-            "default": ["cache"],
-        },
-        {
-            "id": "notes",
-            "kind": "text",
-            "prompt": "Add notes",
-            "required": True,
-            "multiline": True,
-            "placeholder": "Implementation constraints",
-            "min_length": 2,
-            "max_length": 80,
-            "default": "Durable",
-        },
-        {
-            "id": "retries",
-            "kind": "number",
-            "prompt": "Maximum retries",
-            "required": True,
-            "minimum": 0,
-            "maximum": 10,
-            "step": 2,
-            "integer_only": True,
-            "default": 2,
-        },
-        {
-            "id": "deadline",
-            "kind": "date",
-            "prompt": "Choose a deadline",
-            "required": True,
-            "minimum": "2026-07-01",
-            "maximum": "2026-12-31",
-            "default": "2026-08-15",
-        },
-        {
-            "id": "confidence",
-            "kind": "scale",
-            "prompt": "Rate confidence",
-            "required": True,
-            "minimum": 1,
-            "maximum": 5,
-            "step": 0.5,
-            "minimum_label": "Low",
-            "maximum_label": "High",
-            "default": 3,
-        },
-        {
-            "id": "priorities",
-            "kind": "ranking",
-            "prompt": "Rank priorities",
-            "required": True,
-            "options": [
+            allow_custom=False,
+            min_selections=1,
+            max_selections=2,
+            default=["cache"],
+        ),
+        _question(
+            "text",
+            "Add notes",
+            id="notes",
+            required=True,
+            multiline=True,
+            placeholder="Implementation constraints",
+            min_length=2,
+            max_length=80,
+            default="Durable",
+        ),
+        _question(
+            "number",
+            "Maximum retries",
+            id="retries",
+            required=True,
+            minimum=0,
+            maximum=10,
+            step=2,
+            integer_only=True,
+            default=2,
+        ),
+        _question(
+            "date",
+            "Choose a deadline",
+            id="deadline",
+            required=True,
+            minimum="2026-07-01",
+            maximum="2026-12-31",
+            default="2026-08-15",
+        ),
+        _question(
+            "scale",
+            "Rate confidence",
+            id="confidence",
+            required=True,
+            minimum=1,
+            maximum=5,
+            step=0.5,
+            minimum_label="Low",
+            maximum_label="High",
+            default=3,
+        ),
+        _question(
+            "ranking",
+            "Rank priorities",
+            id="priorities",
+            required=True,
+            options=[
                 {"value": "correctness", "label": "Correctness"},
                 {"value": "speed", "label": "Speed"},
                 {"value": "simplicity", "label": "Simplicity"},
             ],
-            "min_ranked": 2,
-            "max_ranked": 3,
-            "default": ["correctness", "simplicity"],
-        },
+            min_ranked=2,
+            max_ranked=3,
+            default=["correctness", "simplicity"],
+        ),
     ]
 
 
@@ -446,12 +450,7 @@ def test_request_id_length_prefix_prevents_run_and_call_colon_collisions() -> No
 
 
 def test_question_defaults_are_ui_hints_and_omitted_common_defaults_normalize() -> None:
-    question = {
-        "id": "notes",
-        "kind": "text",
-        "prompt": "Notes?",
-        "default": "suggested only",
-    }
+    question = _question("text", "Notes?", id="notes", default="suggested only")
     result = _invoke(AskQuestionTool(), {"questions": [question]})
     assert isinstance(result, WaitingResult)
     structured = thaw_json_value(result.outcome.structured_content)
@@ -481,249 +480,121 @@ def test_cancel_requested_precedes_argument_validation() -> None:
         {"questions": [{"id": "q", "prompt": "Missing kind"}]},
         {"questions": [{"id": "q", "kind": 1, "prompt": "Bad kind"}]},
         {"questions": [{"id": "q", "kind": "unknown", "prompt": "Bad kind"}]},
-        {"questions": [{"id": "bad id", "kind": "confirm", "prompt": "Bad id"}]},
+        {"questions": [_question("confirm", "Bad id", id="bad id")]},
         {"questions": [{"id": "q", "kind": "confirm"}]},
-        {"questions": [{"id": "q", "kind": "confirm", "prompt": "Extra", "extra": True}]},
+        {"questions": [_question("confirm", "Extra", extra=True)]},
         {"questions": [{"id": "q", "kind": "confirm", "prompt": 1, "required": True}]},
-        {"questions": [{"id": "q", "kind": "confirm", "prompt": "Required", "required": 1}]},
+        {"questions": [_question("confirm", "Required", required=1)]},
+        {"questions": [_question("single_choice", "Options", options="not-an-array")]},
         {
             "questions": [
-                {
-                    "id": "q",
-                    "kind": "single_choice",
-                    "prompt": "Options",
-                    "options": "not-an-array",
-                }
+                _question("single_choice", "Options", options=[{"value": "a", "label": "A"}])
             ]
         },
         {
             "questions": [
-                {
-                    "id": "q",
-                    "kind": "single_choice",
-                    "prompt": "Options",
-                    "options": [{"value": "a", "label": "A"}],
-                }
+                _question("single_choice", "Options", options=[1, {"value": "b", "label": "B"}])
             ]
         },
         {
             "questions": [
-                {
-                    "id": "q",
-                    "kind": "single_choice",
-                    "prompt": "Options",
-                    "options": [1, {"value": "b", "label": "B"}],
-                }
+                _question(
+                    "single_choice",
+                    "Options",
+                    options=[{"value": "a"}, {"value": "b", "label": "B"}],
+                )
             ]
         },
         {
             "questions": [
-                {
-                    "id": "q",
-                    "kind": "single_choice",
-                    "prompt": "Options",
-                    "options": [{"value": "a"}, {"value": "b", "label": "B"}],
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "single_choice",
-                    "prompt": "Options",
-                    "options": [
+                _question(
+                    "single_choice",
+                    "Options",
+                    options=[
                         {"value": "a", "label": "A", "extra": True},
                         {"value": "b", "label": "B"},
                     ],
-                }
+                )
             ]
         },
         {
             "questions": [
-                {
-                    "id": "q",
-                    "kind": "single_choice",
-                    "prompt": "Default",
-                    "options": [
-                        {"value": "a", "label": "A"},
-                        {"value": "b", "label": "B"},
-                    ],
-                    "default": "unknown",
-                }
+                _question("single_choice", "Default", options=_ab_options(), default="unknown")
             ]
         },
         {
             "questions": [
-                {
-                    "id": "q",
-                    "kind": "multiple_choice",
-                    "prompt": "Default",
-                    "options": [
-                        {"value": "a", "label": "A"},
-                        {"value": "b", "label": "B"},
-                    ],
-                    "min_selections": 2,
-                    "max_selections": 2,
-                    "default": ["a"],
-                }
+                _question(
+                    "multiple_choice",
+                    "Default",
+                    options=_ab_options(),
+                    min_selections=2,
+                    max_selections=2,
+                    default=["a"],
+                )
             ]
         },
         {
             "questions": [
-                {
-                    "id": "q",
-                    "kind": "multiple_choice",
-                    "prompt": "Default",
-                    "options": [
-                        {"value": "a", "label": "A"},
-                        {"value": "b", "label": "B"},
-                    ],
-                    "default": "a",
-                }
+                _question("multiple_choice", "Default", options=_ab_options(), default="a")
             ]
         },
+        {"questions": [_question("text", "Default", min_length=2, max_length=3, default="x")]},
+        {"questions": [_question("number", "Step", step=0)]},
+        {"questions": [_question("number", "Integer", integer_only=True, default=1.5)]},
+        {"questions": [_question("number", "Minimum", minimum=2, default=1)]},
+        {"questions": [_question("number", "Maximum", maximum=2, default=3)]},
+        {"questions": [_question("number", "Step", step=2, default=3)]},
+        {"questions": [_question("date", "Date", minimum="2026-08-02", maximum="2026-08-01")]},
+        {"questions": [_question("date", "Date", minimum="2026-08-02", default="2026-08-01")]},
+        {"questions": [_question("date", "Date", maximum="2026-08-01", default="2026-08-02")]},
+        {"questions": [_question("scale", "Scale", minimum=1, maximum=5, step=0)]},
+        {"questions": [_question("ranking", "Rank", options=_ab_options(), default=["unknown"])]},
         {
             "questions": [
-                {
-                    "id": "q",
-                    "kind": "text",
-                    "prompt": "Default",
-                    "min_length": 2,
-                    "max_length": 3,
-                    "default": "x",
-                }
+                _question(
+                    "ranking",
+                    "Rank",
+                    options=_ab_options(),
+                    min_ranked=2,
+                    max_ranked=2,
+                    default=["a"],
+                )
             ]
         },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "number",
-                    "prompt": "Step",
-                    "step": 0,
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "number",
-                    "prompt": "Integer",
-                    "integer_only": True,
-                    "default": 1.5,
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "number",
-                    "prompt": "Minimum",
-                    "minimum": 2,
-                    "default": 1,
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "number",
-                    "prompt": "Maximum",
-                    "maximum": 2,
-                    "default": 3,
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "number",
-                    "prompt": "Step",
-                    "step": 2,
-                    "default": 3,
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "date",
-                    "prompt": "Date",
-                    "minimum": "2026-08-02",
-                    "maximum": "2026-08-01",
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "date",
-                    "prompt": "Date",
-                    "minimum": "2026-08-02",
-                    "default": "2026-08-01",
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "date",
-                    "prompt": "Date",
-                    "maximum": "2026-08-01",
-                    "default": "2026-08-02",
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "scale",
-                    "prompt": "Scale",
-                    "minimum": 1,
-                    "maximum": 5,
-                    "step": 0,
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "ranking",
-                    "prompt": "Rank",
-                    "options": [
-                        {"value": "a", "label": "A"},
-                        {"value": "b", "label": "B"},
-                    ],
-                    "default": ["unknown"],
-                }
-            ]
-        },
-        {
-            "questions": [
-                {
-                    "id": "q",
-                    "kind": "ranking",
-                    "prompt": "Rank",
-                    "options": [
-                        {"value": "a", "label": "A"},
-                        {"value": "b", "label": "B"},
-                    ],
-                    "min_ranked": 2,
-                    "max_ranked": 2,
-                    "default": ["a"],
-                }
-            ]
-        },
+    ],
+    ids=[
+        "questions-not-array",
+        "questions-empty",
+        "question-not-object",
+        "kind-missing",
+        "kind-not-string",
+        "kind-unknown",
+        "id-format",
+        "prompt-missing",
+        "question-extra-field",
+        "prompt-not-string",
+        "required-not-bool",
+        "options-not-array",
+        "options-too-few",
+        "option-not-object",
+        "option-label-missing",
+        "option-extra-field",
+        "single-default-unknown",
+        "multiple-default-too-few",
+        "multiple-default-not-array",
+        "text-default-too-short",
+        "number-step-zero",
+        "integer-default-fraction",
+        "number-default-below",
+        "number-default-above",
+        "number-default-step",
+        "date-reversed-bounds",
+        "date-default-before",
+        "date-default-after",
+        "scale-step-zero",
+        "ranking-default-unknown",
+        "ranking-default-too-few",
     ],
 )
 def test_direct_invocation_rejects_malformed_and_invalid_defaults(
@@ -736,7 +607,7 @@ def test_direct_invocation_rejects_a_disabled_kind() -> None:
     _failure(
         _invoke(
             AskQuestionTool(enabled_kinds={"text"}),
-            {"questions": [{"id": "q", "kind": "confirm", "prompt": "Go?"}]},
+            {"questions": [_question("confirm", "Go?")]},
         ),
         "invalid_question",
     )
@@ -744,26 +615,10 @@ def test_direct_invocation_rejects_a_disabled_kind() -> None:
 
 def test_minimal_numeric_date_and_scale_questions_cover_normalized_defaults() -> None:
     questions: list[dict[str, Any]] = [
-        {"id": "number", "kind": "number", "prompt": "Number"},
-        {
-            "id": "date_min",
-            "kind": "date",
-            "prompt": "Minimum date",
-            "minimum": "2026-01-01",
-        },
-        {
-            "id": "date_max",
-            "kind": "date",
-            "prompt": "Maximum date",
-            "maximum": "2026-12-31",
-        },
-        {
-            "id": "scale",
-            "kind": "scale",
-            "prompt": "Scale",
-            "minimum": 1,
-            "maximum": 5,
-        },
+        _question("number", "Number", id="number"),
+        _question("date", "Minimum date", id="date_min", minimum="2026-01-01"),
+        _question("date", "Maximum date", id="date_max", maximum="2026-12-31"),
+        _question("scale", "Scale", id="scale", minimum=1, maximum=5),
     ]
     result = _invoke(AskQuestionTool(), {"questions": questions})
     assert isinstance(result, WaitingResult)
@@ -780,34 +635,28 @@ def test_minimal_numeric_date_and_scale_questions_cover_normalized_defaults() ->
 
 
 def test_core_rejects_multiple_custom_defaults_and_overlong_custom_default() -> None:
-    multiple = {
-        "id": "multiple",
-        "kind": "multiple_choice",
-        "prompt": "Multiple",
-        "options": [
-            {"value": "known-a", "label": "A"},
-            {"value": "known-b", "label": "B"},
-        ],
-        "allow_custom": True,
-        "max_selections": 3,
-        "default": ["custom-one", "custom-two"],
-    }
+    multiple = _question(
+        "multiple_choice",
+        "Multiple",
+        id="multiple",
+        options=[{"value": "known-a", "label": "A"}, {"value": "known-b", "label": "B"}],
+        allow_custom=True,
+        max_selections=3,
+        default=["custom-one", "custom-two"],
+    )
     _failure(
         _invoke(AskQuestionTool(), {"questions": [multiple]}),
         "invalid_question",
     )
 
-    single = {
-        "id": "single",
-        "kind": "single_choice",
-        "prompt": "Single",
-        "options": [
-            {"value": "known-a", "label": "A"},
-            {"value": "known-b", "label": "B"},
-        ],
-        "allow_custom": True,
-        "default": "custom-too-long",
-    }
+    single = _question(
+        "single_choice",
+        "Single",
+        id="single",
+        options=[{"value": "known-a", "label": "A"}, {"value": "known-b", "label": "B"}],
+        allow_custom=True,
+        default="custom-too-long",
+    )
     _failure(
         _invoke(AskQuestionTool(max_answer_chars=2), {"questions": [single]}),
         "invalid_question",
@@ -824,38 +673,14 @@ def test_core_rejects_multiple_custom_defaults_and_overlong_custom_default() -> 
 def test_core_accepts_numeric_default_without_step_and_rejects_scalar_types() -> None:
     accepted = _invoke(
         AskQuestionTool(),
-        {
-            "questions": [
-                {
-                    "id": "number",
-                    "kind": "number",
-                    "prompt": "Number",
-                    "default": 2,
-                }
-            ]
-        },
+        {"questions": [_question("number", "Number", id="number", default=2)]},
     )
     assert isinstance(accepted, WaitingResult)
 
     invalid_questions = (
-        {
-            "id": "text",
-            "kind": "text",
-            "prompt": "Txt",
-            "min_length": "one",
-        },
-        {
-            "id": "number",
-            "kind": "number",
-            "prompt": "Number",
-            "minimum": "zero",
-        },
-        {
-            "id": "date",
-            "kind": "date",
-            "prompt": "Date",
-            "minimum": "2026/01/01",
-        },
+        _question("text", "Txt", id="text", min_length="one"),
+        _question("number", "Number", id="number", minimum="zero"),
+        _question("date", "Date", id="date", minimum="2026/01/01"),
     )
     for question in invalid_questions:
         _failure(
@@ -885,36 +710,36 @@ def test_registry_rejects_structurally_invalid_arguments() -> None:
         {"questions": []},
         {
             "questions": [
-                {"id": "one", "kind": "confirm", "prompt": "First?"},
-                {"id": "two", "kind": "confirm", "prompt": "Second?"},
+                _question("confirm", "First?", id="one"),
+                _question("confirm", "Second?", id="two"),
             ]
         },
-        {"questions": [{"id": "bad id", "kind": "confirm", "prompt": "Go?"}]},
-        {"questions": [{"id": "valid\n", "kind": "confirm", "prompt": "Go?"}]},
+        {"questions": [_question("confirm", "Go?", id="bad id")]},
+        {"questions": [_question("confirm", "Go?", id="valid\n")]},
         {"questions": [{"id": "x", "kind": "unknown", "prompt": "Go?"}]},
-        {"questions": [{"id": "x", "kind": "text", "prompt": "123456789"}]},
-        {"questions": [{"id": "x", "kind": "text", "prompt": "Go?", "extra": 1}]},
-        {"questions": [{"id": "x", "kind": "single_choice", "prompt": "Go?"}]},
+        {"questions": [_question("text", "123456789", id="x")]},
+        {"questions": [_question("text", "Go?", id="x", extra=1)]},
+        {"questions": [_question("single_choice", "Go?", id="x")]},
         {
             "questions": [
-                {
-                    "id": "x",
-                    "kind": "single_choice",
-                    "prompt": "Go?",
-                    "options": [
+                _question(
+                    "single_choice",
+                    "Go?",
+                    id="x",
+                    options=[
                         {"value": "a", "label": "A"},
                         {"value": "b", "label": "B"},
                         {"value": "c", "label": "C"},
                     ],
-                }
+                )
             ]
         },
-        {"questions": [{"id": "x", "kind": "number", "prompt": "Go?", "step": 0}]},
-        {"questions": [{"id": "x", "kind": "date", "prompt": "Go?", "default": 1}]},
-        {"questions": [{"id": "x", "kind": "scale", "prompt": "Go?"}]},
-        {"questions": [{"id": "x", "kind": "ranking", "prompt": "Go?"}]},
-        {"questions": [{"id": "x", "kind": "confirm", "prompt": "Go?", "default": 1}]},
-        {"questions": [{"id": "x", "kind": "text", "prompt": "Go?"}], "extra": 1},
+        {"questions": [_question("number", "Go?", id="x", step=0)]},
+        {"questions": [_question("date", "Go?", id="x", default=1)]},
+        {"questions": [_question("scale", "Go?", id="x")]},
+        {"questions": [_question("ranking", "Go?", id="x")]},
+        {"questions": [_question("confirm", "Go?", id="x", default=1)]},
+        {"questions": [_question("text", "Go?", id="x")], "extra": 1},
     )
 
     async def validate() -> None:
@@ -929,81 +754,30 @@ def test_registry_rejects_structurally_invalid_arguments() -> None:
 @pytest.mark.parametrize(
     "questions",
     [
+        [_question("confirm", "One?", id="same"), _question("confirm", "Two?", id="same")],
         [
-            {"id": "same", "kind": "confirm", "prompt": "One?"},
-            {"id": "same", "kind": "confirm", "prompt": "Two?"},
+            _question(
+                "single_choice",
+                "Choose",
+                id="choice",
+                options=[{"value": "same", "label": "A"}, {"value": "same", "label": "B"}],
+            )
         ],
         [
-            {
-                "id": "choice",
-                "kind": "single_choice",
-                "prompt": "Choose",
-                "options": [
-                    {"value": "same", "label": "A"},
-                    {"value": "same", "label": "B"},
-                ],
-            }
+            _question(
+                "multiple_choice",
+                "Choose",
+                id="multi",
+                options=_ab_options(),
+                min_selections=2,
+                max_selections=1,
+            )
         ],
-        [
-            {
-                "id": "multi",
-                "kind": "multiple_choice",
-                "prompt": "Choose",
-                "options": [
-                    {"value": "a", "label": "A"},
-                    {"value": "b", "label": "B"},
-                ],
-                "min_selections": 2,
-                "max_selections": 1,
-            }
-        ],
-        [
-            {
-                "id": "text",
-                "kind": "text",
-                "prompt": "Text",
-                "min_length": 5,
-                "max_length": 4,
-            }
-        ],
-        [
-            {
-                "id": "number",
-                "kind": "number",
-                "prompt": "Number",
-                "minimum": 2,
-                "maximum": 1,
-            }
-        ],
-        [
-            {
-                "id": "date",
-                "kind": "date",
-                "prompt": "Date",
-                "minimum": "2026-02-30",
-            }
-        ],
-        [
-            {
-                "id": "scale",
-                "kind": "scale",
-                "prompt": "Scale",
-                "minimum": 5,
-                "maximum": 1,
-            }
-        ],
-        [
-            {
-                "id": "ranking",
-                "kind": "ranking",
-                "prompt": "Rank",
-                "options": [
-                    {"value": "a", "label": "A"},
-                    {"value": "b", "label": "B"},
-                ],
-                "max_ranked": 3,
-            }
-        ],
+        [_question("text", "Text", id="text", min_length=5, max_length=4)],
+        [_question("number", "Number", id="number", minimum=2, maximum=1)],
+        [_question("date", "Date", id="date", minimum="2026-02-30")],
+        [_question("scale", "Scale", id="scale", minimum=5, maximum=1)],
+        [_question("ranking", "Rank", id="ranking", options=_ab_options(), max_ranked=3)],
     ],
 )
 def test_direct_invocation_reports_semantic_failures(
@@ -1055,237 +829,131 @@ def test_question_response_classmethods_are_immutable_and_validate_identifiers()
         ([1], 10),
         (
             [
-                {"id": "same", "kind": "confirm", "prompt": "One", "required": True},
-                {"id": "same", "kind": "confirm", "prompt": "Two", "required": True},
+                _question("confirm", "One", id="same", required=True),
+                _question("confirm", "Two", id="same", required=True),
             ],
             10,
         ),
         ([{"kind": "confirm", "prompt": "Missing id", "required": True}], 10),
-        ([{"id": "bad id", "kind": "confirm", "prompt": "Bad", "required": True}], 10),
+        ([_question("confirm", "Bad", id="bad id", required=True)], 10),
         ([{"id": "q", "kind": "other", "prompt": "Bad", "required": True}], 10),
+        ([_question("confirm", "Extra", required=True, extra=True)], 10),
+        (
+            [_question("text", "Text", required=True, multiline=False, min_length=2, max_length=1)],
+            10,
+        ),
         (
             [
-                {
-                    "id": "q",
-                    "kind": "confirm",
-                    "prompt": "Extra",
-                    "required": True,
-                    "extra": True,
-                }
+                _question(
+                    "text", "Text", required=False, multiline=False, min_length=0, max_length=0
+                )
             ],
             10,
         ),
         (
             [
-                {
-                    "id": "q",
-                    "kind": "text",
-                    "prompt": "Text",
-                    "required": True,
-                    "multiline": False,
-                    "min_length": 2,
-                    "max_length": 1,
-                }
+                _question(
+                    "text", "Text", required=True, multiline=False, min_length=1, max_length=11
+                )
+            ],
+            10,
+        ),
+        (
+            [_question("date", "Date", required=True, minimum="2026-02-02", maximum="2026-02-01")],
+            10,
+        ),
+        ([_question("scale", "Scale", required=True, maximum=5, step=1)], 10),
+        ([_question("scale", "Scale", required=True, minimum=5, maximum=5, step=1)], 10),
+        (
+            [
+                _question(
+                    "number", "Number", required=True, integer_only=False, minimum=2, maximum=1
+                )
+            ],
+            10,
+        ),
+        ([_question("number", "Number", required=True, integer_only=False, step=0)], 10),
+        (
+            [
+                _question(
+                    "multiple_choice",
+                    "Multiple",
+                    required=True,
+                    options=[{"value": "a", "label": "A"}],
+                    allow_custom=False,
+                    min_selections=1,
+                    max_selections=1,
+                )
             ],
             10,
         ),
         (
             [
-                {
-                    "id": "q",
-                    "kind": "text",
-                    "prompt": "Text",
-                    "required": False,
-                    "multiline": False,
-                    "min_length": 0,
-                    "max_length": 0,
-                }
+                _question(
+                    "multiple_choice",
+                    "Multiple",
+                    required=True,
+                    options=[{"value": "same", "label": "A"}, {"value": "same", "label": "B"}],
+                    allow_custom=False,
+                    min_selections=1,
+                    max_selections=2,
+                )
             ],
             10,
         ),
         (
             [
-                {
-                    "id": "q",
-                    "kind": "text",
-                    "prompt": "Text",
-                    "required": True,
-                    "multiline": False,
-                    "min_length": 1,
-                    "max_length": 11,
-                }
+                _question(
+                    "multiple_choice",
+                    "Multiple",
+                    required=True,
+                    options=_ab_options(),
+                    allow_custom=False,
+                    min_selections=-1,
+                    max_selections=2,
+                )
             ],
             10,
         ),
         (
             [
-                {
-                    "id": "q",
-                    "kind": "date",
-                    "prompt": "Date",
-                    "required": True,
-                    "minimum": "2026-02-02",
-                    "maximum": "2026-02-01",
-                }
+                _question(
+                    "multiple_choice",
+                    "Multiple",
+                    required=True,
+                    options=_ab_options(),
+                    allow_custom=False,
+                    min_selections=2,
+                    max_selections=1,
+                )
             ],
             10,
         ),
         (
             [
-                {
-                    "id": "q",
-                    "kind": "scale",
-                    "prompt": "Scale",
-                    "required": True,
-                    "maximum": 5,
-                    "step": 1,
-                }
+                _question(
+                    "multiple_choice",
+                    "Multiple",
+                    required=False,
+                    options=_ab_options(),
+                    allow_custom=False,
+                    min_selections=0,
+                    max_selections=0,
+                )
             ],
             10,
         ),
         (
             [
-                {
-                    "id": "q",
-                    "kind": "scale",
-                    "prompt": "Scale",
-                    "required": True,
-                    "minimum": 5,
-                    "maximum": 5,
-                    "step": 1,
-                }
-            ],
-            10,
-        ),
-        (
-            [
-                {
-                    "id": "q",
-                    "kind": "number",
-                    "prompt": "Number",
-                    "required": True,
-                    "integer_only": False,
-                    "minimum": 2,
-                    "maximum": 1,
-                }
-            ],
-            10,
-        ),
-        (
-            [
-                {
-                    "id": "q",
-                    "kind": "number",
-                    "prompt": "Number",
-                    "required": True,
-                    "integer_only": False,
-                    "step": 0,
-                }
-            ],
-            10,
-        ),
-        (
-            [
-                {
-                    "id": "q",
-                    "kind": "multiple_choice",
-                    "prompt": "Multiple",
-                    "required": True,
-                    "options": [{"value": "a", "label": "A"}],
-                    "allow_custom": False,
-                    "min_selections": 1,
-                    "max_selections": 1,
-                }
-            ],
-            10,
-        ),
-        (
-            [
-                {
-                    "id": "q",
-                    "kind": "multiple_choice",
-                    "prompt": "Multiple",
-                    "required": True,
-                    "options": [
-                        {"value": "same", "label": "A"},
-                        {"value": "same", "label": "B"},
-                    ],
-                    "allow_custom": False,
-                    "min_selections": 1,
-                    "max_selections": 2,
-                }
-            ],
-            10,
-        ),
-        (
-            [
-                {
-                    "id": "q",
-                    "kind": "multiple_choice",
-                    "prompt": "Multiple",
-                    "required": True,
-                    "options": [
-                        {"value": "a", "label": "A"},
-                        {"value": "b", "label": "B"},
-                    ],
-                    "allow_custom": False,
-                    "min_selections": -1,
-                    "max_selections": 2,
-                }
-            ],
-            10,
-        ),
-        (
-            [
-                {
-                    "id": "q",
-                    "kind": "multiple_choice",
-                    "prompt": "Multiple",
-                    "required": True,
-                    "options": [
-                        {"value": "a", "label": "A"},
-                        {"value": "b", "label": "B"},
-                    ],
-                    "allow_custom": False,
-                    "min_selections": 2,
-                    "max_selections": 1,
-                }
-            ],
-            10,
-        ),
-        (
-            [
-                {
-                    "id": "q",
-                    "kind": "multiple_choice",
-                    "prompt": "Multiple",
-                    "required": False,
-                    "options": [
-                        {"value": "a", "label": "A"},
-                        {"value": "b", "label": "B"},
-                    ],
-                    "allow_custom": False,
-                    "min_selections": 0,
-                    "max_selections": 0,
-                }
-            ],
-            10,
-        ),
-        (
-            [
-                {
-                    "id": "q",
-                    "kind": "multiple_choice",
-                    "prompt": "Multiple",
-                    "required": True,
-                    "options": [
-                        {"value": "a", "label": "A"},
-                        {"value": "b", "label": "B"},
-                    ],
-                    "allow_custom": False,
-                    "min_selections": 1,
-                    "max_selections": 3,
-                }
+                _question(
+                    "multiple_choice",
+                    "Multiple",
+                    required=True,
+                    options=_ab_options(),
+                    allow_custom=False,
+                    min_selections=1,
+                    max_selections=3,
+                )
             ],
             10,
         ),
@@ -1313,28 +981,9 @@ def test_question_request_validates_its_root_values_and_optional_constraints() -
         "request",
         10,
         (
-            {
-                "id": "number",
-                "kind": "number",
-                "prompt": "Number",
-                "required": True,
-                "integer_only": False,
-            },
-            {
-                "id": "date",
-                "kind": "date",
-                "prompt": "Date",
-                "required": True,
-            },
-            {
-                "id": "scale",
-                "kind": "scale",
-                "prompt": "Scale",
-                "required": True,
-                "minimum": 1,
-                "maximum": 5,
-                "step": 1,
-            },
+            _question("number", "Number", id="number", required=True, integer_only=False),
+            _question("date", "Date", id="date", required=True),
+            _question("scale", "Scale", id="scale", required=True, minimum=1, maximum=5, step=1),
         ),
     )
     assert len(minimal.questions) == 3
@@ -1344,14 +993,7 @@ def test_question_request_preserves_and_enforces_host_capability_limits() -> Non
     request = QuestionRequest(
         "request",
         20,
-        (
-            {
-                "id": "confirm",
-                "kind": "confirm",
-                "prompt": "Go?",
-                "required": True,
-            },
-        ),
+        (_question("confirm", "Go?", id="confirm", required=True),),
         enabled_kinds=("confirm", "text"),
         max_questions=1,
         max_options=2,
@@ -1394,12 +1036,7 @@ def test_question_request_preserves_and_enforces_host_capability_limits() -> Non
 
 
 def test_question_request_rechecks_question_count_kind_and_display_limits() -> None:
-    confirm = {
-        "id": "confirm",
-        "kind": "confirm",
-        "prompt": "Go?",
-        "required": True,
-    }
+    confirm = _question("confirm", "Go?", id="confirm", required=True)
     with pytest.raises(ValueError, match="max_questions"):
         QuestionRequest(
             "request",
@@ -1418,48 +1055,45 @@ def test_question_request_rechecks_question_count_kind_and_display_limits() -> N
     display_cases = (
         {**confirm, "prompt": "long"},
         {**confirm, "description": "long"},
-        {
-            "id": "text",
-            "kind": "text",
-            "prompt": "Text",
-            "required": True,
-            "multiline": False,
-            "placeholder": "long",
-            "min_length": 0,
-            "max_length": 20,
-        },
-        {
-            "id": "scale",
-            "kind": "scale",
-            "prompt": "R",
-            "required": True,
-            "minimum": 1,
-            "maximum": 5,
-            "step": 1,
-            "minimum_label": "long",
-        },
-        {
-            "id": "choice",
-            "kind": "single_choice",
-            "prompt": "P",
-            "required": True,
-            "options": (
-                {"value": "a", "label": "long"},
-                {"value": "b", "label": "B"},
-            ),
-            "allow_custom": False,
-        },
-        {
-            "id": "choice",
-            "kind": "single_choice",
-            "prompt": "P",
-            "required": True,
-            "options": (
+        _question(
+            "text",
+            "Text",
+            id="text",
+            required=True,
+            multiline=False,
+            placeholder="long",
+            min_length=0,
+            max_length=20,
+        ),
+        _question(
+            "scale",
+            "R",
+            id="scale",
+            required=True,
+            minimum=1,
+            maximum=5,
+            step=1,
+            minimum_label="long",
+        ),
+        _question(
+            "single_choice",
+            "P",
+            id="choice",
+            required=True,
+            options=({"value": "a", "label": "long"}, {"value": "b", "label": "B"}),
+            allow_custom=False,
+        ),
+        _question(
+            "single_choice",
+            "P",
+            id="choice",
+            required=True,
+            options=(
                 {"value": "a", "label": "A", "description": "long"},
                 {"value": "b", "label": "B"},
             ),
-            "allow_custom": False,
-        },
+            allow_custom=False,
+        ),
     )
     for question in display_cases:
         with pytest.raises(ValueError, match=r"length|max_prompt_chars"):
@@ -1470,18 +1104,18 @@ def test_question_request_rechecks_question_count_kind_and_display_limits() -> N
                 max_prompt_chars=3,
             )
 
-    choice = {
-        "id": "choice",
-        "kind": "single_choice",
-        "prompt": "Pick",
-        "required": True,
-        "options": (
+    choice = _question(
+        "single_choice",
+        "Pick",
+        id="choice",
+        required=True,
+        options=(
             {"value": "a", "label": "A"},
             {"value": "b", "label": "B"},
             {"value": "c", "label": "C"},
         ),
-        "allow_custom": False,
-    }
+        allow_custom=False,
+    )
     with pytest.raises(ValueError, match="max_options"):
         QuestionRequest("request", 20, (choice,), max_options=2)
 
@@ -1601,18 +1235,8 @@ def test_validate_question_response_rejects_every_answer_boundary(
 def test_required_default_does_not_supply_an_answer_and_optional_can_be_omitted() -> None:
     request = _question_request(
         [
-            {
-                "id": "required",
-                "kind": "text",
-                "prompt": "Required",
-                "default": "hint only",
-            },
-            {
-                "id": "optional",
-                "kind": "confirm",
-                "prompt": "Optional",
-                "required": False,
-            },
+            _question("text", "Required", id="required", default="hint only"),
+            _question("confirm", "Optional", id="optional", required=False),
         ]
     )
     response = QuestionResponse.answered(request.request_id, "response-empty", {})
@@ -1630,21 +1254,10 @@ def test_required_default_does_not_supply_an_answer_and_optional_can_be_omitted(
 def test_global_answer_character_limit_applies_to_text_and_custom_values() -> None:
     request = _question_request(
         [
-            {
-                "id": "text",
-                "kind": "text",
-                "prompt": "Text",
-            },
-            {
-                "id": "choice",
-                "kind": "single_choice",
-                "prompt": "Choice",
-                "options": [
-                    {"value": "a", "label": "A"},
-                    {"value": "b", "label": "B"},
-                ],
-                "allow_custom": True,
-            },
+            _question("text", "Text", id="text"),
+            _question(
+                "single_choice", "Choice", id="choice", options=_ab_options(), allow_custom=True
+            ),
         ],
         max_answer_chars=4,
     )
@@ -1662,18 +1275,15 @@ def test_global_answer_character_limit_applies_to_text_and_custom_values() -> No
 def test_multiple_choice_allows_at_most_one_custom_value() -> None:
     request = _question_request(
         [
-            {
-                "id": "choice",
-                "kind": "multiple_choice",
-                "prompt": "Choose",
-                "options": [
-                    {"value": "known-a", "label": "A"},
-                    {"value": "known-b", "label": "B"},
-                ],
-                "allow_custom": True,
-                "min_selections": 1,
-                "max_selections": 3,
-            }
+            _question(
+                "multiple_choice",
+                "Choose",
+                id="choice",
+                options=[{"value": "known-a", "label": "A"}, {"value": "known-b", "label": "B"}],
+                allow_custom=True,
+                min_selections=1,
+                max_selections=3,
+            )
         ]
     )
     accepted = QuestionResponse.answered(
@@ -1694,26 +1304,26 @@ def test_multiple_choice_allows_at_most_one_custom_value() -> None:
 
 def test_known_option_values_are_not_limited_by_custom_text_limit() -> None:
     questions = [
-        {
-            "id": "single",
-            "kind": "single_choice",
-            "prompt": "Single",
-            "options": [
+        _question(
+            "single_choice",
+            "Single",
+            id="single",
+            options=[
                 {"value": "known-long-a", "label": "A"},
                 {"value": "known-long-b", "label": "B"},
             ],
-            "default": "known-long-a",
-        },
-        {
-            "id": "multiple",
-            "kind": "multiple_choice",
-            "prompt": "Multiple",
-            "options": [
+            default="known-long-a",
+        ),
+        _question(
+            "multiple_choice",
+            "Multiple",
+            id="multiple",
+            options=[
                 {"value": "known-long-a", "label": "A"},
                 {"value": "known-long-b", "label": "B"},
             ],
-            "default": ["known-long-a"],
-        },
+            default=["known-long-a"],
+        ),
     ]
     request = _question_request(questions, max_answer_chars=2)
     response = QuestionResponse.answered(
@@ -1785,15 +1395,15 @@ def test_response_message_canonical_json_escapes_lone_surrogates_for_utf8() -> N
         "request",
         4,
         (
-            {
-                "id": "text",
-                "kind": "text",
-                "prompt": "Text",
-                "required": True,
-                "multiline": False,
-                "min_length": 0,
-                "max_length": 4,
-            },
+            _question(
+                "text",
+                "Text",
+                id="text",
+                required=True,
+                multiline=False,
+                min_length=0,
+                max_length=4,
+            ),
         ),
     )
     response = QuestionResponse.answered(
@@ -1837,7 +1447,7 @@ def _question_checkpoint(
     tool_call_id: str = "call",
 ) -> Checkpoint:
     selected_arguments: Mapping[str, Any] = (
-        {"questions": [{"id": "confirm", "kind": "confirm", "prompt": "Go?"}]}
+        {"questions": [_question("confirm", "Go?", id="confirm")]}
         if arguments is None
         else arguments
     )
@@ -2023,7 +1633,7 @@ def test_extract_question_request_binds_snapshot_context_contract_and_assistant_
     changed_call = StructuredToolCall(
         "call:one",
         "AskQuestion",
-        {"questions": [{"id": "confirm", "kind": "confirm", "prompt": "Different?"}]},
+        {"questions": [_question("confirm", "Different?", id="confirm")]},
     )
     changed_history = (
         user_message,
@@ -2165,14 +1775,7 @@ def test_response_helpers_reject_wrong_types_and_overlong_cancellation() -> None
     request = QuestionRequest(
         "request",
         4,
-        (
-            {
-                "id": "confirm",
-                "kind": "confirm",
-                "prompt": "Confirm",
-                "required": True,
-            },
-        ),
+        (_question("confirm", "Confirm", id="confirm", required=True),),
     )
     response = QuestionResponse.cancelled("request", "response")
     with pytest.raises(TypeError, match="QuestionRequest"):
@@ -2210,15 +1813,7 @@ def test_numeric_answer_without_step_and_defensive_private_value_checks() -> Non
     request = QuestionRequest(
         "request",
         10,
-        (
-            {
-                "id": "number",
-                "kind": "number",
-                "prompt": "Number",
-                "required": True,
-                "integer_only": False,
-            },
-        ),
+        (_question("number", "Number", id="number", required=True, integer_only=False),),
     )
     assert (
         validate_question_response(
@@ -2241,14 +1836,9 @@ def test_numeric_answer_without_step_and_defensive_private_value_checks() -> Non
 
 
 def test_integer_only_questions_require_a_satisfiable_integer_domain() -> None:
-    impossible = {
-        "id": "integer",
-        "kind": "number",
-        "prompt": "Integer",
-        "minimum": 0.1,
-        "step": 1,
-        "integer_only": True,
-    }
+    impossible = _question(
+        "number", "Integer", id="integer", minimum=0.1, step=1, integer_only=True
+    )
     failure = _failure(
         _invoke(AskQuestionTool(), {"questions": [impossible]}),
         "invalid_question",
@@ -2262,15 +1852,15 @@ def test_integer_only_questions_require_a_satisfiable_integer_domain() -> None:
     with pytest.raises(ValueError, match="integer"):
         QuestionRequest("request", 20, (normalized,))
 
-    bounded = {
-        "id": "integer",
-        "kind": "number",
-        "prompt": "Integer",
-        "minimum": 0.1,
-        "maximum": 0.9,
-        "integer_only": True,
-        "required": True,
-    }
+    bounded = _question(
+        "number",
+        "Integer",
+        id="integer",
+        minimum=0.1,
+        maximum=0.9,
+        integer_only=True,
+        required=True,
+    )
     with pytest.raises(ValueError, match="integer"):
         QuestionRequest("request", 20, (bounded,))
 
@@ -2280,13 +1870,7 @@ def test_integral_float_integer_default_is_normalized_to_an_integer() -> None:
         AskQuestionTool(),
         {
             "questions": [
-                {
-                    "id": "integer",
-                    "kind": "number",
-                    "prompt": "Integer",
-                    "integer_only": True,
-                    "default": 1.0,
-                }
+                _question("number", "Integer", id="integer", integer_only=True, default=1.0)
             ]
         },
         through_registry=True,
@@ -2339,13 +1923,7 @@ def test_question_contract_metadata_covers_schema_and_host_validators() -> None:
 
 def test_unbounded_huge_integer_default_and_answer_do_not_overflow() -> None:
     huge = 10**1000
-    question = {
-        "id": "huge",
-        "kind": "number",
-        "prompt": "Huge integer",
-        "integer_only": True,
-        "default": huge,
-    }
+    question = _question("number", "Huge integer", id="huge", integer_only=True, default=huge)
 
     core_result = _invoke(
         AskQuestionTool(),
@@ -2365,13 +1943,7 @@ def test_unbounded_huge_integer_default_and_answer_do_not_overflow() -> None:
 
 def test_unserializable_huge_numeric_values_fail_without_leaking_json_errors() -> None:
     huge = 10**5000
-    raw_question = {
-        "id": "huge",
-        "kind": "number",
-        "prompt": "Huge integer",
-        "integer_only": True,
-        "default": huge,
-    }
+    raw_question = _question("number", "Huge integer", id="huge", integer_only=True, default=huge)
     failure = _failure(
         _invoke(AskQuestionTool(), {"questions": [raw_question]}),
         "invalid_question",
@@ -2388,15 +1960,7 @@ def test_unserializable_huge_numeric_values_fail_without_leaking_json_errors() -
     request = QuestionRequest(
         "request",
         20,
-        (
-            {
-                "id": "huge",
-                "kind": "number",
-                "prompt": "Huge integer",
-                "required": True,
-                "integer_only": True,
-            },
-        ),
+        (_question("number", "Huge integer", id="huge", required=True, integer_only=True),),
     )
     response = QuestionResponse.answered("request", "response", {"huge": huge})
     with pytest.raises(ValueError, match="JSON-serializable"):
@@ -2405,13 +1969,7 @@ def test_unserializable_huge_numeric_values_fail_without_leaking_json_errors() -
 
 def test_huge_integer_with_float_step_uses_exact_overflow_fallback() -> None:
     huge = 10**1000
-    question = {
-        "id": "huge",
-        "kind": "number",
-        "prompt": "Huge stepped integer",
-        "step": 1.0,
-        "default": huge,
-    }
+    question = _question("number", "Huge stepped integer", id="huge", step=1.0, default=huge)
 
     core_result = _invoke(
         AskQuestionTool(),
@@ -2430,15 +1988,15 @@ def test_huge_integer_with_float_step_uses_exact_overflow_fallback() -> None:
 
 
 def test_extreme_finite_step_alignment_does_not_overflow() -> None:
-    question = {
-        "id": "extreme",
-        "kind": "number",
-        "prompt": "Extreme finite number",
-        "minimum": -1e308,
-        "maximum": 1e308,
-        "step": 1,
-        "default": 1e308,
-    }
+    question = _question(
+        "number",
+        "Extreme finite number",
+        id="extreme",
+        minimum=-1e308,
+        maximum=1e308,
+        step=1,
+        default=1e308,
+    )
 
     core_result = _invoke(
         AskQuestionTool(),
@@ -2471,13 +2029,7 @@ def test_numeric_fallback_failures_are_controlled(
 
 
 def test_step_alignment_uses_exact_decimal_semantics() -> None:
-    base = {
-        "id": "number",
-        "kind": "number",
-        "prompt": "Precisely stepped number",
-        "minimum": 0,
-        "step": 1,
-    }
+    base = _question("number", "Precisely stepped number", id="number", minimum=0, step=1)
     invalid_default = {**base, "default": 1_000_000_000.5}
     _failure(
         _invoke(AskQuestionTool(), {"questions": [invalid_default]}),

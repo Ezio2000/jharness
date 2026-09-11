@@ -5,13 +5,10 @@ from collections import deque
 from typing import cast
 
 from jharness.kernel import (
-    Checkpoint,
     ContentPart,
     DeltaSink,
-    Event,
     EventKind,
     HistoryRewrite,
-    Invocation,
     Message,
     Model,
     ModelCapabilities,
@@ -33,6 +30,7 @@ from jharness.kernel import (
     ToolExecution,
     ToolSuccess,
 )
+from tests.support import collect_invocation
 
 
 class _ScriptModel(Model):
@@ -220,19 +218,12 @@ class _CancellationCatalog(ToolCatalog):
         return _CancellationBinding(call, self._spec, self._observed)
 
 
-async def _collect(invocation: Invocation) -> tuple[Checkpoint, list[Event]]:
-    events = invocation.events()
-    result_task = asyncio.create_task(invocation.result())
-    observed = [event async for event in events]
-    return await result_task, observed
-
-
 async def test_parallel_tool_finished_events_follow_physical_settlement_order() -> None:
     for _ in range(20):
         settlements: list[str] = []
         calls = (StructuredToolCall("a", "lookup"), StructuredToolCall("b", "lookup"))
         model = _ScriptModel((ModelResponse(calls), _final()))
-        checkpoint, events = await _collect(
+        checkpoint, events = await collect_invocation(
             Runtime(model=model, tools=_StaticProvider(_ParallelCatalog(settlements))).start(
                 (Message.user("go"),)
             )
@@ -299,7 +290,7 @@ async def test_insert_interruption_retries_history_reduction_before_model() -> N
         invocation.insert(Message.external("new context"))
 
     insert_task = asyncio.create_task(insert_after_reducer_starts())
-    checkpoint, events = await _collect(invocation)
+    checkpoint, events = await collect_invocation(invocation)
     await insert_task
     facts = [
         event.data["fact"]["kind"]

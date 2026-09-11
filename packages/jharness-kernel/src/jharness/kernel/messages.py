@@ -306,7 +306,7 @@ class Message:
         if role not in _ROLES:
             raise ValueError(f"unsupported message role: {role}")
         parts = expect_instance_tuple(self.parts, ContentPart, "message parts")
-        output = _expect_model_output(self.output, "assistant output")
+        output = validate_model_output(self.output, "assistant output")
         tool_call_id = expect_optional_str(self.tool_call_id, "tool_call_id")
         outcome = None if self.outcome is None else _expect_tool_outcome(self.outcome)
         object.__setattr__(self, "parts", parts)
@@ -459,7 +459,7 @@ def _validate_tool_message(
         raise ValueError("tool message requires outcome")
 
 
-def _expect_model_output(value: object, label: str) -> tuple[ModelOutputItem, ...]:
+def validate_model_output(value: object, label: str) -> tuple[ModelOutputItem, ...]:
     if not isinstance(value, tuple):
         raise TypeError(f"{label} must be a tuple")
     items = cast(tuple[object, ...], value)

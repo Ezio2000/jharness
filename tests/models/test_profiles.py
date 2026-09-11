@@ -42,9 +42,9 @@ def test_model_clients_share_constructor_validation(model_type: type[object]) ->
     assert configured.base_url == "https://provider.test"
     assert not hasattr(configured, "api_key")
     assert configured._api_key == "secret"
-    assert isinstance(configured._timeout, httpx.Timeout)
-    assert configured._timeout.connect == 10.0
-    assert configured._timeout.read == 60.0
+    assert isinstance(configured._transport.timeout, httpx.Timeout)
+    assert configured._transport.timeout.connect == 10.0
+    assert configured._transport.timeout.read == 60.0
 
     without_transport_timeout = constructor(
         base_url="https://provider.test",
@@ -52,7 +52,7 @@ def test_model_clients_share_constructor_validation(model_type: type[object]) ->
         model="model",
         timeout=None,
     )
-    assert without_transport_timeout._timeout is None
+    assert without_transport_timeout._transport.timeout is None
 
     for keywords, pattern in (
         ({"max_response_body_bytes": 0}, "max_response_body_bytes"),

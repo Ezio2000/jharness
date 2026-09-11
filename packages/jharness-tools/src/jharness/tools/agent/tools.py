@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -194,8 +195,8 @@ class AgentTool:
 
 
 @dataclass(frozen=True, slots=True, init=False)
-class AgentGetTool:
-    """Return the latest Host-owned snapshot without blocking."""
+class _AgentLookupTool(ABC):
+    """Shared configuration for tools that address an existing Agent."""
 
     backend: AgentBackend = field(repr=False)
     max_agent_id_chars: int
@@ -225,7 +226,18 @@ class AgentGetTool:
             max_error_message_chars,
         )
         _set_common(self, backend, limits)
-        object.__setattr__(self, "spec", _get_spec(limits))
+        object.__setattr__(self, "spec", self._make_spec(limits))
+
+    @abstractmethod
+    def _make_spec(self, limits: _OutputLimits) -> StructuredToolSpec: ...
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class AgentGetTool(_AgentLookupTool):
+    """Return the latest Host-owned snapshot without blocking."""
+
+    def _make_spec(self, limits: _OutputLimits) -> StructuredToolSpec:
+        return _get_spec(limits)
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         if context.cancel_requested:
@@ -243,38 +255,11 @@ class AgentGetTool:
 
 
 @dataclass(frozen=True, slots=True, init=False)
-class AgentWaitTool:
+class AgentWaitTool(_AgentLookupTool):
     """Wait durably for one background Agent without model polling."""
 
-    backend: AgentBackend = field(repr=False)
-    max_agent_id_chars: int
-    max_description_chars: int
-    max_result_chars: int
-    max_error_code_chars: int
-    max_error_message_chars: int
-    _limits: _OutputLimits = field(repr=False)
-    spec: StructuredToolSpec = field(repr=False)
-
-    def __init__(
-        self,
-        backend: AgentBackend,
-        *,
-        max_agent_id_chars: int = DEFAULT_MAX_AGENT_ID_CHARS,
-        max_description_chars: int = DEFAULT_MAX_DESCRIPTION_CHARS,
-        max_result_chars: int = DEFAULT_MAX_RESULT_CHARS,
-        max_error_code_chars: int = DEFAULT_MAX_ERROR_CODE_CHARS,
-        max_error_message_chars: int = DEFAULT_MAX_ERROR_MESSAGE_CHARS,
-    ) -> None:
-        backend = _backend(backend)
-        limits = _OutputLimits(
-            max_agent_id_chars,
-            max_description_chars,
-            max_result_chars,
-            max_error_code_chars,
-            max_error_message_chars,
-        )
-        _set_common(self, backend, limits)
-        object.__setattr__(self, "spec", _wait_spec(limits))
+    def _make_spec(self, limits: _OutputLimits) -> StructuredToolSpec:
+        return _wait_spec(limits)
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         if context.cancel_requested:
@@ -316,38 +301,11 @@ class AgentWaitTool:
 
 
 @dataclass(frozen=True, slots=True, init=False)
-class AgentCancelTool:
+class AgentCancelTool(_AgentLookupTool):
     """Request idempotent Host-owned cancellation for one Agent."""
 
-    backend: AgentBackend = field(repr=False)
-    max_agent_id_chars: int
-    max_description_chars: int
-    max_result_chars: int
-    max_error_code_chars: int
-    max_error_message_chars: int
-    _limits: _OutputLimits = field(repr=False)
-    spec: StructuredToolSpec = field(repr=False)
-
-    def __init__(
-        self,
-        backend: AgentBackend,
-        *,
-        max_agent_id_chars: int = DEFAULT_MAX_AGENT_ID_CHARS,
-        max_description_chars: int = DEFAULT_MAX_DESCRIPTION_CHARS,
-        max_result_chars: int = DEFAULT_MAX_RESULT_CHARS,
-        max_error_code_chars: int = DEFAULT_MAX_ERROR_CODE_CHARS,
-        max_error_message_chars: int = DEFAULT_MAX_ERROR_MESSAGE_CHARS,
-    ) -> None:
-        backend = _backend(backend)
-        limits = _OutputLimits(
-            max_agent_id_chars,
-            max_description_chars,
-            max_result_chars,
-            max_error_code_chars,
-            max_error_message_chars,
-        )
-        _set_common(self, backend, limits)
-        object.__setattr__(self, "spec", _cancel_spec(limits))
+    def _make_spec(self, limits: _OutputLimits) -> StructuredToolSpec:
+        return _cancel_spec(limits)
 
     async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
         if context.cancel_requested:
