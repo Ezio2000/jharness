@@ -82,9 +82,8 @@ async def test_freeform_tool_preserves_raw_input_and_rejects_structured_calls() 
             "properties": {"applied": {"type": "boolean"}},
         },
     )
-    async def apply_patch(call: FreeformToolCall, tool_context: ToolContext) -> ToolResult:
-        del tool_context
-        observed.append(call.input)
+    async def apply_patch(text: str) -> ToolResult:
+        observed.append(text)
         return SettledResult(
             ToolSuccess(
                 (ContentPart.text_part("applied"),),
@@ -252,14 +251,16 @@ async def test_function_tool_decorator_preserves_explicit_spec() -> None:
     @function_tool(
         name="sum",
         description="sum values",
-        input_schema={"type": "object"},
+        input_schema={
+            "type": "object",
+            "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+            "required": ["a", "b"],
+            "additionalProperties": False,
+        },
         execution=ToolExecution(read_only=True, idempotent=True),
     )
-    async def sum_tool(call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
-        assert call.arguments is not None
-        return SettledResult(
-            ToolSuccess((ContentPart.text_part(str(sum(call.arguments.values()))),))
-        )
+    async def sum_tool(a: int, b: int) -> int:
+        return a + b
 
     result = await sum_tool.invoke(StructuredToolCall("call", "sum", {"a": 1, "b": 2}), context())
     assert sum_tool.spec.name == "sum"
@@ -270,8 +271,8 @@ async def test_function_tool_decorator_preserves_explicit_spec() -> None:
 def test_function_tool_and_registry_reject_synchronous_implementations() -> None:
     spec = StructuredToolSpec("sync", "sync", {"type": "object"})
 
-    def sync_function(call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
-        return SettledResult(ToolSuccess((ContentPart.text_part("no"),)))
+    def sync_function() -> str:
+        return "no"
 
     with pytest.raises(TypeError, match="must be async"):
         FunctionTool(spec, cast(Any, sync_function))
@@ -281,7 +282,7 @@ def test_function_tool_and_registry_reject_synchronous_implementations() -> None
         spec: StructuredToolSpec
 
         def invoke(self, call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
-            return sync_function(call, tool_context)
+            return SettledResult(ToolSuccess((ContentPart.text_part(sync_function()),)))
 
     with pytest.raises(TypeError, match="must be async"):
         ToolRegistry((cast(Any, SyncTool(spec)),))
@@ -295,8 +296,8 @@ def test_tool_adapters_reject_invalid_values_and_policy_limits() -> None:
         execution=ToolExecution(read_only=True, idempotent=True),
     )
 
-    async def valid_function(call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
-        return SettledResult(ToolSuccess((ContentPart.text_part("ok"),)))
+    async def valid_function() -> str:
+        return "ok"
 
     with pytest.raises(TypeError, match="spec must be StructuredToolSpec"):
         FunctionTool(cast(Any, object()), valid_function)
@@ -308,7 +309,7 @@ def test_tool_adapters_reject_invalid_values_and_policy_limits() -> None:
         spec: object
 
         async def invoke(self, call: StructuredToolCall, tool_context: ToolContext) -> ToolResult:
-            return await valid_function(call, tool_context)
+            return SettledResult(ToolSuccess((ContentPart.text_part(await valid_function()),)))
 
     with pytest.raises(TypeError, match="spec must be RuntimeToolSpec"):
         ToolRegistry((cast(Any, InvalidSpecTool(object())),))

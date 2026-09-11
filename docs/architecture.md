@@ -129,6 +129,13 @@ configures retry and fallback composition, and owns credentials, authorization,
 isolation, observation, and backend lifecycle. Extensions compose around these ports;
 they do not replace the kernel state machine.
 
+Toolkit function adapters bind named business parameters or a single freeform string.
+Explicit `context_parameter` configuration injects a keyword-only `ToolContext`.
+Schemas remain host declarations; signature inspection only checks Python argument
+binding. JSON-compatible function returns become ordinary successful tool results,
+while native `ToolResult` values pass through unchanged. Neither adaptation changes
+the kernel execution port nor introduces a second lifecycle or persisted shape.
+
 Normative details live in the contracts:
 
 | Concern | Contract |

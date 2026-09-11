@@ -80,6 +80,12 @@ modalities are advertised independently by each model profile.
 Provider setup is covered in [model adapters](docs/model-adapters.md); additional
 runnable examples live in [`examples`](examples/).
 
+For business functions, `jharness.toolkit.function_tool` binds named arguments and
+converts strings or JSON-compatible return values into tool results. Native
+`ToolResult` values retain waiting, background, failure, and multimodal behavior.
+See the [function adapter guide](packages/jharness-toolkit/README.md#function-adapters)
+for explicit schemas and optional context injection.
+
 ## Durability
 
 Every durable boundary creates an immutable `Checkpoint`; `Invocation.result()` returns
