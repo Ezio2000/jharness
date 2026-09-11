@@ -15,35 +15,25 @@ from jharness.kernel import (
     ModelResponse,
     RunContext,
     Runtime,
-    SettledResult,
     StructuredToolCall,
-    StructuredToolSpec,
-    ToolContext,
-    ToolResult,
     ToolSuccess,
 )
-from jharness.toolkit import ToolRegistry
+from jharness.toolkit import ToolRegistry, function_tool
 
 
-class EchoTool:
-    spec = StructuredToolSpec(
-        "echo",
-        "Return the input text.",
-        {
-            "type": "object",
-            "required": ["text"],
-            "properties": {"text": {"type": "string"}},
-            "additionalProperties": False,
-        },
-    )
-
-    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
-        del context
-        arguments = call.arguments
-        if arguments is None:
-            raise ValueError("echo requires JSON object arguments")
-        text = str(arguments["text"])
-        return SettledResult(ToolSuccess((ContentPart.text_part(text),), {"text": text}))
+@function_tool(
+    name="echo",
+    description="Return the input text.",
+    input_schema={
+        "type": "object",
+        "required": ["text"],
+        "properties": {"text": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    output_schema={"type": "string"},
+)
+async def echo(text: str) -> str:
+    return text
 
 
 class DemoModel:
@@ -80,7 +70,7 @@ class DemoModel:
 
 
 async def main() -> None:
-    runtime = Runtime(model=DemoModel(), tools=ToolRegistry((EchoTool(),)))
+    runtime = Runtime(model=DemoModel(), tools=ToolRegistry((echo,)))
     invocation = runtime.start((Message.user("Say hello through a tool"),))
     events = [event async for event in invocation.events()]
     checkpoint = await invocation.result()

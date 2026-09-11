@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping
 from importlib.util import find_spec
-from typing import cast
+from typing import Any, cast
 
 
 def _load_required_types() -> tuple[object, ...]:
@@ -192,6 +194,55 @@ def _verify_provider_tool_presets() -> tuple[object, ...]:
     return specs
 
 
+async def _verify_function_adapters() -> None:
+    from jharness.kernel import (
+        FreeformToolCall,
+        RunContext,
+        SettledResult,
+        StructuredToolCall,
+        ToolContext,
+        ToolSuccess,
+    )
+    from jharness.toolkit import ToolRegistry, freeform_tool, function_tool
+
+    async def ignore_progress(value: Mapping[str, Any]) -> None:
+        del value
+
+    @function_tool(
+        name="greet",
+        description="Greet a user",
+        input_schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "string"},
+        context_parameter="ctx",
+    )
+    async def greet(name: str, *, ctx: ToolContext) -> str:
+        return f"{ctx.run.run_id}: hello {name}"
+
+    @freeform_tool(name="count_lines", description="Count text lines")
+    async def count_lines(text: str) -> dict[str, int]:
+        return {"lines": len(text.splitlines())}
+
+    context = ToolContext(RunContext("smoke", 1.0), ignore_progress, lambda: False)
+    catalog = await ToolRegistry((greet, count_lines)).open_catalog()
+    result = await catalog.bind(StructuredToolCall("greet-1", "greet", {"name": "world"})).invoke(
+        context
+    )
+    if not isinstance(result, SettledResult) or not isinstance(result.outcome, ToolSuccess):
+        raise TypeError("function adapter did not return a success result")
+    if result.outcome.structured_content != "smoke: hello world":
+        raise TypeError("function adapter argument binding or result adaptation differs")
+    lines = await catalog.bind(FreeformToolCall("lines-1", "count_lines", "first\nsecond")).invoke(
+        context
+    )
+    if lines.outcome.structured_content != {"lines": 2}:
+        raise TypeError("freeform adapter input or result adaptation differs")
+
+
 def main() -> None:
     """Reject leaked optional drivers and require every public smoke type."""
 
@@ -204,6 +255,7 @@ def main() -> None:
         raise TypeError("public API smoke targets must all be types")
     profiles = _load_profiles()
     presets = _verify_provider_tool_presets()
+    asyncio.run(_verify_function_adapters())
     print(
         "installed API ok: "
         f"types={len(public_types)} profiles={len(profiles)} presets={len(presets)}"

@@ -47,6 +47,15 @@ parallel schedule.
 Each allowed binding is invoked exactly once as one logical call. Tool
 decorators may perform internal retry but expose one result to the kernel.
 
+Python function adapters in `jharness.toolkit` accept named business arguments or one
+freeform string and normalize their return values before the kernel boundary. A string
+produces a success result containing that exact text and string-valued
+`structured_content`. Other JSON-compatible values produce compact, key-sorted JSON
+text with unescaped Unicode and the corresponding structured value. Native
+`SettledResult` and `WaitingResult` values pass through unchanged. Output-schema
+validation applies after adaptation. These adapters use the existing tool-result
+schema; they do not add result kinds, durable fields, or state transitions.
+
 Implementation exceptions and output-schema failures normalize to failure
 outcomes. Runtime cancellation and hard deadline expiration remain control
 flow.

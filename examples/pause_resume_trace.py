@@ -18,41 +18,32 @@ from jharness.kernel import (
     RunContext,
     Runtime,
     StructuredToolCall,
-    StructuredToolSpec,
     Suspension,
     SuspensionSelector,
-    ToolContext,
     ToolResult,
     ToolWaiting,
     WaitingResult,
 )
 from jharness.kernel.diagnostics import build_trace, verify_trace
 from jharness.kernel.wire import decode_checkpoint, encode_checkpoint
-from jharness.toolkit import ToolRegistry
+from jharness.toolkit import ToolRegistry, function_tool
 
 
-class ExternalWaitTool:
-    spec = StructuredToolSpec(
-        "external_wait",
-        "Suspend until a host callback arrives.",
-        {
-            "type": "object",
-            "required": ["wait_id"],
-            "properties": {"wait_id": {"type": "string", "minLength": 1}},
-            "additionalProperties": False,
-        },
+@function_tool(
+    name="external_wait",
+    description="Suspend until a host callback arrives.",
+    input_schema={
+        "type": "object",
+        "required": ["wait_id"],
+        "properties": {"wait_id": {"type": "string", "minLength": 1}},
+        "additionalProperties": False,
+    },
+)
+async def external_wait(wait_id: str) -> ToolResult:
+    return WaitingResult(
+        ToolWaiting((ContentPart.text_part(f"waiting for {wait_id}"),)),
+        Suspension("external_callback", "external_wait", wait_id),
     )
-
-    async def invoke(self, call: StructuredToolCall, context: ToolContext) -> ToolResult:
-        del context
-        arguments = call.arguments
-        if arguments is None:
-            raise ValueError("wait requires JSON object arguments")
-        wait_id = str(arguments["wait_id"])
-        return WaitingResult(
-            ToolWaiting((ContentPart.text_part(f"waiting for {wait_id}"),)),
-            Suspension("external_callback", "external_wait", wait_id),
-        )
 
 
 class DemoModel:
@@ -86,7 +77,7 @@ async def observe(invocation: Invocation) -> tuple[Checkpoint, tuple[Event, ...]
 
 
 async def main() -> None:
-    runtime = Runtime(model=DemoModel(), tools=ToolRegistry((ExternalWaitTool(),)))
+    runtime = Runtime(model=DemoModel(), tools=ToolRegistry((external_wait,)))
     paused, paused_events = await observe(runtime.start((Message.user("start external job"),)))
     restored = decode_checkpoint(encode_checkpoint(paused))
     paused_trace = build_trace(paused_events, "start")

@@ -33,6 +33,17 @@ def test_repository_root_exports_all_supported_backends() -> None:
     }
 
 
+def test_function_adapters_share_one_business_callable_type() -> None:
+    assert {
+        "FunctionTool",
+        "FreeformFunctionTool",
+        "ToolFunction",
+        "function_tool",
+        "freeform_tool",
+    } <= set(toolkit.__all__)
+    assert not hasattr(toolkit, "FreeformToolFunction")
+
+
 def test_repository_base_import_and_embedded_backends_need_no_optional_drivers() -> None:
     program = """
 import asyncio

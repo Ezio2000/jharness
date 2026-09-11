@@ -5,7 +5,6 @@ from jharness.toolkit.registry import ToolRegistry
 from jharness.toolkit.tool import (
     FreeformFunctionTool,
     FreeformTool,
-    FreeformToolFunction,
     FunctionTool,
     Tool,
     ToolFunction,
@@ -17,7 +16,6 @@ __all__ = [
     "CircuitBreakingTool",
     "FreeformFunctionTool",
     "FreeformTool",
-    "FreeformToolFunction",
     "FunctionTool",
     "RetryExhaustedError",
     "RetryingTool",

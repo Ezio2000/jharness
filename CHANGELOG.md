@@ -6,6 +6,21 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Changed
+
+- Reworked `FunctionTool` / `function_tool` to bind named business parameters and
+  `FreeformFunctionTool` / `freeform_tool` to accept one unmodified text parameter.
+  Async functions may return JSON-compatible values or native `ToolResult` values;
+  ordinary results are normalized to success content and structured data.
+- Added explicit keyword-only context injection through `context_parameter`.
+  Function signatures are checked without deriving schemas or coercing arguments.
+
+### Removed
+
+- Removed call-object callback signatures from function adapters and the redundant
+  `FreeformToolFunction` alias. Both adapters use the business-function `ToolFunction`
+  type; no callback-signature detection or compatibility dispatch remains.
+
 ## [0.9.0] - 2026-08-30
 
 ### Changed
