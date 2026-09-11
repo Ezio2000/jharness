@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from time import time
 
@@ -8,6 +9,7 @@ import pytest
 
 from jharness.kernel import (
     ContentPart,
+    DeltaSink,
     ModelContentDelta,
     ModelDelta,
     ModelError,
@@ -17,6 +19,7 @@ from jharness.kernel import (
 )
 from jharness.models._http import (
     ModelErrorPolicy,
+    ModelTransport,
     invoke_json_model,
     invoke_sse_model,
     iter_server_sent_events,
@@ -43,19 +46,45 @@ def _decoded_response(_value: Mapping[str, object]) -> ModelResponse:
     return ModelResponse(output=(ContentPart.text_part("ok"),))
 
 
+async def _json(transport: ModelTransport, *, context: RunContext | None = None) -> ModelResponse:
+    return await invoke_json_model(
+        transport=transport,
+        context=RunContext("run-1", time()) if context is None else context,
+        url="https://provider.test/model",
+        payload=dict,
+        headers=lambda _body: {},
+        decode=_decoded_response,
+        errors=_POLICY,
+        response_shape_error="response must be an object",
+    )
+
+
+async def _sse(
+    transport: ModelTransport,
+    *,
+    context: RunContext | None = None,
+    decode_frame: Callable[[str | None, str], tuple[bool, Sequence[ModelDelta]]] = (
+        lambda _event, _data: (True, ())
+    ),
+    emit_delta: DeltaSink | None = None,
+) -> ModelResponse:
+    return await invoke_sse_model(
+        transport=transport,
+        context=RunContext("run-1", time()) if context is None else context,
+        url="https://provider.test/model",
+        payload=dict,
+        headers=lambda _body: {},
+        decode_frame=decode_frame,
+        completed_response=lambda: _decoded_response({}),
+        emit_delta=emit_delta,
+        errors=_POLICY,
+        incomplete_error="stream incomplete",
+    )
+
+
 async def _invoke_json(handler: Callable[[httpx.Request], httpx.Response]) -> ModelResponse:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        return await invoke_json_model(
-            client=client,
-            timeout=None,
-            context=RunContext("run-1", time()),
-            url="https://provider.test/model",
-            payload=dict,
-            headers=lambda _body: {},
-            decode=_decoded_response,
-            errors=_POLICY,
-            response_shape_error="response must be an object",
-        )
+        return await _json(transport=ModelTransport(client=client, timeout=None))
 
 
 def _assert_error(
@@ -186,18 +215,8 @@ async def test_sse_error_envelope_keeps_http_context() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ModelError) as caught:
-            await invoke_sse_model(
-                client=client,
-                timeout=None,
-                context=RunContext("run-1", time()),
-                url="https://provider.test/model",
-                payload=dict,
-                headers=lambda _body: {},
-                decode_frame=decode_frame,
-                completed_response=lambda: _decoded_response({}),
-                emit_delta=None,
-                errors=_POLICY,
-                incomplete_error="stream incomplete",
+            await _sse(
+                transport=ModelTransport(client=client, timeout=None), decode_frame=decode_frame
             )
 
     _assert_error(
@@ -293,20 +312,10 @@ async def test_sse_limit_failure_is_a_structured_model_error() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ModelError) as caught:
-            await invoke_sse_model(
-                client=client,
-                timeout=None,
-                context=RunContext("run-1", time()),
-                url="https://provider.test/model",
-                payload=dict,
-                headers=lambda _body: {},
-                decode_frame=lambda _event, _data: (True, ()),
-                completed_response=lambda: _decoded_response({}),
-                emit_delta=None,
-                errors=_POLICY,
-                incomplete_error="stream incomplete",
-                max_sse_line_bytes=8,
-                max_sse_event_bytes=16,
+            await _sse(
+                transport=ModelTransport(
+                    client=client, timeout=None, max_sse_line_bytes=8, max_sse_event_bytes=16
+                )
             )
 
     assert caught.value.info.code == "codec_error"
@@ -321,17 +330,8 @@ async def test_response_body_limit_stops_json_and_sse_error_accumulation() -> No
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(json_handler)) as client:
         with pytest.raises(ModelError) as json_error:
-            await invoke_json_model(
-                client=client,
-                timeout=None,
-                context=RunContext("run-1", time()),
-                url="https://provider.test/model",
-                payload=dict,
-                headers=lambda _body: {},
-                decode=_decoded_response,
-                errors=_POLICY,
-                response_shape_error="response must be an object",
-                max_response_body_bytes=8,
+            await _json(
+                transport=ModelTransport(client=client, timeout=None, max_response_body_bytes=8)
             )
 
     assert json_error.value.info.code == "response_too_large"
@@ -346,19 +346,8 @@ async def test_response_body_limit_stops_json_and_sse_error_accumulation() -> No
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(error_handler)) as client:
         with pytest.raises(ModelError) as stream_error:
-            await invoke_sse_model(
-                client=client,
-                timeout=None,
-                context=RunContext("run-1", time()),
-                url="https://provider.test/model",
-                payload=dict,
-                headers=lambda _body: {},
-                decode_frame=lambda _event, _data: (True, ()),
-                completed_response=lambda: _decoded_response({}),
-                emit_delta=None,
-                errors=_POLICY,
-                incomplete_error="stream incomplete",
-                max_response_body_bytes=8,
+            await _sse(
+                transport=ModelTransport(client=client, timeout=None, max_response_body_bytes=8)
             )
 
     assert stream_error.value.info.code == "response_too_large"
@@ -372,26 +361,31 @@ class SinkFailure(ValueError):
     pass
 
 
-async def test_delta_sink_failure_propagates_unchanged_and_closes_response() -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SinkFailure("sink failed"),
+        httpx.ReadTimeout("sink timeout"),
+        ModelError(ModelErrorInfo("sink", "sink failed", retryable=False)),
+        asyncio.CancelledError(),
+    ],
+    ids=["value-error", "http-timeout", "model-error", "cancellation"],
+)
+async def test_delta_sink_failure_propagates_unchanged_and_closes_response(
+    failure: BaseException,
+) -> None:
     stream = ChunkedStream((b"data: chunk\n\n",))
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=stream, request=request)
 
-    failure = SinkFailure("sink failed")
-
     async def emit_delta(_delta: ModelDelta, /) -> None:
         raise failure
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(SinkFailure) as caught:
-            await invoke_sse_model(
-                client=client,
-                timeout=None,
-                context=RunContext("run-1", time()),
-                url="https://provider.test/model",
-                payload=dict,
-                headers=lambda _body: {},
+        with pytest.raises(type(failure)) as caught:
+            await _sse(
+                transport=ModelTransport(client=client, timeout=None),
                 decode_frame=lambda _event, _data: (
                     True,
                     (
@@ -402,14 +396,45 @@ async def test_delta_sink_failure_propagates_unchanged_and_closes_response() -> 
                         ),
                     ),
                 ),
-                completed_response=lambda: _decoded_response({}),
                 emit_delta=emit_delta,
-                errors=_POLICY,
-                incomplete_error="stream incomplete",
             )
 
     assert caught.value is failure
     assert stream.closed
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["json", "sse"])
+async def test_cancelled_request_closes_response_and_preserves_injected_client(
+    streaming: bool,
+) -> None:
+    reading = asyncio.Event()
+
+    class BlockingStream(ChunkedStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            reading.set()
+            await asyncio.Future[None]()
+            yield b""
+
+    stream = BlockingStream(())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = ModelTransport(client=client, timeout=None)
+        context = RunContext("run-1", time())
+        invocation = (
+            _sse(transport=transport, context=context)
+            if streaming
+            else _json(transport=transport, context=context)
+        )
+        task = asyncio.create_task(invocation)
+        await asyncio.wait_for(reading.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert stream.closed
+        assert not client.is_closed
 
 
 async def test_semantic_stream_overload_is_retryable_without_http_200_status() -> None:
@@ -421,18 +446,8 @@ async def test_semantic_stream_overload_is_retryable_without_http_200_status() -
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ModelError) as caught:
-            await invoke_sse_model(
-                client=client,
-                timeout=None,
-                context=RunContext("run-1", time()),
-                url="https://provider.test/model",
-                payload=dict,
-                headers=lambda _body: {},
-                decode_frame=decode_frame,
-                completed_response=lambda: _decoded_response({}),
-                emit_delta=None,
-                errors=_POLICY,
-                incomplete_error="stream incomplete",
+            await _sse(
+                transport=ModelTransport(client=client, timeout=None), decode_frame=decode_frame
             )
 
     assert caught.value.info.status_code is None
@@ -453,28 +468,14 @@ async def test_run_deadline_clamps_injected_client_timeout_and_short_circuits_ex
     started = time()
     context = RunContext("run-1", started, deadline=started + 0.5)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await invoke_json_model(
-            client=client,
-            timeout=httpx.Timeout(60.0, connect=10.0),
+        await _json(
+            transport=ModelTransport(client=client, timeout=httpx.Timeout(60.0, connect=10.0)),
             context=context,
-            url="https://provider.test/model",
-            payload=dict,
-            headers=lambda _body: {},
-            decode=_decoded_response,
-            errors=_POLICY,
-            response_shape_error="response must be an object",
         )
         with pytest.raises(ModelError) as caught:
-            await invoke_json_model(
-                client=client,
-                timeout=None,
+            await _json(
+                transport=ModelTransport(client=client, timeout=None),
                 context=RunContext("run-2", started, deadline=started - 1),
-                url="https://provider.test/model",
-                payload=dict,
-                headers=lambda _body: {},
-                decode=_decoded_response,
-                errors=_POLICY,
-                response_shape_error="response must be an object",
             )
 
     timeout_values = observed[0]

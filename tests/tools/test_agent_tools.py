@@ -42,6 +42,9 @@ from jharness.tools.agent import (
 from jharness.tools.agent import _schema as agent_schema
 from jharness.tools.agent import tools as agent_tools_module
 
+_AgentToolType = type[AgentTool | AgentGetTool | AgentWaitTool | AgentCancelTool]
+_ID_TOOLS = (("get", AgentGetTool), ("wait", AgentWaitTool), ("cancel", AgentCancelTool))
+
 
 @dataclass(slots=True)
 class _FakeBackend:
@@ -1196,18 +1199,14 @@ def test_agent_cancel_rejects_unacknowledged_nonterminal_snapshot() -> None:
     assert "acknowledge" in outcome.error.message
 
 
-@pytest.mark.parametrize("operation", ["get", "wait", "cancel"])
-def test_agent_id_tools_reject_wrong_snapshot_identity(operation: str) -> None:
+@pytest.mark.parametrize("operation,tool_type", _ID_TOOLS, ids=["get", "wait", "cancel"])
+def test_agent_id_tools_reject_wrong_snapshot_identity(
+    operation: str, tool_type: _AgentToolType
+) -> None:
     backend = _FakeBackend()
     backend.seed(AgentSnapshot("agent-1", "Inspect", "running", True))
     backend.force(operation, AgentSnapshot("agent-other", "Inspect", "running", True))
-    selected: Tool
-    if operation == "get":
-        selected = AgentGetTool(backend)
-    elif operation == "wait":
-        selected = AgentWaitTool(backend)
-    else:
-        selected = AgentCancelTool(backend)
+    selected = tool_type(backend)
     _failure(_invoke(selected, {"agent_id": "agent-1"}), "invalid_agent_snapshot")
 
 
@@ -1221,8 +1220,10 @@ def test_agent_id_tool_rejects_backend_snapshot_that_fails_contract_validation()
     )
 
 
-@pytest.mark.parametrize("operation", ["get", "wait", "cancel"])
-def test_agent_id_tools_reject_internally_inconsistent_snapshots(operation: str) -> None:
+@pytest.mark.parametrize("operation,tool_type", _ID_TOOLS, ids=["get", "wait", "cancel"])
+def test_agent_id_tools_reject_internally_inconsistent_snapshots(
+    operation: str, tool_type: _AgentToolType
+) -> None:
     backend = _FakeBackend()
     backend.seed(AgentSnapshot("agent-1", "Inspect", "running", True))
     backend.force(
@@ -1232,38 +1233,33 @@ def test_agent_id_tools_reject_internally_inconsistent_snapshots(operation: str)
             cancellation_requested=operation == "cancel",
         ),
     )
-    selected: Tool
-    if operation == "get":
-        selected = AgentGetTool(backend)
-    elif operation == "wait":
-        selected = AgentWaitTool(backend)
-    else:
-        selected = AgentCancelTool(backend)
+    selected = tool_type(backend)
     _failure(_invoke(selected, {"agent_id": "agent-1"}), "invalid_agent_snapshot")
 
 
-@pytest.mark.parametrize("operation", ["start", "get", "wait", "cancel"])
-def test_agent_tools_reject_backend_values_that_are_not_snapshots(operation: str) -> None:
+@pytest.mark.parametrize(
+    "operation,tool_type,arguments",
+    [
+        pytest.param(
+            "start",
+            AgentTool,
+            {"description": "Inspect", "prompt": "Inspect auth.", "background": True},
+            id="start",
+        ),
+        *(
+            pytest.param(operation, tool_type, {"agent_id": "agent-1"}, id=operation)
+            for operation, tool_type in _ID_TOOLS
+        ),
+    ],
+)
+def test_agent_tools_reject_backend_values_that_are_not_snapshots(
+    operation: str, tool_type: _AgentToolType, arguments: Mapping[str, Any]
+) -> None:
     backend = _FakeBackend()
     if operation != "start":
         backend.seed(AgentSnapshot("agent-1", "Inspect", "running", True))
     backend.force(operation, cast(AgentSnapshot, object()))
-    if operation == "start":
-        selected: Tool = AgentTool(backend)
-        arguments: Mapping[str, Any] = {
-            "description": "Inspect",
-            "prompt": "Inspect auth.",
-            "background": True,
-        }
-    elif operation == "get":
-        selected = AgentGetTool(backend)
-        arguments = {"agent_id": "agent-1"}
-    elif operation == "wait":
-        selected = AgentWaitTool(backend)
-        arguments = {"agent_id": "agent-1"}
-    else:
-        selected = AgentCancelTool(backend)
-        arguments = {"agent_id": "agent-1"}
+    selected = tool_type(backend)
     outcome = _failure(_invoke(selected, arguments), "invalid_agent_snapshot")
     assert outcome.error.message == "Agent backend must return an AgentSnapshot."
 
@@ -1351,17 +1347,13 @@ def test_cancel_requested_precedes_validation_and_never_calls_backend() -> None:
     assert backend.cancel_calls == []
 
 
-@pytest.mark.parametrize("operation", ["get", "wait", "cancel"])
-def test_agent_backend_errors_are_mapped_and_null_output_passes_registry(operation: str) -> None:
+@pytest.mark.parametrize("operation,tool_type", _ID_TOOLS, ids=["get", "wait", "cancel"])
+def test_agent_backend_errors_are_mapped_and_null_output_passes_registry(
+    operation: str, tool_type: _AgentToolType
+) -> None:
     backend = _FakeBackend()
     backend.fail(operation)
-    selected: Tool
-    if operation == "get":
-        selected = AgentGetTool(backend)
-    elif operation == "wait":
-        selected = AgentWaitTool(backend)
-    else:
-        selected = AgentCancelTool(backend)
+    selected = tool_type(backend)
     outcome = _failure(
         _invoke(
             selected,
@@ -1373,28 +1365,27 @@ def test_agent_backend_errors_are_mapped_and_null_output_passes_registry(operati
     assert outcome.error.message == f"{operation} failed safely"
 
 
-@pytest.mark.parametrize("operation", ["start", "get", "wait", "cancel"])
+@pytest.mark.parametrize(
+    "operation,tool_type,arguments",
+    [
+        pytest.param(
+            "start", AgentTool, {"description": "Inspect", "prompt": "Inspect auth."}, id="start"
+        ),
+        *(
+            pytest.param(operation, tool_type, {"agent_id": "agent-1"}, id=operation)
+            for operation, tool_type in _ID_TOOLS
+        ),
+    ],
+)
 def test_unexpected_backend_exceptions_are_normalized_without_leaking_details(
     operation: str,
+    tool_type: _AgentToolType,
+    arguments: Mapping[str, Any],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     backend = _FakeBackend()
     backend.crash(operation)
-    if operation == "start":
-        selected: Tool = AgentTool(backend)
-        arguments: Mapping[str, Any] = {
-            "description": "Inspect",
-            "prompt": "Inspect auth.",
-        }
-    elif operation == "get":
-        selected = AgentGetTool(backend)
-        arguments = {"agent_id": "agent-1"}
-    elif operation == "wait":
-        selected = AgentWaitTool(backend)
-        arguments = {"agent_id": "agent-1"}
-    else:
-        selected = AgentCancelTool(backend)
-        arguments = {"agent_id": "agent-1"}
+    selected = tool_type(backend)
     with caplog.at_level(logging.ERROR, logger="jharness.tools.agent.tools"):
         outcome = _failure(_invoke(selected, arguments), "agent_backend_error")
     assert outcome.error.message == ("The Host Agent backend failed while processing the request.")

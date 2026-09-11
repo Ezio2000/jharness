@@ -6,32 +6,22 @@ import os
 import shlex
 import shutil
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from jharness.kernel import (
-    ApprovalAllow,
-    ApprovalDecision,
-    ApprovalDeny,
-    ApprovalPolicy,
-    ApprovalRequest,
     Checkpoint,
     ContentPart,
-    DeltaSink,
     Event,
     EventKind,
-    Invocation,
     Limited,
     LimitReason,
     Message,
-    Model,
-    ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    RunContext,
     RunLimits,
     Runtime,
     StructuredToolCall,
@@ -41,41 +31,7 @@ from jharness.kernel import (
 )
 from jharness.toolkit import ToolRegistry
 from jharness.tools import BashTool
-
-ResponseFactory = Callable[[int, ModelRequest], ModelResponse]
-
-
-class _DeterministicModel(Model):
-    def __init__(self, respond: ResponseFactory) -> None:
-        self._respond = respond
-        self.turns = 0
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        return ModelCapabilities()
-
-    async def invoke(
-        self,
-        request: ModelRequest,
-        context: RunContext,
-        *,
-        stream: bool,
-        emit_delta: DeltaSink | None,
-    ) -> ModelResponse:
-        del context, stream, emit_delta
-        response = self._respond(self.turns, request)
-        self.turns += 1
-        return response
-
-
-class _AllowAll(ApprovalPolicy):
-    async def decide(self, requests: tuple[ApprovalRequest, ...]) -> tuple[ApprovalDecision, ...]:
-        return tuple(ApprovalAllow(request.call.id) for request in requests)
-
-
-class _DenyAll(ApprovalPolicy):
-    async def decide(self, requests: tuple[ApprovalRequest, ...]) -> tuple[ApprovalDecision, ...]:
-        return tuple(ApprovalDeny(request.call.id, "test denial") for request in requests)
+from tests.support import AllowAll, DenyAll, DeterministicModel, collect_invocation
 
 
 def _bash_path() -> str:
@@ -99,13 +55,6 @@ def _structured_success(message: Message) -> dict[str, object]:
 
 def _tool_messages(request: ModelRequest) -> list[Message]:
     return [message for message in request.messages if message.role == "tool"]
-
-
-async def _collect(invocation: Invocation) -> tuple[Checkpoint, list[Event]]:
-    events = invocation.events()
-    result_task = asyncio.create_task(invocation.result())
-    observed = [event async for event in events]
-    return await result_task, observed
 
 
 async def _wait_for_file(path: Path, *, timeout: float = 5.0) -> None:
@@ -222,13 +171,13 @@ def test_runtime_model_calls_bash_and_observes_result_before_final_response(
             return _final("handled Bash result")
         raise AssertionError("unexpected model turn")
 
-    model = _DeterministicModel(respond)
+    model = DeterministicModel(respond)
     checkpoint, events = asyncio.run(
-        _collect(
+        collect_invocation(
             Runtime(
                 model=model,
                 tools=ToolRegistry((BashTool(tmp_path, bash_path=_bash_path()),)),
-                approval_policy=_AllowAll(),
+                approval_policy=AllowAll(),
             ).start((Message.user("run a harmless diagnostic"),))
         )
     )
@@ -276,11 +225,11 @@ def test_runtime_bash_approval_deny_never_starts_or_changes_workspace(tmp_path: 
         raise AssertionError("unexpected model turn")
 
     checkpoint, events = asyncio.run(
-        _collect(
+        collect_invocation(
             Runtime(
-                model=_DeterministicModel(respond),
+                model=DeterministicModel(respond),
                 tools=ToolRegistry((BashTool(tmp_path, bash_path=_bash_path()),)),
-                approval_policy=_DenyAll(),
+                approval_policy=DenyAll(),
             ).start((Message.user("attempt a denied command"),))
         )
     )
@@ -333,11 +282,11 @@ def test_runtime_two_bash_calls_execute_strictly_serially(tmp_path: Path) -> Non
         raise AssertionError("unexpected model turn")
 
     checkpoint, events = asyncio.run(
-        _collect(
+        collect_invocation(
             Runtime(
-                model=_DeterministicModel(respond),
+                model=DeterministicModel(respond),
                 tools=ToolRegistry((BashTool(tmp_path, bash_path=_bash_path()),)),
-                approval_policy=_AllowAll(),
+                approval_policy=AllowAll(),
             ).start((Message.user("run two ordered commands"),))
         )
     )
@@ -397,7 +346,7 @@ def test_runtime_active_cancel_cleans_up_bash_descendants(tmp_path: Path) -> Non
 
     async def run() -> tuple[Checkpoint, list[Event]]:
         invocation = Runtime(
-            model=_DeterministicModel(respond),
+            model=DeterministicModel(respond),
             tools=ToolRegistry(
                 (
                     BashTool(
@@ -407,7 +356,7 @@ def test_runtime_active_cancel_cleans_up_bash_descendants(tmp_path: Path) -> Non
                     ),
                 )
             ),
-            approval_policy=_AllowAll(),
+            approval_policy=AllowAll(),
         ).start((Message.user("cancel the active command"),))
         events = invocation.events()
         result_task = asyncio.create_task(invocation.result())
@@ -464,11 +413,11 @@ def test_runtime_bash_root_exit_cleans_up_background_descendant(tmp_path: Path) 
         raise AssertionError("unexpected model turn")
 
     async def run() -> tuple[Checkpoint, list[Event]]:
-        checkpoint, events = await _collect(
+        checkpoint, events = await collect_invocation(
             Runtime(
-                model=_DeterministicModel(respond),
+                model=DeterministicModel(respond),
                 tools=ToolRegistry((BashTool(tmp_path, bash_path=_bash_path()),)),
-                approval_policy=_AllowAll(),
+                approval_policy=AllowAll(),
             ).start((Message.user("clean up a background child after Bash exits"),))
         )
         pid = int(started.read_text())
@@ -507,9 +456,9 @@ def test_runtime_deadline_cleans_up_bash_descendants_before_return(tmp_path: Pat
         raise AssertionError("the runtime deadline must stop before another model turn")
 
     async def run() -> tuple[Checkpoint, list[Event]]:
-        checkpoint, events = await _collect(
+        checkpoint, events = await collect_invocation(
             Runtime(
-                model=_DeterministicModel(respond),
+                model=DeterministicModel(respond),
                 tools=ToolRegistry(
                     (
                         BashTool(
@@ -520,7 +469,7 @@ def test_runtime_deadline_cleans_up_bash_descendants_before_return(tmp_path: Pat
                     )
                 ),
                 limits=RunLimits(timeout_seconds=3.0 if os.name == "nt" else 1.0),
-                approval_policy=_AllowAll(),
+                approval_policy=AllowAll(),
             ).start((Message.user("run until the invocation deadline"),))
         )
         await _wait_for_file(started)

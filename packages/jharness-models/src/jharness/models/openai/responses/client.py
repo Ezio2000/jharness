@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypedDict, Unpack
-
-import httpx
+from typing import Any, Unpack
 
 from jharness.kernel import (
     DeltaSink,
@@ -16,6 +14,7 @@ from jharness.kernel import (
     RunContext,
 )
 from jharness.models._http import (
+    ModelClientOptions,
     ModelErrorPolicy,
     decode_json_object,
     invoke_json_model,
@@ -40,15 +39,9 @@ _DEFAULT_IMAGE_RESPONSE_LIMIT = 64 * 1024 * 1024
 _REQUEST_ID_HEADERS = ("x-request-id", "request-id")
 
 
-class _OpenAIResponsesModelOptions(TypedDict, total=False):
+class _OpenAIResponsesModelOptions(ModelClientOptions, total=False):
     profile: OpenAIResponsesProfile | None
     artifact_store: OpenAIResponsesArtifactStore | None
-    timeout: float | httpx.Timeout | None
-    headers: Mapping[str, str] | None
-    client: httpx.AsyncClient | None
-    max_response_body_bytes: int
-    max_sse_line_bytes: int
-    max_sse_event_bytes: int
 
 
 class OpenAIResponsesModel:
@@ -88,12 +81,8 @@ class OpenAIResponsesModel:
         self.model = config.model
         self.profile = config.profile
         self.codec = OpenAIResponsesCodec(model=config.model, profile=config.profile)
-        self._timeout = config.timeout
-        self._max_response_body_bytes = config.max_response_body_bytes
-        self._max_sse_line_bytes = config.max_sse_line_bytes
-        self._max_sse_event_bytes = config.max_sse_event_bytes
+        self._transport = config.transport
         self._headers = dict(config.headers)
-        self._client = config.client
         self._artifact_store = artifact_store
         self._errors = ModelErrorPolicy(
             provider=config.profile.name,
@@ -131,8 +120,7 @@ class OpenAIResponsesModel:
         if stream:
             decoder = OpenAIResponsesStreamDecoder(self.codec, self.profile)
             response = await invoke_sse_model(
-                client=self._client,
-                timeout=self._timeout,
+                transport=self._transport,
                 context=context,
                 url=self._responses_url(),
                 payload=lambda: self.codec.encode_request(wire_request, stream=True),
@@ -148,14 +136,10 @@ class OpenAIResponsesModel:
                 emit_delta=emit_delta,
                 errors=self._errors,
                 incomplete_error="Responses stream ended before a terminal response event",
-                max_response_body_bytes=self._max_response_body_bytes,
-                max_sse_line_bytes=self._max_sse_line_bytes,
-                max_sse_event_bytes=self._max_sse_event_bytes,
             )
         else:
             response = await invoke_json_model(
-                client=self._client,
-                timeout=self._timeout,
+                transport=self._transport,
                 context=context,
                 url=self._responses_url(),
                 payload=lambda: self.codec.encode_request(wire_request, stream=False),
@@ -164,7 +148,6 @@ class OpenAIResponsesModel:
                 errors=self._errors,
                 response_shape_error="Responses response must be an object",
                 body_error_predicate=_is_transport_error_body,
-                max_response_body_bytes=self._max_response_body_bytes,
             )
         if artifact_store is None:
             return response

@@ -8,10 +8,8 @@ from typing import Any, cast
 import pytest
 
 from jharness.kernel import (
-    Checkpoint,
     ContentPart,
     DeltaSink,
-    Event,
     EventKind,
     Failed,
     Invocation,
@@ -36,6 +34,7 @@ from jharness.tools.interaction import (
     extract_question_request,
     resume_question,
 )
+from tests.support import collect_invocation
 
 
 def _questions() -> list[dict[str, Any]]:
@@ -233,13 +232,6 @@ class _MultipleQuestionCallsModel(Model):
         )
 
 
-async def _collect(invocation: Invocation) -> tuple[Checkpoint, list[Event]]:
-    events = invocation.events()
-    result_task = asyncio.create_task(invocation.result())
-    observed = [event async for event in events]
-    return await result_task, observed
-
-
 def _runtime(model: Model) -> Runtime:
     return Runtime(
         model=model,
@@ -251,7 +243,9 @@ def _runtime(model: Model) -> Runtime:
 def test_runtime_question_checkpoint_json_roundtrip_and_fresh_runtime_resume() -> None:
     initial_model = _TranscriptQuestionModel(_questions())
     paused, initial_events = asyncio.run(
-        _collect(_runtime(initial_model).start((Message.user("Configure the implementation"),)))
+        collect_invocation(
+            _runtime(initial_model).start((Message.user("Configure the implementation"),))
+        )
     )
 
     assert isinstance(paused.snapshot.state, Suspended)
@@ -277,7 +271,7 @@ def test_runtime_question_checkpoint_json_roundtrip_and_fresh_runtime_resume() -
     )
     resumed_model = _TranscriptQuestionModel(_questions())
     resumed, resume_events = asyncio.run(
-        _collect(resume_question(_runtime(resumed_model), restored, response))
+        collect_invocation(resume_question(_runtime(resumed_model), restored, response))
     )
 
     assert resumed.snapshot.status == "completed"
@@ -367,7 +361,7 @@ def test_runtime_rejects_wrong_selector_and_response_request() -> None:
 
 def test_runtime_disallowed_multiple_question_calls_fail_before_tools_start() -> None:
     checkpoint, events = asyncio.run(
-        _collect(
+        collect_invocation(
             _runtime(_MultipleQuestionCallsModel()).start(
                 (Message.user("Ask exactly one question batch"),)
             )

@@ -18,6 +18,7 @@ from jharness.models.openai import (
     openai_responses_profile,
     openai_responses_web_search,
 )
+from tests.models.support import terminal_response
 
 
 def test_openai_responses_hosted_tool_declarations_use_stable_identities() -> None:
@@ -135,16 +136,8 @@ async def test_openai_responses_image_artifacts_are_required_only_when_explicitl
         requests.append(request)
         return httpx.Response(
             200,
-            json={
-                "id": "resp-1",
-                "object": "response",
-                "created_at": 1,
-                "completed_at": 2,
-                "status": "completed",
-                "error": None,
-                "incomplete_details": None,
-                "model": "gpt-test",
-                "output": [
+            json=terminal_response(
+                [
                     {
                         "id": "msg-1",
                         "type": "message",
@@ -158,9 +151,9 @@ async def test_openai_responses_image_artifacts_are_required_only_when_explicitl
                             }
                         ],
                     }
-                ],
-                "previous_response_id": None,
-                "tools": [],
+                ]
+            )
+            | {
                 "usage": {
                     "input_tokens": 1,
                     "input_tokens_details": {
@@ -170,7 +163,7 @@ async def test_openai_responses_image_artifacts_are_required_only_when_explicitl
                     "output_tokens": 1,
                     "total_tokens": 2,
                     "output_tokens_details": {"reasoning_tokens": 0},
-                },
+                }
             },
             request=request,
         )

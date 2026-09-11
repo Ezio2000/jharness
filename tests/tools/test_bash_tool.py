@@ -35,6 +35,49 @@ from jharness.tools.shell import bash as bash_module
 _POSIX_KILL_SIGNAL = cast(signal.Signals, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
+async def _run_bash(
+    *,
+    bash_path: str = "bash",
+    working_directory: str = "workspace",
+    cancelled: Callable[[], bool] = lambda: False,
+) -> _runner.CommandOutcome:
+    return await _runner.run_bash(
+        bash_path=bash_path,
+        command="true",
+        working_directory=working_directory,
+        environment=None,
+        timeout_seconds=1,
+        max_stdout_bytes=1,
+        max_stderr_bytes=1,
+        terminate_grace_seconds=1,
+        cancelled=cancelled,
+    )
+
+
+class _FinishedState:
+    def __init__(self, returncode: int | None) -> None:
+        self.process = SimpleNamespace(returncode=returncode)
+        self.captured = _output.CapturedOutput("", 0, False)
+
+    async def finish(
+        self, *, terminate_grace_seconds: float, force: bool
+    ) -> tuple[_output.CapturedOutput, _output.CapturedOutput]:
+        del terminate_grace_seconds
+        assert force is False
+        return self.captured, self.captured
+
+
+def _stub_process(monkeypatch: pytest.MonkeyPatch, state: object) -> None:
+    async def spawn(**_kwargs: object) -> object:
+        return object()
+
+    def create_state(_process: asyncio.subprocess.Process, _stdout: int, _stderr: int) -> object:
+        return state
+
+    monkeypatch.setattr(_runner, "_spawn_bash", spawn)
+    monkeypatch.setattr(_runner._RunningProcess, "create", create_state)
+
+
 async def _emit_progress(_progress: Mapping[str, Any]) -> None:
     return None
 
@@ -1490,15 +1533,9 @@ def test_spawn_cancellation_preserves_cancellation_when_spawn_fails(
 def test_run_bash_rejects_pre_spawn_cancellation(tmp_path: Path) -> None:
     with pytest.raises(_runner.CommandCancelled):
         asyncio.run(
-            _runner.run_bash(
+            _run_bash(
                 bash_path=str(tmp_path / "missing"),
-                command="true",
                 working_directory=str(tmp_path),
-                environment=None,
-                timeout_seconds=1,
-                max_stdout_bytes=1,
-                max_stderr_bytes=1,
-                terminate_grace_seconds=1,
                 cancelled=lambda: True,
             )
         )
@@ -1510,41 +1547,18 @@ def test_run_bash_maps_expected_wait_failures(
     state = SimpleNamespace(wait_task=SimpleNamespace(done=lambda: True))
     cleanups: list[object] = []
 
-    async def spawn(**_kwargs: object) -> Any:
-        return object()
-
     async def fail_wait(*_args: object, **_kwargs: object) -> Any:
         raise RuntimeError("wait failed")
 
     async def cleanup(selected: object) -> None:
         cleanups.append(selected)
 
-    def create_state(
-        _process: asyncio.subprocess.Process,
-        _stdout: int,
-        _stderr: int,
-    ) -> Any:
-        return state
-
     with monkeypatch.context() as scoped:
-        scoped.setattr(_runner, "_spawn_bash", spawn)
-        scoped.setattr(_runner._RunningProcess, "create", create_state)
+        _stub_process(scoped, state)
         scoped.setattr(_runner, "_wait_reason", fail_wait)
         scoped.setattr(_runner, "_settle_after_task_cancellation", cleanup)
         with pytest.raises(_runner.CommandExecutionFailed):
-            asyncio.run(
-                _runner.run_bash(
-                    bash_path="bash",
-                    command="true",
-                    working_directory="workspace",
-                    environment=None,
-                    timeout_seconds=1,
-                    max_stdout_bytes=1,
-                    max_stderr_bytes=1,
-                    terminate_grace_seconds=1,
-                    cancelled=lambda: False,
-                )
-            )
+            asyncio.run(_run_bash())
     assert cleanups == [state]
 
 
@@ -1558,48 +1572,24 @@ def test_run_bash_reaps_after_unexpected_wait_failures(
     state = SimpleNamespace(wait_task=WaitTask())
     cleanups: list[object] = []
 
-    async def spawn(**_kwargs: object) -> Any:
-        return object()
-
     async def fail_wait(*_args: object, **_kwargs: object) -> Any:
         raise ValueError("wait failed")
 
     async def cleanup(selected: object) -> None:
         cleanups.append(selected)
 
-    def create_state(
-        _process: asyncio.subprocess.Process,
-        _stdout: int,
-        _stderr: int,
-    ) -> Any:
-        return state
-
     with monkeypatch.context() as scoped:
-        scoped.setattr(_runner, "_spawn_bash", spawn)
-        scoped.setattr(_runner._RunningProcess, "create", create_state)
+        _stub_process(scoped, state)
         scoped.setattr(_runner, "_wait_reason", fail_wait)
         scoped.setattr(_runner, "_settle_after_task_cancellation", cleanup)
         with pytest.raises(ValueError, match="wait failed"):
-            asyncio.run(
-                _runner.run_bash(
-                    bash_path="bash",
-                    command="true",
-                    working_directory="workspace",
-                    environment=None,
-                    timeout_seconds=1,
-                    max_stdout_bytes=1,
-                    max_stderr_bytes=1,
-                    terminate_grace_seconds=1,
-                    cancelled=lambda: False,
-                )
-            )
+            asyncio.run(_run_bash())
     assert cleanups == [state]
 
 
 def test_run_bash_clamps_negative_clock_deltas(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = _output.CapturedOutput("", 0, False)
 
     class WaitTask:
         def done(self) -> bool:
@@ -1608,54 +1598,20 @@ def test_run_bash_clamps_negative_clock_deltas(
         def result(self) -> int:
             return 5
 
-    class State:
+    class State(_FinishedState):
         wait_task = WaitTask()
-        process = SimpleNamespace(returncode=5)
 
-        async def finish(
-            self,
-            *,
-            terminate_grace_seconds: float,
-            force: bool,
-        ) -> tuple[_output.CapturedOutput, _output.CapturedOutput]:
-            del terminate_grace_seconds
-            assert force is False
-            return captured, captured
-
-    state = State()
+    state = State(5)
     clock = iter((2.0, 3.0, 1.0))
-
-    async def spawn(**_kwargs: object) -> Any:
-        return object()
 
     async def exited(*_args: object, **_kwargs: object) -> str:
         return "exit"
 
-    def create_state(
-        _process: asyncio.subprocess.Process,
-        _stdout: int,
-        _stderr: int,
-    ) -> Any:
-        return state
-
     with monkeypatch.context() as scoped:
         scoped.setattr(_runner, "monotonic", lambda: next(clock))
-        scoped.setattr(_runner, "_spawn_bash", spawn)
-        scoped.setattr(_runner._RunningProcess, "create", create_state)
+        _stub_process(scoped, state)
         scoped.setattr(_runner, "_wait_reason", exited)
-        outcome = asyncio.run(
-            _runner.run_bash(
-                bash_path="bash",
-                command="true",
-                working_directory="workspace",
-                environment=None,
-                timeout_seconds=1,
-                max_stdout_bytes=1,
-                max_stderr_bytes=1,
-                terminate_grace_seconds=1,
-                cancelled=lambda: False,
-            )
-        )
+        outcome = asyncio.run(_run_bash())
     assert outcome.exit_code == 5
     assert outcome.duration_ms == 0
 
@@ -1663,23 +1619,9 @@ def test_run_bash_clamps_negative_clock_deltas(
 def test_run_bash_does_not_repeat_cleanup_after_full_settlement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = _output.CapturedOutput("", 0, False)
     cleanups: list[object] = []
 
-    class State:
-        process = SimpleNamespace(returncode=0)
-
-        async def finish(
-            self,
-            *,
-            terminate_grace_seconds: float,
-            force: bool,
-        ) -> tuple[_output.CapturedOutput, _output.CapturedOutput]:
-            del terminate_grace_seconds
-            assert force is False
-            return captured, captured
-
-    state = State()
+    state = _FinishedState(0)
     clock = iter((1.0, 2.0))
 
     def fail_after_settlement() -> float:
@@ -1688,68 +1630,28 @@ def test_run_bash_does_not_repeat_cleanup_after_full_settlement(
         except StopIteration as exc:
             raise RuntimeError("clock failed after settlement") from exc
 
-    async def spawn(**_kwargs: object) -> Any:
-        return object()
-
     async def exited(*_args: object, **_kwargs: object) -> str:
         return "exit"
 
     async def cleanup(selected: object) -> None:
         cleanups.append(selected)
 
-    def create_state(
-        _process: asyncio.subprocess.Process,
-        _stdout: int,
-        _stderr: int,
-    ) -> Any:
-        return state
-
     with monkeypatch.context() as scoped:
         scoped.setattr(_runner, "monotonic", fail_after_settlement)
-        scoped.setattr(_runner, "_spawn_bash", spawn)
-        scoped.setattr(_runner._RunningProcess, "create", create_state)
+        _stub_process(scoped, state)
         scoped.setattr(_runner, "_wait_reason", exited)
         scoped.setattr(_runner, "_settle_after_task_cancellation", cleanup)
         with pytest.raises(_runner.CommandExecutionFailed):
-            asyncio.run(
-                _runner.run_bash(
-                    bash_path="bash",
-                    command="true",
-                    working_directory="workspace",
-                    environment=None,
-                    timeout_seconds=1,
-                    max_stdout_bytes=1,
-                    max_stderr_bytes=1,
-                    terminate_grace_seconds=1,
-                    cancelled=lambda: False,
-                )
-            )
+            asyncio.run(_run_bash())
     assert cleanups == []
 
 
 def test_run_bash_rejects_an_exit_without_a_root_exit_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = _output.CapturedOutput("", 0, False)
     cleanups: list[object] = []
 
-    class State:
-        process = SimpleNamespace(returncode=None)
-
-        async def finish(
-            self,
-            *,
-            terminate_grace_seconds: float,
-            force: bool,
-        ) -> tuple[_output.CapturedOutput, _output.CapturedOutput]:
-            del terminate_grace_seconds
-            assert force is False
-            return captured, captured
-
-    state = State()
-
-    async def spawn(**_kwargs: object) -> Any:
-        return object()
+    state = _FinishedState(None)
 
     async def exited(*_args: object, **_kwargs: object) -> str:
         return "exit"
@@ -1757,30 +1659,10 @@ def test_run_bash_rejects_an_exit_without_a_root_exit_code(
     async def cleanup(selected: object) -> None:
         cleanups.append(selected)
 
-    def create_state(
-        _process: asyncio.subprocess.Process,
-        _stdout: int,
-        _stderr: int,
-    ) -> Any:
-        return state
-
     with monkeypatch.context() as scoped:
-        scoped.setattr(_runner, "_spawn_bash", spawn)
-        scoped.setattr(_runner._RunningProcess, "create", create_state)
+        _stub_process(scoped, state)
         scoped.setattr(_runner, "_wait_reason", exited)
         scoped.setattr(_runner, "_settle_after_task_cancellation", cleanup)
         with pytest.raises(_runner.CommandExecutionFailed, match="exit code"):
-            asyncio.run(
-                _runner.run_bash(
-                    bash_path="bash",
-                    command="true",
-                    working_directory="workspace",
-                    environment=None,
-                    timeout_seconds=1,
-                    max_stdout_bytes=1,
-                    max_stderr_bytes=1,
-                    terminate_grace_seconds=1,
-                    cancelled=lambda: False,
-                )
-            )
+            asyncio.run(_run_bash())
     assert cleanups == [state]

@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Se
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from time import time
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, TypedDict, TypeVar, cast
 
 import httpx
 
@@ -51,20 +51,66 @@ def _default_body_error_predicate(value: Mapping[str, object]) -> bool:
     return value.get("error") is not None
 
 
+class ModelClientOptions(TypedDict, total=False):
+    timeout: float | httpx.Timeout | None
+    headers: Mapping[str, str] | None
+    client: httpx.AsyncClient | None
+    max_response_body_bytes: int
+    max_sse_line_bytes: int
+    max_sse_event_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class ModelTransport:
+    """HTTP settings and response lifetime shared by JSON and SSE requests."""
+
+    client: httpx.AsyncClient | None
+    timeout: float | httpx.Timeout | None
+    max_response_body_bytes: int = _DEFAULT_MAX_RESPONSE_BODY_BYTES
+    max_sse_line_bytes: int = _DEFAULT_MAX_SSE_LINE_BYTES
+    max_sse_event_bytes: int = _DEFAULT_MAX_SSE_EVENT_BYTES
+
+    @asynccontextmanager
+    async def response(
+        self,
+        *,
+        context: RunContext,
+        url: str,
+        payload: PayloadFactory,
+        headers: HeadersFactory,
+        errors: ModelErrorPolicy,
+    ) -> AsyncGenerator[httpx.Response]:
+        response: httpx.Response | None = None
+        try:
+            body = payload()
+            async with (
+                managed_async_client(self.client, self.timeout) as http,
+                http.stream(
+                    "POST",
+                    url,
+                    headers=headers(body),
+                    json=body,
+                    timeout=_effective_timeout(self.timeout, context),
+                ) as response,
+            ):
+                await ensure_success_response(
+                    response, errors, max_response_body_bytes=self.max_response_body_bytes
+                )
+                yield response
+        except (ModelError, httpx.HTTPError, ValueError) as exc:
+            raise _model_error(exc, response, errors) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class ModelClientConfig(Generic[ProfileT]):
-    """Validated transport configuration shared by concrete provider clients."""
+    """Validated configuration shared by concrete provider clients."""
 
     base_url: str
     api_key: str = field(repr=False)
     model: str
     profile: ProfileT
-    timeout: float | httpx.Timeout | None
-    max_response_body_bytes: int
-    max_sse_line_bytes: int
-    max_sse_event_bytes: int
     headers: Mapping[str, str]
-    client: httpx.AsyncClient | None
+    transport: ModelTransport
 
 
 def model_client_config(
@@ -119,12 +165,14 @@ def model_client_config(
         api_key,
         model,
         profile,
-        timeout,
-        max_response_body_bytes,
-        max_sse_line_bytes,
-        max_sse_event_bytes,
         dict(cast(Mapping[str, str] | None, options.get("headers")) or {}),
-        cast(httpx.AsyncClient | None, options.get("client")),
+        ModelTransport(
+            cast(httpx.AsyncClient | None, options.get("client")),
+            timeout,
+            max_response_body_bytes,
+            max_sse_line_bytes,
+            max_sse_event_bytes,
+        ),
     )
 
 
@@ -164,8 +212,7 @@ class _ResponseBodyTooLarge(ValueError):
 
 async def invoke_json_model(
     *,
-    client: httpx.AsyncClient | None,
-    timeout: float | httpx.Timeout | None,
+    transport: ModelTransport,
     context: RunContext,
     url: str,
     payload: PayloadFactory,
@@ -174,53 +221,34 @@ async def invoke_json_model(
     errors: ModelErrorPolicy,
     response_shape_error: str,
     body_error_predicate: BodyErrorPredicate = _default_body_error_predicate,
-    max_response_body_bytes: int = _DEFAULT_MAX_RESPONSE_BODY_BYTES,
 ) -> ModelResponse:
     """Execute one JSON model request through the shared provider error boundary."""
 
-    response: httpx.Response | None = None
-    try:
-        body = payload()
-        async with (
-            managed_async_client(client, timeout) as http,
-            http.stream(
-                "POST",
-                url,
-                headers=headers(body),
-                json=body,
-                timeout=_effective_timeout(timeout, context),
-            ) as response,
-        ):
-            await ensure_success_response(
-                response,
-                errors,
-                max_response_body_bytes=max_response_body_bytes,
-            )
-            response_body = await _read_response_body(response, max_response_body_bytes)
-            value: object = json.loads(response_body)
-            if not isinstance(value, Mapping):
-                raise errors.codec_error(response_shape_error)
-            decoded = cast(Mapping[str, object], value)
-            if body_error_predicate(decoded):
-                raise ModelError(
-                    _body_error_info(
-                        decoded,
-                        errors,
-                        status_code=response.status_code,
-                        response_text="provider response error",
-                        request_id=response_request_id(response, errors.request_id_headers),
-                        metadata=response_error_metadata(response),
-                    )
+    async with transport.response(
+        context=context, url=url, payload=payload, headers=headers, errors=errors
+    ) as response:
+        response_body = await _read_response_body(response, transport.max_response_body_bytes)
+        value: object = json.loads(response_body)
+        if not isinstance(value, Mapping):
+            raise errors.codec_error(response_shape_error)
+        decoded = cast(Mapping[str, object], value)
+        if body_error_predicate(decoded):
+            raise ModelError(
+                _body_error_info(
+                    decoded,
+                    errors,
+                    status_code=response.status_code,
+                    response_text="provider response error",
+                    request_id=response_request_id(response, errors.request_id_headers),
+                    metadata=response_error_metadata(response),
                 )
-            return decode(decoded)
-    except (ModelError, httpx.HTTPError, ValueError) as exc:
-        raise _model_error(exc, response, errors) from exc
+            )
+        return decode(decoded)
 
 
 async def invoke_sse_model(
     *,
-    client: httpx.AsyncClient | None,
-    timeout: float | httpx.Timeout | None,
+    transport: ModelTransport,
     context: RunContext,
     url: str,
     payload: PayloadFactory,
@@ -230,15 +258,11 @@ async def invoke_sse_model(
     emit_delta: DeltaSink | None,
     errors: ModelErrorPolicy,
     incomplete_error: str,
-    max_response_body_bytes: int = _DEFAULT_MAX_RESPONSE_BODY_BYTES,
-    max_sse_line_bytes: int = _DEFAULT_MAX_SSE_LINE_BYTES,
-    max_sse_event_bytes: int = _DEFAULT_MAX_SSE_EVENT_BYTES,
 ) -> ModelResponse:
     """Execute one SSE model request and return its provider-assembled response."""
 
     steps = _decoded_sse_steps(
-        client=client,
-        timeout=timeout,
+        transport=transport,
         context=context,
         url=url,
         payload=payload,
@@ -247,9 +271,6 @@ async def invoke_sse_model(
         completed_response=completed_response,
         errors=errors,
         incomplete_error=incomplete_error,
-        max_response_body_bytes=max_response_body_bytes,
-        max_sse_line_bytes=max_sse_line_bytes,
-        max_sse_event_bytes=max_sse_event_bytes,
     )
     async with aclosing(steps):
         async for deltas, completed in steps:
@@ -263,8 +284,7 @@ async def invoke_sse_model(
 
 async def _decoded_sse_steps(
     *,
-    client: httpx.AsyncClient | None,
-    timeout: float | httpx.Timeout | None,
+    transport: ModelTransport,
     context: RunContext,
     url: str,
     payload: PayloadFactory,
@@ -273,44 +293,24 @@ async def _decoded_sse_steps(
     completed_response: Callable[[], ModelResponse],
     errors: ModelErrorPolicy,
     incomplete_error: str,
-    max_response_body_bytes: int,
-    max_sse_line_bytes: int,
-    max_sse_event_bytes: int,
 ) -> AsyncGenerator[tuple[Sequence[ModelDelta], ModelResponse | None]]:
     """Own provider resources while yielding outside the host sink boundary."""
 
-    response: httpx.Response | None = None
-    try:
-        body = payload()
-        async with (
-            managed_async_client(client, timeout) as http,
-            http.stream(
-                "POST",
-                url,
-                headers=headers(body),
-                json=body,
-                timeout=_effective_timeout(timeout, context),
-            ) as response,
+    async with transport.response(
+        context=context, url=url, payload=payload, headers=headers, errors=errors
+    ) as response:
+        async for frame in iter_server_sent_events(
+            response,
+            max_line_bytes=transport.max_sse_line_bytes,
+            max_event_bytes=transport.max_sse_event_bytes,
+            error=errors.codec_error,
         ):
-            await ensure_success_response(
-                response,
-                errors,
-                max_response_body_bytes=max_response_body_bytes,
-            )
-            async for frame in iter_server_sent_events(
-                response,
-                max_line_bytes=max_sse_line_bytes,
-                max_event_bytes=max_sse_event_bytes,
-                error=errors.codec_error,
-            ):
-                done, deltas = decode_frame(frame.event, frame.data)
-                completed = completed_response() if done else None
-                yield deltas, completed
-                if done:
-                    return
-            raise errors.codec_error(incomplete_error)
-    except (ModelError, httpx.HTTPError, ValueError) as exc:
-        raise _model_error(exc, response, errors) from exc
+            done, deltas = decode_frame(frame.event, frame.data)
+            completed = completed_response() if done else None
+            yield deltas, completed
+            if done:
+                return
+        raise errors.codec_error(incomplete_error)
 
 
 @asynccontextmanager

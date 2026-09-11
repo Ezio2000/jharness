@@ -1,29 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
 from typing import cast
 
 from jharness.kernel import (
-    ApprovalAllow,
-    ApprovalDecision,
-    ApprovalDeny,
-    ApprovalPolicy,
-    ApprovalRequest,
-    Checkpoint,
     ContentPart,
-    DeltaSink,
-    Event,
     EventKind,
-    Invocation,
     Message,
-    Model,
-    ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    RunContext,
     Runtime,
     StructuredToolCall,
     ToolFailure,
@@ -32,41 +20,7 @@ from jharness.kernel import (
 )
 from jharness.toolkit import ToolRegistry
 from jharness.tools import EditTool, ReadTool, WriteTool
-
-ResponseFactory = Callable[[int, ModelRequest], ModelResponse]
-
-
-class _DeterministicModel(Model):
-    def __init__(self, respond: ResponseFactory) -> None:
-        self._respond = respond
-        self.turns = 0
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        return ModelCapabilities()
-
-    async def invoke(
-        self,
-        request: ModelRequest,
-        context: RunContext,
-        *,
-        stream: bool,
-        emit_delta: DeltaSink | None,
-    ) -> ModelResponse:
-        del context, stream, emit_delta
-        response = self._respond(self.turns, request)
-        self.turns += 1
-        return response
-
-
-class _AllowAll(ApprovalPolicy):
-    async def decide(self, requests: tuple[ApprovalRequest, ...]) -> tuple[ApprovalDecision, ...]:
-        return tuple(ApprovalAllow(request.call.id) for request in requests)
-
-
-class _DenyAll(ApprovalPolicy):
-    async def decide(self, requests: tuple[ApprovalRequest, ...]) -> tuple[ApprovalDecision, ...]:
-        return tuple(ApprovalDeny(request.call.id, "test denial") for request in requests)
+from tests.support import AllowAll, DenyAll, DeterministicModel, collect_invocation
 
 
 def _final() -> ModelResponse:
@@ -94,13 +48,6 @@ def _last_visible_read_sha256(request: ModelRequest) -> str:
     assert len(digest) == 64
     assert all(character in "0123456789abcdef" for character in digest)
     return digest
-
-
-async def _collect(invocation: Invocation) -> tuple[Checkpoint, list[Event]]:
-    events = invocation.events()
-    result_task = asyncio.create_task(invocation.result())
-    observed = [event async for event in events]
-    return await result_task, observed
 
 
 def test_runtime_read_edit_read_hands_off_model_visible_sha256(tmp_path: Path) -> None:
@@ -145,11 +92,11 @@ def test_runtime_read_edit_read_hands_off_model_visible_sha256(tmp_path: Path) -
             return _final()
         raise AssertionError("unexpected model turn")
 
-    model = _DeterministicModel(respond)
+    model = DeterministicModel(respond)
     registry = ToolRegistry((ReadTool(tmp_path), EditTool(tmp_path)))
     checkpoint, _ = asyncio.run(
-        _collect(
-            Runtime(model=model, tools=registry, approval_policy=_AllowAll()).start(
+        collect_invocation(
+            Runtime(model=model, tools=registry, approval_policy=AllowAll()).start(
                 (Message.user("update note.txt"),)
             )
         )
@@ -210,11 +157,11 @@ def test_runtime_write_then_read_observes_created_content(tmp_path: Path) -> Non
 
     registry = ToolRegistry((WriteTool(tmp_path), ReadTool(tmp_path)))
     checkpoint, _ = asyncio.run(
-        _collect(
+        collect_invocation(
             Runtime(
-                model=_DeterministicModel(respond),
+                model=DeterministicModel(respond),
                 tools=registry,
-                approval_policy=_AllowAll(),
+                approval_policy=AllowAll(),
             ).start((Message.user("create and read a file"),))
         )
     )
@@ -261,11 +208,11 @@ def test_runtime_approval_deny_does_not_write_to_disk(tmp_path: Path) -> None:
         raise AssertionError("unexpected model turn")
 
     checkpoint, events = asyncio.run(
-        _collect(
+        collect_invocation(
             Runtime(
-                model=_DeterministicModel(respond),
+                model=DeterministicModel(respond),
                 tools=ToolRegistry((WriteTool(tmp_path),)),
-                approval_policy=_DenyAll(),
+                approval_policy=DenyAll(),
             ).start((Message.user("attempt a denied write"),))
         )
     )
@@ -315,11 +262,11 @@ def test_runtime_two_writes_are_serial_and_report_nonparallel_starts(tmp_path: P
         raise AssertionError("unexpected model turn")
 
     checkpoint, events = asyncio.run(
-        _collect(
+        collect_invocation(
             Runtime(
-                model=_DeterministicModel(respond),
+                model=DeterministicModel(respond),
                 tools=ToolRegistry((WriteTool(tmp_path),)),
-                approval_policy=_AllowAll(),
+                approval_policy=AllowAll(),
             ).start((Message.user("perform two writes"),))
         )
     )
